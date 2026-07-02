@@ -722,6 +722,32 @@ class AcadosNMPCNode(Node):
         err_xy = float(np.linalg.norm(self.x_cur[0:2] - start_ref[0:2]))
         err_z  = float(abs(self.x_cur[2] - start_ref[2]))
         v_norm = float(np.linalg.norm(self.x_cur[3:6]))
+        # gripper 两段式接近第一段:先飞到 box 正上方 grip_approach_z 的安全高度
+        # 并把水平位置对齐、悬停稳,再让下面的常规逻辑把目标切到 grip_z_low、
+        # 垂直下降过去。这样低空水平平移(会高度下冲)发生在远高于 box 的高度,
+        # 起落架不会在下冲时顶到 box;垂直下降段没有水平速度,也不会撞。
+        # 水平对齐要收得比 proximity 的 r_xy(0.15)更紧,保证垂直下降真的落在
+        # 吸附窗口内。
+        if (self.gripper_mode and not self.nmpc_started
+                and not self.grip_high_aligned):
+            high_ref = start_ref.copy()
+            high_ref[2] = self.grip_approach_z
+            self.pub_position_ref(high_ref)
+            hi_xy = float(np.linalg.norm(self.x_cur[0:2] - high_ref[0:2]))
+            hi_z = float(abs(self.x_cur[2] - high_ref[2]))
+            self.counter += 1
+            if self.counter % 50 == 0:
+                self.get_logger().info(
+                    f'Gripper approach (high): aligning over box at '
+                    f'z={self.grip_approach_z:.2f}m | xy={hi_xy:.3f}m '
+                    f'z_err={hi_z:.3f}m v={v_norm:.2f}m/s')
+            if hi_xy < 0.10 and hi_z < 0.20 and v_norm < 0.25:
+                self.grip_high_aligned = True
+                self.get_logger().info(
+                    'Gripper approach: aligned above box, descending '
+                    f'vertically to grip z={self.grip_z_low:.2f}m')
+            return
+
         if not self.nmpc_started:
             self.pub_position_ref(start_ref)
             self.counter += 1
