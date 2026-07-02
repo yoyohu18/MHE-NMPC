@@ -56,8 +56,12 @@ def build_ocp() -> AcadosOcp:
     ocp.cost.yref = np.zeros(ny)
     ocp.cost.yref_e = np.zeros(ny_e)
 
-    # 必须显式设置,否则 acados 会在 OCP 构建时报维度不一致的错
-    ocp.parameter_values = np.zeros(nx)
+    # 必须显式设置,否则 acados 会在 OCP 构建时报维度不一致的错。注意这不是
+    # 零——model.p 现在是 [xr(13); m(1)] 14维,质量这一维如果留 0 会在动力学
+    # 里被 1/m 除,直接除零崩掉。这里只是构建时的占位默认值,实际运行时
+    # acados_nmpc_node 每次 solve 前都会用当前质量估计覆盖(见 solve_nmpc),
+    # 这个默认值只在第一次 solve 之前那个瞬间生效。
+    ocp.parameter_values = np.concatenate([np.zeros(nx), [p.m]])
 
     # 输入边界:必须连 idxbu 一起设,漏了的话 acados 不报错,但约束形同虚设
     ocp.constraints.lbu = np.array([p.Tmin, -p.tau_max, -p.tau_max, -p.tau_psi])

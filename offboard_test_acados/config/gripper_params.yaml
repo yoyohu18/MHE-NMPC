@@ -1,0 +1,30 @@
+# 接近触发夹爪节点参数。用法:
+#   ros2 run offboard_test_acados proximity_gripper_node \
+#       --ros-args --params-file <path>/gripper_params.yaml
+proximity_gripper_node:
+  ros__parameters:
+    # gz world 名(决定 pose/info 话题名),与 gripper_test.sdf 的 world name 一致
+    world_name: "gripper_test"
+
+    # 无人机:PX4 SITL 用 plain x500 airframe spawn 出来的 model 名通常是
+    # x500_0;parent_link 是要把 box 焊上去的机体 link。
+    drone_model: "x500_0"
+    drone_link: "base_link"
+    parent_link: "base_link"
+
+    # 候选目标 model 名列表 + 目标上待焊接的 link 名。
+    targets: ["box"]
+    child_link: "box_link"
+
+    # 触发阈值。
+    r_xy: 0.15        # 水平距离上限 [m]
+    h_min: 0.3        # 相对高度下限 (无人机.z - 目标.z) [m]
+    h_max: 1.5        # 相对高度上限 [m]
+    v_rel_max: 0.2    # 相对速度模长上限 [m/s] —— 必须近零,见 README 解释
+
+    # 话题名(需与 world SDF 里插件块、以及 bridge 配置一致)。
+    pose_topic: "/world/gripper_test/pose/info"
+    attach_topic: "/gripper/attach"
+    detach_topic: "/gripper/detach"
+    enable_topic: "/gripper/enable"
+    release_topic: "/gripper/release"

@@ -5,6 +5,7 @@
 # 斜坡)都保持不变,方便跟 CasADi/IPOPT 版本直接对比。
 
 import math
+import subprocess
 import time
 
 import numpy as np
@@ -39,6 +40,7 @@ from .straight_reference import (
 
 from .acados_params import p
 from .acados_solver_builder import ensure_acados_ocp_solver
+from .mhe_params import p as mhe_p
 
 
 class AcadosNMPCNode(Node):
@@ -61,8 +63,26 @@ class AcadosNMPCNode(Node):
         self.z_hover = 3.0
         self.start_xy_threshold = 0.20
         self.start_z_threshold  = 0.15
-        # 跟 offboard_test 用同一个实测标定值,两边可比
-        self.hover_thrust_pct = 0.729
+        # 归一化油门 <-> 真实推力 的物理映射(2026-07-02 查 PX4 源码确认,取代早先
+        # 的线性启发式 norm=hover_thrust_pct*T/(p.m*g)——那条是过原点直线,只在满载
+        # 工作点跟真实推力曲线相切,drop 到空载后失配,实测稳态偏低~12cm)。链路:
+        #   1) offboard AttitudeTarget 的 thrust 走姿态速率环、直接当集合推力设定,
+        #      位置控制器被绕过,MPC_THR_HOVER 不参与(所以那个 0.60 是巧合、非标定点);
+        #   2) THR_MDL_FAC=0(airframe 默认)→ PX4 不做推力曲线线性化,电机控制信号
+        #      = 归一化推力,线性透传;
+        #   3) GZMixingInterfaceESC 把归一化[0,1]缩放成电机角速度:
+        #      ω = OMEGA_MIN + OMEGA_SPAN*norm  (SIM_GZ_EC_MIN/MAX = 150/1000 rad/s);
+        #   4) gz MulticopterMotorModel 出力 T = THRUST_K * ω²(4 电机合计)。
+        # 合成正向: T(norm) = THRUST_K*(OMEGA_MIN + OMEGA_SPAN*norm)²;反解在
+        # publish_attitude 里。THRUST_K 就是 4×SDF motorConstant,不乘任何标定
+        # 增益——这里曾短暂放过 ×1.2134,那是按"满载 2.5kg"错误前提标出的幽灵
+        # 增益(mass_changer Configure 时刻的 SetInertial 其实也进不了 DART,
+        # 飞机全程 2.064kg,见 mhe_node.py THRUST_CAL_GAIN 注释的四组互证),
+        # 已回退。与 mhe_node 的 MOTOR_CONSTANT×THRUST_CAL_GAIN 同源,两边必须
+        # 一致,否则 MHE 的质量读数和 NMPC 的推力反解会互相打架。
+        self.OMEGA_MIN  = 150.0    # SIM_GZ_EC_MIN
+        self.OMEGA_SPAN = 850.0    # SIM_GZ_EC_MAX(1000) - SIM_GZ_EC_MIN(150)
+        self.THRUST_K   = 4.0 * 8.54858e-06   # T=THRUST_K*ω² [N/(rad/s)²], 4 电机合计
         self.omega_cmd_max = 2.0
         self.bodyrate_ramp_time = 0.8
         # 先跑悬停测试,跟当年 CasADi 节点的验证顺序一样:先确认能稳定悬停,
@@ -113,6 +133,100 @@ class AcadosNMPCNode(Node):
         self.last_sqp_iter = 0
         self.sqp_trace_dumped = False
 
+        # 闭环自适应质量:默认是 acados_params.py 里的标定常数 p.m,一旦
+        # mhe_node 发来新估计就实时更新——下一次 solve_nmpc 调用就会用这个新
+        # 值算动力学(见 acados_model.py 的 m_sym),不需要重新生成/编译求解器。
+        # 用 mhe_params 里同一套边界做夹紧,防止 MHE 估计器偶尔抽风给出离谱值
+        # (比如窗口还没收敛时)直接污染 NMPC 的动力学模型。
+        #
+        # "投放"场景(方案A,见 model.sdf 里 mass_changer 插件的注释):飞机从
+        # 起飞那一刻就带着 payload(质量是空机+包裹),所以初始猜测值也要从
+        # 空机改成带载——不然 NMPC 刚接管的头几步会用错误偏小的质量算动力学,
+        # 直到 MHE 自己收敛回来,平白多一段瞬态误差。
+        self.payload_mass = 0.5
+        self.m_est = p.m + self.payload_mass
+
+        # "投放包裹"场景,第三版实现(前两版分别撞上了"独立 dynamic 刚体致命
+        # 飞不起来"和"DetachableJoint 在同模型内 self-reference 不生效"两个
+        # 坑,具体见 model.sdf 注释):质量真正的切换由 x500_payload 模型上的
+        # 自定义 gz-sim C++ 插件(gz_plugins/mass_changer/)负责——它在
+        # Configure 阶段(仿真刚启动、飞机还没解锁)就把 base_link 设成满载
+        # 2.5kg,这里完全不需要发任何 attach 信号,飞机从起飞那一刻物理上就是
+        # 满载的。飞到轨迹起点、开始 NMPC 追踪、追踪满 drop_after_track_sec
+        # 秒(给 MHE 足够时间先收敛到带载真值,顺便验证带载情况下追踪本身是
+        # 稳的)之后,这边只需要往 /payload/drop_mass 发一条消息,插件就会把
+        # base_link 切回空载 2.0kg——质量做减法,而不是当年"抓取"设计里的
+        # 加法,对 MHE 在线收敛能力的验证价值是等价的,阶跃方向不影响测试
+        # 目的。设 payload_enabled=False 即可完全跳过 drop,退回"全程满载"
+        # 的普通飞行(质量本身仍由插件管理,不会变成空机)。
+        self.payload_enabled = True
+        self.drop_after_track_sec = 30.0
+        self.drop_settle_sec = 2.0
+        self.drop_triggered = False
+        self.drop_trigger_time = None
+        self.drop_done = False
+
+        # ============ 夹爪吊挂实验模式(默认关;关闭时下面全部不生效,
+        # 现有 mass_changer/figure8 行为逐字节不变)============
+        # 用 DetachableJoint 磁吸夹爪代替 mass_changer:空机起飞 -> 低空悬停到
+        # box 正上方 -> proximity 节点触发 attach 把真实独立 box 焊上来 -> 定时
+        # 抬升把 box 吊离地面 -> MHE 检测质量阶跃、闭环喂回 NMPC 补偿。用来验证
+        # acados NMPC + MHE 能否扛住裸 PID 扛不住的吊挂载荷突变。
+        self.declare_parameter('gripper_mode', False)
+        self.declare_parameter('grip_x', 1.0)
+        self.declare_parameter('grip_y', 0.0)
+        self.declare_parameter('grip_z_low', 0.7)   # 吸附时低空悬停高度
+        self.declare_parameter('grip_z_high', 2.0)  # 抬升后悬停高度
+        self.declare_parameter('grip_lift_after_sec', 12.0)
+        self.declare_parameter('grip_lift_dur', 5.0)
+        # 定时质量阶跃(和 MHE 解耦的诊断):吸附后把 m_est 从空机手动抬到
+        # p.m+grip_payload_mass,给 NMPC "正确的带载质量认知",用来区分发散到底
+        # 是"NMPC 不知道质量变了"还是"吊挂物理(CoM/摆动/拴系)本身补不了"。
+        # grip_payload_mass<=0 则不做阶跃。
+        self.declare_parameter('grip_payload_mass', 0.0)
+        self.declare_parameter('grip_mass_step_sec', 4.0)
+        # box 正上方的安全接近高度:两段式接近的第一段目标高度。先在这个高度
+        # 把水平位置对齐、悬停稳,再垂直下降到 grip_z_low——避免在 grip_z_low
+        # 这种低空做水平平移时高度下冲、起落架把 box 顶出吸附窗口(attach 竞态)。
+        self.declare_parameter('grip_approach_z', 1.5)
+        # use_mhe=False:MHE 估计不喂回 NMPC(m_est 固定),用于隔离验证控制器。
+        # 默认 True,保持现有闭环行为不变。
+        self.declare_parameter('use_mhe', True)
+        self.use_mhe = bool(self.get_parameter('use_mhe').value)
+        self.gripper_mode = bool(self.get_parameter('gripper_mode').value)
+        if self.gripper_mode:
+            self.grip_x = float(self.get_parameter('grip_x').value)
+            self.grip_y = float(self.get_parameter('grip_y').value)
+            self.grip_z_low = float(self.get_parameter('grip_z_low').value)
+            self.grip_z_high = float(self.get_parameter('grip_z_high').value)
+            self.grip_lift_after_sec = float(
+                self.get_parameter('grip_lift_after_sec').value)
+            self.grip_lift_dur = float(self.get_parameter('grip_lift_dur').value)
+            self.grip_payload_mass = float(
+                self.get_parameter('grip_payload_mass').value)
+            self.grip_mass_step_sec = float(
+                self.get_parameter('grip_mass_step_sec').value)
+            self.grip_approach_z = float(
+                self.get_parameter('grip_approach_z').value)
+            self.grip_high_aligned = False   # 两段式接近:第一段(高空对齐)是否完成
+            self.grip_mass_stepped = False
+            self.hover_test_mode = True     # 固定悬停,不追 figure8
+            self.payload_enabled = False    # 不用 mass_changer 的 drop
+            self.m_est = p.m                 # 空机起飞(不是 p.m+payload)
+            self.z_hover = self.grip_z_low   # 先低空悬停到 box 上方
+            self.grip_lift_started = False
+            self.ref_fn = self._grip_ref
+            self.ref_window_fn = self._grip_ref_window
+            # 放宽"到达悬停点"判据:box 在 move-to-start 阶段就被吸上,0.3kg
+            # 载荷 + 低空地效让 PX4 位置控制稳态下垂约 0.2m,用原 0.15m 阈值会
+            # 永远切不进 NMPC。放宽后让 acados 姿态控制接管,由它把高度顶上去。
+            self.start_xy_threshold = 0.30
+            self.start_z_threshold = 0.35
+            self.get_logger().info(
+                f'GRIPPER MODE: hover over box ({self.grip_x},{self.grip_y}) '
+                f'z {self.grip_z_low}->{self.grip_z_high}m, lift after '
+                f'{self.grip_lift_after_sec}s, empty m_est={self.m_est:.2f}kg')
+
         xref0 = self.ref_fn(0.0)
         # 预热求解器:acados 第一次 solve 之外,SQP 在远离收敛点时可能需要几次
         # 迭代才能收敛(实测验证过,见 test_acados_ocp_standalone.py),这里在
@@ -142,6 +256,10 @@ class AcadosNMPCNode(Node):
         self.odom_sub = self.create_subscription(
             Odometry, '/mavros/local_position/odom',
             self.odom_cb, mavros_sensor_qos)
+
+        # mhe_node 的质量估计,闭环喂回 NMPC 动力学(见 self.m_est 用法)
+        self.mhe_mass_sub = self.create_subscription(
+            Float64, '/acados_nmpc/mhe_mass_estimate', self.mhe_mass_cb, 10)
 
         self.att_pub = self.create_publisher(
             AttitudeTarget,
@@ -211,6 +329,15 @@ class AcadosNMPCNode(Node):
             return
         self.x_cur = x
         self._append_actual_path(msg)
+
+    def mhe_mass_cb(self, msg):
+        # use_mhe=False 时:MHE 只当诊断,不把估计喂回 NMPC(m_est 保持固定)。
+        # 用来隔离验证控制器本身能否扛住载荷,与 MHE 估计质量解耦。
+        if not self.use_mhe:
+            return
+        m = float(msg.data)
+        if math.isfinite(m):
+            self.m_est = float(np.clip(m, mhe_p.m_min, mhe_p.m_max))
 
     def _build_ref_path_msg(self, r=1.0, w=0.3, z_hover=3.0,
                             n_samples=400, hover_time=2.0, ramp_time=4.0):
@@ -300,9 +427,17 @@ class AcadosNMPCNode(Node):
         self.pos_pub.publish(pose)
 
     def _seed_initial_guess(self, x_init, Xref_win):
+        # 跟 acados_model.py 里 cost 用的 u_hover_dyn 同一个修复:这里也不能
+        # 再用 p.u_hover(基于固定标定质量 p.m≈2.06kg 算出的 ~20.25N 常量)去
+        # 初始化 warm-start 猜测。实测踩过的坑:质量从一开始就满载(3.5643kg,
+        # 真实悬停推力~35N)起飞时,种子值跟真实解相差约 75%,SQP 经常在
+        # 100 次迭代内卡进病态(alpha 长期很小、res_stat 不再下降、最终
+        # solve failed),求解失败后代码 fallback 到"延用上一次的 T",导致
+        # 观测到的推力长期停留在偏低的旧值附近,跟质量阶跃大小无关都会复现。
+        u_hover_now = np.array([self.m_est * p.g, 0.0, 0.0, 0.0])
         for i in range(p.N):
             self.solver.set(i, 'x', Xref_win[:, i])
-            self.solver.set(i, 'u', p.u_hover)
+            self.solver.set(i, 'u', u_hover_now)
         self.solver.set(p.N, 'x', Xref_win[:, p.N])
 
     def solve_nmpc(self, x_cur, t_ref):
@@ -311,7 +446,7 @@ class AcadosNMPCNode(Node):
         self.solver.set(0, 'lbx', x_cur)
         self.solver.set(0, 'ubx', x_cur)
         for i in range(p.N + 1):
-            self.solver.set(i, 'p', Xref_win[:, i])
+            self.solver.set(i, 'p', np.concatenate([Xref_win[:, i], [self.m_est]]))
 
         if not self.warm_start_enabled:
             # cold start:无论上一步成功与否,都丢掉历史 warm-start,每一步
@@ -418,7 +553,14 @@ class AcadosNMPCNode(Node):
         T = u_opt[0]
         msg = AttitudeTarget()
         msg.header.stamp = self.get_clock().now().to_msg()
-        norm = self.hover_thrust_pct * T / (p.m * p.g)
+        # 把 NMPC 求得的牛顿推力 T 反解成 PX4 归一化油门 setpoint,走上面那条物理
+        # 映射的逆: ω_req = sqrt(T/THRUST_K), norm = (ω_req - OMEGA_MIN)/OMEGA_SPAN。
+        # 任意质量工作点都对,不再像线性启发式只在满载点相切、空载漂低。T<=0 兜底。
+        if T > 0.0:
+            omega_req = float(np.sqrt(T / self.THRUST_K))
+            norm = (omega_req - self.OMEGA_MIN) / self.OMEGA_SPAN
+        else:
+            norm = 0.0
         msg.thrust = float(np.clip(norm, 0.05, 0.95))
         wmax = self.omega_cmd_max
         msg.body_rate.x = float(np.clip(omega_cmd[0], -wmax, wmax))
@@ -430,6 +572,91 @@ class AcadosNMPCNode(Node):
         msg.orientation.z = 0.0
         msg.type_mask = AttitudeTarget.IGNORE_ATTITUDE
         self.att_pub.publish(msg)
+
+    def _trigger_payload_detach(self):
+        # 发给 mass_changer 插件(gz_plugins/mass_changer/)的 /payload/drop_mass
+        # topic——插件收到后会在物理引擎层面把 base_link 从 2.5kg 切回
+        # 2.0kg,只切一次。用 Popen 而不是 run/check_call:这是在 10Hz 定时器
+        # 回调(timer_cb)里发起的调用,回调线程绝不能被一次子进程同步阻塞——
+        # gz CLI 首次冷启动的 gz-transport discovery 实测可能要将近 1 秒,
+        # 真要等它跑完,这一帧就直接卡成了"飞机瞬间失去所有姿态指令"。这次
+        # 不需要像旧的 attach 设计那样卡时机精度(质量切换是瞬时的组件覆写,
+        # 不存在"discovery 慢了几百毫秒、被焊在错误位置"这类问题),所以可以
+        # 放心用 Popen 发出去就不等。
+        try:
+            subprocess.Popen(
+                ['gz', 'topic', '-t', '/payload/drop_mass',
+                 '-m', 'gz.msgs.Empty', '-p', 'unused: true'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            self.get_logger().warn(f'Failed to trigger payload drop: {e}')
+
+    def _drop_phase(self, nmpc_time):
+        """NMPC 已经接管追踪之后,每帧都会被调用。追踪满 drop_after_track_sec
+        秒后触发一次质量切换(往 /payload/drop_mass 发一条消息,mass_changer
+        插件收到后把 base_link 从 2.5kg 切回 2.0kg),再等 drop_settle_sec 秒
+        纯粹是为了在日志里标记一下这个阶段——质量切换是物理引擎里一次性的
+        组件覆写,飞行中随时触发都没问题,不存在"卡时机"的顾虑。"""
+        if self.drop_done or not self.payload_enabled:
+            return
+        if not self.drop_triggered:
+            if nmpc_time < self.drop_after_track_sec:
+                return
+            self._trigger_payload_detach()
+            self.drop_triggered = True
+            self.drop_trigger_time = self.get_clock().now()
+            self.get_logger().info(
+                f't={nmpc_time:.1f}s | Drop triggered (mass switched to empty).')
+            return
+
+        settle_time = (self.get_clock().now() -
+                        self.drop_trigger_time).nanoseconds / 1e9
+        if settle_time < self.drop_settle_sec:
+            return
+        self.drop_done = True
+        self.get_logger().info('Payload drop settled.')
+
+    # ---------- 夹爪吊挂模式的固定悬停参考 + 抬升阶段 ----------
+    def _grip_ref(self, t=0.0, **kw):
+        """gripper 模式的参考:固定悬停在 (grip_x, grip_y, self.z_hover)、
+        姿态水平、速度/角速度为零。self.z_hover 由 _lift_phase 随时间抬升。"""
+        return np.concatenate([
+            np.array([self.grip_x, self.grip_y, self.z_hover]),
+            np.zeros(3), np.array([1.0, 0.0, 0.0, 0.0]), np.zeros(3)])
+
+    def _grip_ref_window(self, t_start, N, dt, z_hover=None):
+        return np.tile(self._grip_ref().reshape(-1, 1), (1, N + 1))
+
+    def _grip_mass_step(self, nmpc_time):
+        """诊断:吸附后(grip_mass_step_sec)把 m_est 从空机手动阶跃到带载真值,
+        给 NMPC 正确的质量认知(和 MHE 解耦)。grip_payload_mass<=0 则不做。"""
+        if not self.gripper_mode or self.grip_mass_stepped:
+            return
+        if self.grip_payload_mass <= 0.0 or nmpc_time < self.grip_mass_step_sec:
+            return
+        self.grip_mass_stepped = True
+        self.m_est = p.m + self.grip_payload_mass
+        self.get_logger().info(
+            f't={nmpc_time:.1f}s | MASS STEP: m_est {p.m:.2f}->'
+            f'{self.m_est:.2f}kg (payload {self.grip_payload_mass:.2f}kg, '
+            f'MHE bypass)')
+
+    def _lift_phase(self, nmpc_time):
+        """NMPC 接管(低空悬停 + proximity 完成 attach)满 grip_lift_after_sec
+        秒后,把 z_hover 从 grip_z_low 平滑抬到 grip_z_high,把 box 吊离地面,
+        让 MHE 看到全额 +载荷质量。"""
+        if not self.gripper_mode or nmpc_time < self.grip_lift_after_sec:
+            return
+        s = min(max((nmpc_time - self.grip_lift_after_sec) /
+                    self.grip_lift_dur, 0.0), 1.0)
+        smooth = 10*s**3 - 15*s**4 + 6*s**5
+        self.z_hover = self.grip_z_low + \
+            (self.grip_z_high - self.grip_z_low) * smooth
+        if not self.grip_lift_started:
+            self.grip_lift_started = True
+            self.get_logger().info(
+                f't={nmpc_time:.1f}s | LIFT: raising hover '
+                f'{self.grip_z_low}->{self.grip_z_high}m to lift payload')
 
     def timer_cb(self):
         if self.counter < 100:
@@ -515,6 +742,9 @@ class AcadosNMPCNode(Node):
 
         nmpc_time = (self.get_clock().now() -
                      self.nmpc_start_time).nanoseconds / 1e9
+        self._drop_phase(nmpc_time)
+        self._grip_mass_step(nmpc_time)
+        self._lift_phase(nmpc_time)
         t_ref = 0.0 if self.hover_test_mode else nmpc_time
 
         if self.rate_test_mode:

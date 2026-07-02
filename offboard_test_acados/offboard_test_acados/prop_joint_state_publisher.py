@@ -2,7 +2,7 @@
 # 把 PX4 实际发给 Gazebo 电机模型的转速指令积分成桨叶转角,驱动 URDF 里
 # rotor_0..3_joint(continuous)的 /joint_states,让 RViz 里的桨叶真的转起来。
 #
-# 数据来源: gz-transport 话题 /x500_0/command/motor_speed(gz.msgs.Actuators,
+# 数据来源: gz-transport 话题 /x500_payload_0/command/motor_speed(gz.msgs.Actuators,
 # velocity 字段=4个电机的角速度 rad/s),用 ros_gz_bridge 桥接成同名 ROS2 话题
 # (actuator_msgs/msg/Actuators)——见 run_sitl_acados.sh 里起的那个 bridge
 # 进程。注意:这是 PX4 发出的"指令"角速度,不是 Gazebo 内部真正积分出来的桨叶
@@ -35,7 +35,7 @@ class PropJointStatePublisher(Node):
         self.angle = [0.0, 0.0, 0.0, 0.0]
 
         self.motor_speed_sub = self.create_subscription(
-            Actuators, '/x500_0/command/motor_speed', self.motor_speed_cb, 10)
+            Actuators, '/x500_payload_0/command/motor_speed', self.motor_speed_cb, 10)
 
         self.joint_state_pub = self.create_publisher(JointState, '/joint_states', 10)
 

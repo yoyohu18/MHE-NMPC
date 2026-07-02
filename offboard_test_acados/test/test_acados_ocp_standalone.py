@@ -24,9 +24,15 @@ from offboard_test_acados.acados_solver_builder import (  # noqa: E402
 HOVER_X = np.array([0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
 
-def _set_reference(solver, xr):
+def _set_reference(solver, xr, m=None):
+    """model.p 现在是 [xr(13); m(1)] 14维(质量做成了运行时参数,见
+    acados_model.py),m 默认用标定常数 p.m,跟改动前的行为一致——这些既有
+    测试本来就是在验证"标定质量下"的求解器行为,不是在测自适应质量。"""
+    if m is None:
+        m = p.m
+    param = np.concatenate([xr, [m]])
     for i in range(p.N + 1):
-        solver.set(i, 'p', xr)
+        solver.set(i, 'p', param)
 
 
 def _solve_to_convergence(solver, max_iters=20):
@@ -119,6 +125,48 @@ def test_quaternion_norm_drift_within_tolerance():
         f'四元数模长漂移 {max_drift:.2e} 超过 1e-3,需要考虑加 con_h_expr 模长约束')
 
 
+def test_hover_thrust_increases_with_mass_parameter():
+    """闭环自适应的核心前提:质量是 model.p 里的运行时参数,不是编译进去的
+    常数。注意:OCP 解出的悬停推力不会精确等于 m*g——只有 stage 0 的状态被
+    硬约束钉在参考点上,1..N 是自由变量,代价里还有一项基于旧标定质量算出的
+    u_hover_const 在拉,真实收敛值是这些项的加权折中,不是简单等式(已经用
+    AcadosModel.f_expl_expr 直接验证过 T=m*g 时 vel_dot_z 确实是 0,动力学本身
+    没问题,折中是 OCP 代价结构带来的,不是 bug)。这条不去算那个折中点该是
+    多少,只验证方向和量级对不对:质量调重之后悬停推力该显著、单调地涨上去,
+    涨幅跟 m*g 的理论涨幅同一个量级。"""
+    solver = ensure_acados_ocp_solver()
+
+    def hover_thrust_for_mass(m):
+        _seed_initial_guess(solver, HOVER_X)
+        solver.set(0, 'lbx', HOVER_X)
+        solver.set(0, 'ubx', HOVER_X)
+        _set_reference(solver, HOVER_X, m=m)
+        last_u = None
+        for _ in range(20):
+            status = solver.solve()
+            assert status == 0, f'solver failed with status {status}'
+            last_u = solver.get(0, 'u')
+        return last_u[0]
+
+    m_heavy = p.m + 1.5  # 模拟抓起约 1.5kg 的包裹
+    T_nominal = hover_thrust_for_mass(p.m)
+    T_heavy = hover_thrust_for_mass(m_heavy)
+
+    # 标定质量下参考点和 u_hover_const 用的是同一个质量,没有折中可言,
+    # 应该精确收敛到 u_hover[0](就是 test_converges_to_hover_thrust 验证的
+    # 那个值,这里顺带核对一下没有被这条测试的求解器状态污染)。
+    assert np.isclose(T_nominal, p.u_hover[0], atol=1e-2), (
+        f'标定质量下悬停推力应精确等于 u_hover[0]={p.u_hover[0]:.3f}N, '
+        f'got {T_nominal:.3f}N')
+
+    expected_delta = (m_heavy - p.m) * p.g
+    actual_delta = T_heavy - T_nominal
+    assert 0.5 * expected_delta < actual_delta < 2.0 * expected_delta, (
+        f'质量加重 {m_heavy - p.m:.2f}kg,理论上悬停推力涨幅量级应该是 '
+        f'{expected_delta:.2f}N,实际涨了 {actual_delta:.2f}N——质量参数好像'
+        f'没真正进到动力学里(或者反过来,涨太多/太少都不对)')
+
+
 def test_solver_cache_hit_is_fast():
     """配置没变的情况下,第二次构建求解器应该走缓存命中,不重新生成/编译 C 代码,
     耗时应该在 1 秒以内(对照第一次跑这个文件时的 10-30 秒编译)。"""
@@ -136,6 +184,8 @@ if __name__ == '__main__':
     print('[PASS] test_thrust_saturates_at_tmax')
     test_quaternion_norm_drift_within_tolerance()
     print('[PASS] test_quaternion_norm_drift_within_tolerance')
+    test_hover_thrust_increases_with_mass_parameter()
+    print('[PASS] test_hover_thrust_increases_with_mass_parameter')
     test_solver_cache_hit_is_fast()
     print('[PASS] test_solver_cache_hit_is_fast')
     print('\nAll Stage A standalone checks passed.')

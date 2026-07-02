@@ -18,11 +18,39 @@ from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Float64, Float64MultiArray
+from actuator_msgs.msg import Actuators
 
 from offboard_test.nmpc_node import quat_to_rotmat
 
 from .mhe_params import p as mhe_p
 from .mhe_solver_builder import ensure_mhe_ocp_solver
+
+
+# Gazebo MulticopterMotorModel 推力系数(x500_base/model.sdf 里每个电机的
+# <motorConstant>,4 个电机相同)。单电机推力 = MOTOR_CONSTANT * ω²,总推力
+# T_phys = MOTOR_CONSTANT * Σω²。ω 取 /x500_payload_0/command/motor_speed 的
+# velocity 字段(rad/s)——实测确认是真实转速、未被 rotorVelocitySlowdownSim=10
+# 缩放:drop 后物理 2.0kg 时实测 ω≈765 → 4*MOTOR_CONSTANT*765²≈20.0N≈2.04kg*g,
+# 与真值吻合,所以直接用、不做任何缩放。
+#
+# 为什么这才是 MHE 该用的推力(关键):/acados_nmpc/u_opt[0] 是 NMPC 基于自己
+# 的质量估计 m_est 算出来的"标量意图推力"(被 cost 钉在 m_est*g 附近),m_est
+# 一偏离真值(典型就是 drop 之后),这个意图推力就 ≠ 飞机真实受力,MHE 拿它当
+# 已知输入会陷入"NMPC的T → MHE自洽回m_est → NMPC的T"的盲区,估不出质量阶跃。
+# 改用电机转速反算的真实物理推力(经 PX4/电机真实非线性映射、与 m_est 完全
+# 解耦),MHE 看到的才是"真实力 vs 实测加速度",质量始终可观测。
+# (真机迁移:换成 ESC 转速遥测 / 推力台 RPM→推力曲线作数据源。)
+MOTOR_CONSTANT = 8.54858e-06
+
+# 标定增益 = 1.0:SDF 名义 motorConstant 就是对的,不需要任何修正(2026-07-02
+# 钉死)。曾经在这里放过 1.2134——那是按"飞机满载 2.5kg"这个错误前提反标出来的
+# 幽灵增益:mass_changer 插件在 Configure 阶段 SetInertial(2.5) 和运行时一样,
+# 也从未进到 DART 物理引擎(gz-sim #2733 同一机制,组件写了、gz model 读得到,
+# 但刚体按 SDF 原值 2.064kg 建),飞机全程其实是 x500_base 的 2.064kg。四组独立
+# 数据零自由参数互证:满载悬停原始反算 20.19N=2.064g✓、wrench drop 后 15.25N=
+# 2.064g-4.9✓、gripper 空机 20.22N✓、MHE 读数 2.50/1.89=真值×1.2134✓。
+# 真机标定时该增益由推力台 RPM→推力曲线直接给出。
+THRUST_CAL_GAIN = 1.0
 
 
 class MHENode(Node):
@@ -33,6 +61,7 @@ class MHENode(Node):
 
         self.x_meas = None
         self.u_known = None
+        self.thrust_phys = None  # 电机转速反算的真实总推力(见 MOTOR_CONSTANT 注释)
 
         self.y_buf = []  # 测量缓冲区,最多 N+1 帧
         self.u_buf = []  # 已知输入缓冲区,最多 N 帧
@@ -52,6 +81,15 @@ class MHENode(Node):
             self.odom_cb, mavros_sensor_qos)
         self.u_opt_sub = self.create_subscription(
             Float64MultiArray, '/acados_nmpc/u_opt', self.u_opt_cb, 10)
+        # PX4 发给 Gazebo 电机模型的转速指令(经 ros_gz_bridge 桥接,跟
+        # prop_joint_state_publisher 用的是同一个话题/同一套 QoS=depth10)。
+        # 话题名做成参数:mass_changer 场景是 x500_payload_0,夹爪场景是空机
+        # x500_0。默认保持原值,不影响现有 run_sitl_acados.sh。
+        self.declare_parameter('motor_speed_topic',
+                               '/x500_payload_0/command/motor_speed')
+        motor_topic = self.get_parameter('motor_speed_topic').value
+        self.motor_speed_sub = self.create_subscription(
+            Actuators, motor_topic, self.motor_speed_cb, 10)
 
         self.mass_pub = self.create_publisher(
             Float64, '/acados_nmpc/mhe_mass_estimate', 10)
@@ -83,9 +121,22 @@ class MHENode(Node):
             return
         self.x_meas = x
 
+    def motor_speed_cb(self, msg):
+        if len(msg.velocity) >= 4:
+            w = np.array(msg.velocity[:4])
+            if np.all(np.isfinite(w)):
+                self.thrust_phys = float(
+                    THRUST_CAL_GAIN * MOTOR_CONSTANT * np.sum(w * w))
+
     def u_opt_cb(self, msg):
         u = np.array(msg.data)
         if u.shape[0] == mhe_p.nu_known and np.all(np.isfinite(u)):
+            # 推力分量(u[0])换成电机转速反算的真实物理推力(见 MOTOR_CONSTANT
+            # 注释),力矩 tau(u[1:4])仍沿用 NMPC 意图值(对质量估计是次要项)。
+            # motor_speed 还没到时退回 NMPC 的推力,避免丢帧。
+            if self.thrust_phys is not None:
+                u = u.copy()
+                u[0] = self.thrust_phys
             self.u_known = u
 
     def timer_cb(self):
@@ -147,7 +198,9 @@ class MHENode(Node):
 
         self.counter += 1
         if self.counter % 20 == 0:
-            self.get_logger().info(f'MHE mass estimate: {self.m_est:.3f} kg')
+            t_phys = self.thrust_phys if self.thrust_phys is not None else float('nan')
+            self.get_logger().info(
+                f'MHE mass estimate: {self.m_est:.3f} kg (T_phys={t_phys:.2f}N)')
 
 
 def main():

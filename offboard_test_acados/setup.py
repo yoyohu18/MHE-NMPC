@@ -1,3 +1,5 @@
+import glob
+
 from setuptools import find_packages, setup
 
 package_name = 'offboard_test_acados'
@@ -10,6 +12,8 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name + '/config', glob.glob('config/*.yaml')),
+        ('share/' + package_name + '/worlds', glob.glob('worlds/*.sdf')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -27,6 +31,8 @@ setup(
             'mhe_node = offboard_test_acados.mhe_node:main',
             'drone_tf_broadcaster = offboard_test_acados.drone_tf_broadcaster:main',
             'prop_joint_state_publisher = offboard_test_acados.prop_joint_state_publisher:main',
+            'proximity_gripper_node = offboard_test_acados.proximity_gripper_node:main',
+            'gripper_flight_node = offboard_test_acados.gripper_flight_node:main',
         ],
     },
 )
