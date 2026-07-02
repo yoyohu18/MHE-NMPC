@@ -145,6 +145,10 @@ class AcadosNMPCNode(Node):
         # 直到 MHE 自己收敛回来,平白多一段瞬态误差。
         self.payload_mass = 0.5
         self.m_est = p.m + self.payload_mass
+        # 吊挂载荷惯量增量(model.p 的第 15 维,见 acados_model.py dJ_sym 注释)。
+        # mass_changer 场景是 wrench 模拟的纯平动质量变化、无惯量变化,恒 0;
+        # 只有 gripper 场景 attach 后才会被 _grip_mass_step 阶跃到 m_p*d^2。
+        self.dJ_est = 0.0
 
         # "投放包裹"场景,第三版实现(前两版分别撞上了"独立 dynamic 刚体致命
         # 飞不起来"和"DetachableJoint 在同模型内 self-reference 不生效"两个
@@ -446,7 +450,8 @@ class AcadosNMPCNode(Node):
         self.solver.set(0, 'lbx', x_cur)
         self.solver.set(0, 'ubx', x_cur)
         for i in range(p.N + 1):
-            self.solver.set(i, 'p', np.concatenate([Xref_win[:, i], [self.m_est]]))
+            self.solver.set(i, 'p', np.concatenate(
+                [Xref_win[:, i], [self.m_est], [self.dJ_est]]))
 
         if not self.warm_start_enabled:
             # cold start:无论上一步成功与否,都丢掉历史 warm-start,每一步
