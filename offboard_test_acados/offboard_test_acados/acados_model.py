@@ -5,10 +5,11 @@
 # (CasADi/IPOPT 版本的 offboard_test/nmpc_node.py 不需要这个能力,继续用它
 # 自己原来的 build_dynamics(),两边没有耦合。)
 #
-# model.p = [xr(13维,参考状态); m(1维,当前质量估计); dJ(1维,吊挂惯量增量)]
-# = 15维。时变参考用 model.p 而不是 yref 来传,是因为代价里的四元数误差项对
-# 参考值是非线性的(四元数乘法),没法写成简单的 "y - yref" 形式,必须让参考值
-# 进 CasADi 表达式本身——质量/惯量参数顺路放在同一个 model.p 向量里。
+# model.p = [xr(13维,参考状态); m(1维,当前质量估计); dJ(1维,吊挂惯量增量);
+#            c_xy(2维,复合质心在机体系的水平偏移)] = 17维。时变参考用 model.p
+# 而不是 yref 来传,是因为代价里的四元数误差项对参考值是非线性的(四元数乘法),
+# 没法写成简单的 "y - yref" 形式,必须让参考值进 CasADi 表达式本身——质量/
+# 惯量/质心参数顺路放在同一个 model.p 向量里。
 
 import casadi as cs
 from acados_template import AcadosModel
@@ -32,6 +33,14 @@ def build_acados_model():
     # Jxx(0.0217) 的 4 倍,NMPC 按空机惯量规划的角加速度真机做不到,力矩饱和
     # 后 SQP 级联发散。跟 m_sym 一样走 model.p,attach 时随质量阶跃一起喂。
     dJ_sym = cs.MX.sym('dJ', 1)
+    # 复合质心(机体+载荷)在机体系的水平偏移 c=[cx,cy] [m]。0.3kg@0.47m 的 dJ
+    # 建模实验(2026-07-02 20:21)证明仅补惯量不够:attach 实测 d_xy=0.109m 的
+    # 水平偏心让复合质心侧移约 1.4cm,悬停推力 ~23N 沿机体 z 轴穿过机体原点、
+    # 不再过复合质心,产生 ~0.32Nm 的恒定 roll 力矩——tau_max=0.5 的 64%,日志
+    # 里 t=1.81s(box 刚离地)pos_err 才 0.022m roll 就 100% 饱和,随后级联发散。
+    # 把这个力矩显式建进 om_dot,NMPC 才知道"带偏心载荷悬停本来就要一个常值
+    # 力矩",而不是把它当成需要用姿态机动去消灭的异常。空机时 0。
+    c_sym = cs.MX.sym('c_xy', 2)
 
     vel = x_sym[3:6]
     q_  = x_sym[6:10]
@@ -62,7 +71,11 @@ def build_acados_model():
 
     J_vec = cs.vertcat(p.Jxx + dJ_sym, p.Jyy + dJ_sym, p.Jzz)
     Jom   = J_vec * om
-    om_dot = (tau_ - cs.cross(om, Jom)) / J_vec
+    # 推力作用在机体原点(桨盘中心)沿机体 z 轴,对复合质心(位于 r_c=[cx,cy,cz])
+    # 的力矩 = (-r_c)×[0,0,T] = [-cy*T, +cx*T, 0]。重力作用点就是质心,对质心
+    # 无力矩;cz(质心竖向下移)不跟沿 z 的推力叉出力矩,所以只需要 cx,cy 两维。
+    tau_thrust_com = cs.vertcat(-c_sym[1] * T_, c_sym[0] * T_, 0.0)
+    om_dot = (tau_ + tau_thrust_com - cs.cross(om, Jom)) / J_vec
 
     xdot = cs.vertcat(vel, vel_dot, quat_dot, om_dot)
 
@@ -70,7 +83,7 @@ def build_acados_model():
     model.name = MODEL_NAME
     model.x = x_sym
     model.u = u_sym
-    model.p = cs.vertcat(xr_sym, m_sym, dJ_sym)
+    model.p = cs.vertcat(xr_sym, m_sym, dJ_sym, c_sym)
     model.f_expl_expr = xdot
 
     e_track = tracking_error_sym(x_sym, xr_sym)        # 12维: [ep;ev;eq_vec;eomega]
@@ -82,7 +95,13 @@ def build_acados_model():
     # 这一项持续把推力"拽"向这个偏低的旧基准,实测会让追踪误差卡在 0.85m+
     # 完全不收敛,不是"影响很小"。改成 m_sym*g 之后,质量估计变了,惩罚中心
     # 跟着动态平移,不再固化一个过时的悬停推力假设。
-    u_hover_dyn = cs.vertcat(m_sym * p.g, 0.0, 0.0, 0.0)
+    # 带偏心载荷时,定点悬停要求机体水平(推力必须竖直才能不平移),此时推力
+    # 对复合质心的力矩不为零,必须由常值力矩 tau=[+cy*T, -cx*T, 0] 抵消(即
+    # om_dot 里 tau_thrust_com 的相反数)。惩罚基准不带这一项的话,R 会持续把
+    # 力矩往 0 拽,跟"u_hover 用过时质量基准把推力拽低"是同一类稳态偏差。
+    T_hover = m_sym * p.g
+    u_hover_dyn = cs.vertcat(
+        T_hover, c_sym[1] * T_hover, -c_sym[0] * T_hover, 0.0)
     model.cost_y_expr = cs.vertcat(e_track, u_sym - u_hover_dyn)     # 16维
     model.cost_y_expr_e = e_track                                     # 12维
 

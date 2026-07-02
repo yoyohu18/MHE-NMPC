@@ -24,13 +24,14 @@ from offboard_test_acados.acados_solver_builder import (  # noqa: E402
 HOVER_X = np.array([0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
 
-def _set_reference(solver, xr, m=None):
-    """model.p 现在是 [xr(13); m(1)] 14维(质量做成了运行时参数,见
-    acados_model.py),m 默认用标定常数 p.m,跟改动前的行为一致——这些既有
-    测试本来就是在验证"标定质量下"的求解器行为,不是在测自适应质量。"""
+def _set_reference(solver, xr, m=None, dJ=0.0, c=(0.0, 0.0)):
+    """model.p 现在是 [xr(13); m(1); dJ(1); c_xy(2)] 17维(质量/吊挂惯量增量/
+    复合质心偏移都是运行时参数,见 acados_model.py),m 默认用标定常数 p.m、
+    dJ/c 默认空机 0,跟改动前的行为一致——既有测试本来就是在验证"空机标定
+    质量下"的求解器行为,不是在测自适应参数。"""
     if m is None:
         m = p.m
-    param = np.concatenate([xr, [m]])
+    param = np.concatenate([xr, [m], [dJ], c])
     for i in range(p.N + 1):
         solver.set(i, 'p', param)
 
@@ -167,6 +168,34 @@ def test_hover_thrust_increases_with_mass_parameter():
         f'没真正进到动力学里(或者反过来,涨太多/太少都不对)')
 
 
+def test_hover_torque_matches_com_offset():
+    """质心偏移建模的核心验证:复合质心水平偏移 c=[cx,cy] 时,机体水平定点
+    悬停的平衡输入应该是 [m*g, +cy*m*g, -cx*m*g, 0]——推力沿机体 z 轴不过
+    质心产生的常值力矩,必须由等大反向的控制力矩抵消(见 acados_model.py
+    tau_thrust_com/u_hover_dyn 注释)。cost 的惩罚基准 u_hover_dyn 也带同一项,
+    所以平衡点处残差为零,收敛应该是精确的,不是折中。取 0.3kg@偏心0.109m
+    实测工况对应的 c≈[0,+1.4]cm。"""
+    solver = ensure_acados_ocp_solver()
+    m_t = p.m + 0.3
+    c = (0.0, 0.014)
+    _seed_initial_guess(solver, HOVER_X)
+    solver.set(0, 'lbx', HOVER_X)
+    solver.set(0, 'ubx', HOVER_X)
+    _set_reference(solver, HOVER_X, m=m_t, dJ=0.05, c=c)
+
+    last_u = None
+    for _ in range(20):
+        status = solver.solve()
+        assert status == 0, f'solver failed with status {status}'
+        last_u = solver.get(0, 'u')
+
+    T_hover = m_t * p.g
+    expected = np.array([T_hover, c[1] * T_hover, -c[0] * T_hover, 0.0])
+    assert np.allclose(last_u, expected, atol=1e-2), (
+        f'带质心偏移的悬停平衡输入应为 {expected},got {last_u}——'
+        f'推力-质心力矩项可能没进动力学,或 u_hover_dyn 没同步')
+
+
 def test_solver_cache_hit_is_fast():
     """配置没变的情况下,第二次构建求解器应该走缓存命中,不重新生成/编译 C 代码,
     耗时应该在 1 秒以内(对照第一次跑这个文件时的 10-30 秒编译)。"""
@@ -186,6 +215,8 @@ if __name__ == '__main__':
     print('[PASS] test_quaternion_norm_drift_within_tolerance')
     test_hover_thrust_increases_with_mass_parameter()
     print('[PASS] test_hover_thrust_increases_with_mass_parameter')
+    test_hover_torque_matches_com_offset()
+    print('[PASS] test_hover_torque_matches_com_offset')
     test_solver_cache_hit_is_fast()
     print('[PASS] test_solver_cache_hit_is_fast')
     print('\nAll Stage A standalone checks passed.')

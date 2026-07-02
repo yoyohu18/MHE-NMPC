@@ -25,7 +25,8 @@ import math
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Bool
+from rclpy.qos import DurabilityPolicy, QoSProfile
+from std_msgs.msg import Bool, Float64MultiArray
 
 import gz.transport13 as gztransport
 from gz.msgs10.pose_v_pb2 import Pose_V
@@ -93,6 +94,16 @@ class ProximityGripperNode(Node):
         self.detach_pub = self.gz.advertise(
             g('detach_topic').value, StringMsg)
 
+        # ROS:attach 瞬间的真实几何偏移 [rx,ry,rz] = box位置 - 机体位置
+        # (世界系;attach 发生在机体近水平悬停时,近似等于机体系)。NMPC 节点
+        # 用它算复合质心偏移 c_xy 和吊挂惯量增量 dJ——两次实测 attach 的
+        # dz=0.593/0.393、d_xy=0.041/0.109 差异都很大,写死的 grip_arm_d
+        # 参数只配当兜底。TRANSIENT_LOCAL 让晚启动/重启的订阅方也能拿到。
+        self.offset_pub = self.create_publisher(
+            Float64MultiArray, '/gripper/attach_offset',
+            QoSProfile(depth=1,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL))
+
         # ROS:只收使能/释放。
         self.create_subscription(Bool, g('enable_topic').value,
                                  self.on_enable, 10)
@@ -145,6 +156,7 @@ class ProximityGripperNode(Node):
                 continue
             if self.should_attach(drone, tp):
                 self.send_attach(tgt)
+                self.publish_offset(drone, tp)
 
     def should_attach(self, drone, tgt):
         dx = drone.pos[0] - tgt.pos[0]
@@ -163,6 +175,14 @@ class ProximityGripperNode(Node):
             f'attach condition met: d_xy={d_xy:.3f} dz={dz:.3f} '
             f'v_rel={v_rel:.3f}')
         return True
+
+    def publish_offset(self, drone, tgt):
+        msg = Float64MultiArray()
+        msg.data = [float(tgt.pos[i] - drone.pos[i]) for i in range(3)]
+        self.offset_pub.publish(msg)
+        self.get_logger().info(
+            f'-> attach offset (box - drone) = '
+            f'[{msg.data[0]:+.3f}, {msg.data[1]:+.3f}, {msg.data[2]:+.3f}] m')
 
     # --- 发命令(gz-transport)---
     def send_attach(self, tgt):

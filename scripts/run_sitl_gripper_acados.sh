@@ -11,6 +11,13 @@
 # base_link 惯量。acados 节点 gripper_mode:=true 时才走这套(默认关,不动基线)。
 set -e
 
+# 用法: run_sitl_gripper_acados.sh [payload_kg]   (默认 0.3)
+# 载荷质量是唯一会在"world 里 box 的物理质量"和"NMPC 的 grip_payload_mass"
+# 两处出现的量,必须由同一个变量派生,否则一处改了另一处忘了就是一次白跑
+# 的实验。box 惯量按几何(0.15m 立方体)随质量线性缩放: I = m*0.00375。
+PAYLOAD_KG="${1:-0.3}"
+BOX_I=$(python3 -c "print(f'{$PAYLOAD_KG * 0.00375:.6f}')")
+
 WS="/home/clear/ros2_ws_HJH"
 PX4_DIR="/home/clear/PX4-Autopilot"
 PKG="$WS/src/offboard_test_acados"
@@ -44,8 +51,30 @@ mkdir -p "$GRIPPER_DIR/build"
 (cd "$GRIPPER_DIR/build" && cmake .. -DCMAKE_BUILD_TYPE=Release >/dev/null && make >/dev/null)
 export GZ_SIM_SYSTEM_PLUGIN_PATH="$GRIPPER_DIR/build:$GZ_SIM_SYSTEM_PLUGIN_PATH"
 
-cp -f "$WORLD_SRC" "$PX4_WORLDS/gripper_test.sdf"
-echo "copied world -> $PX4_WORLDS/gripper_test.sdf"
+# 把 world 里 box 的质量/惯量替换成本次实验的载荷值(源文件不动,只改
+# 复制到 PX4 的那份)。sed 锚定 box_link 的 inertial 块里的具体标签。
+sed -e "s|<mass>[0-9.]*</mass>|<mass>$PAYLOAD_KG</mass>|" \
+    -e "s|<ixx>[0-9.]*</ixx>|<ixx>$BOX_I</ixx>|" \
+    -e "s|<iyy>[0-9.]*</iyy>|<iyy>$BOX_I</iyy>|" \
+    -e "s|<izz>[0-9.]*</izz>|<izz>$BOX_I</izz>|" \
+    "$WORLD_SRC" > "$PX4_WORLDS/gripper_test.sdf"
+echo "copied world -> $PX4_WORLDS/gripper_test.sdf (box mass=$PAYLOAD_KG kg, I=$BOX_I)"
+
+# 实验元数据:每次实验固化一份参数快照,复盘时不用去猜"那次跑的是多重"。
+# pos_err/力矩饱和/attach 偏移/求解器状态都在各自节点日志里(NMPC 日志的
+# MASS+INERTIA+COM STEP / Torque near constraint / res_stat 行,proximity
+# 日志的 attach offset 行),这里记下时间戳把它们串起来。
+META="$LOGDIR/gacados_meta_$TS.txt"
+{
+  echo "ts=$TS"
+  echo "payload_kg=$PAYLOAD_KG"
+  echo "box_inertia=$BOX_I"
+  echo "grip_arm_d_fallback=0.47"
+  echo "grip_z_low=0.55 grip_z_high=2.5 lift_after=1.5 lift_dur=3.0"
+  echo "use_mhe=false mass_step_sec=0.0 scale_px4_rate_gains=true"
+  echo "git_rev=$(git -C "$WS/src" rev-parse --short HEAD) dirty=$(git -C "$WS/src" status --porcelain | wc -l)"
+} > "$META"
+echo "meta -> $META"
 
 # 1. PX4 SITL + Gazebo(GUI 可见,空机 x500,gripper_test world)
 gnome-terminal --title="PX4 SITL + Gazebo (gripper+acados)" -- bash -c \
@@ -95,7 +124,7 @@ nohup bash -c "source /opt/ros/jazzy/setup.bash && source '$WS/install/setup.bas
     ros2 run offboard_test_acados acados_nmpc_node --ros-args \
       -p gripper_mode:=true -p grip_x:=1.0 -p grip_y:=0.0 \
       -p grip_z_low:=0.55 -p grip_z_high:=2.5 \
-      -p grip_mass_step_sec:=0.0 -p grip_payload_mass:=0.2 \
+      -p grip_mass_step_sec:=0.0 -p grip_payload_mass:=$PAYLOAD_KG -p grip_arm_d:=0.47 \
       -p grip_lift_after_sec:=1.5 -p grip_lift_dur:=3.0 \
       -p use_mhe:=false" \
     > "$NODE_LOG" 2>&1 &

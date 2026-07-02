@@ -20,7 +20,8 @@ from rclpy.qos import (
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry, Path
 from mavros_msgs.msg import State, AttitudeTarget
-from mavros_msgs.srv import CommandBool, SetMode
+from mavros_msgs.srv import CommandBool, ParamGet, ParamSetV2, SetMode
+from rcl_interfaces.msg import ParameterType, ParameterValue
 from std_msgs.msg import Float64, Float64MultiArray
 
 from offboard_test.nmpc_node import (
@@ -147,8 +148,14 @@ class AcadosNMPCNode(Node):
         self.m_est = p.m + self.payload_mass
         # 吊挂载荷惯量增量(model.p 的第 15 维,见 acados_model.py dJ_sym 注释)。
         # mass_changer 场景是 wrench 模拟的纯平动质量变化、无惯量变化,恒 0;
-        # 只有 gripper 场景 attach 后才会被 _grip_mass_step 阶跃到 m_p*d^2。
+        # 只有 gripper 场景 attach 后才会被 _grip_mass_step 阶跃。
         self.dJ_est = 0.0
+        # 复合质心水平偏移 c=[cx,cy](model.p 第 16-17 维,见 acados_model.py
+        # c_sym 注释)。同样只在 gripper attach 后由 _grip_mass_step 赋值。
+        self.c_est = np.zeros(2)
+        # attach 瞬间的真实几何偏移(box-机体,proximity 节点发布),None=还没
+        # 收到。有它就用真实力臂/偏心算 dJ 和 c_est,没有才退回 grip_arm_d 参数。
+        self.attach_offset = None
 
         # "投放包裹"场景,第三版实现(前两版分别撞上了"独立 dynamic 刚体致命
         # 飞不起来"和"DetachableJoint 在同模型内 self-reference 不生效"两个
@@ -189,10 +196,24 @@ class AcadosNMPCNode(Node):
         # grip_payload_mass<=0 则不做阶跃。
         self.declare_parameter('grip_payload_mass', 0.0)
         self.declare_parameter('grip_mass_step_sec', 4.0)
+        # 吊挂力臂 d[m]:box 焊接点到机体的距离,用来算惯量增量 dJ=m_p*d^2
+        # (见 acados_model.py dJ_sym)。跟 attach 时的 dz(proximity 日志里)
+        # 对齐:当前窗口 h_min/h_max=[0.35,0.60],短臂稳态 dz≈0.47m。
+        self.declare_parameter('grip_arm_d', 0.47)
         # box 正上方的安全接近高度:两段式接近的第一段目标高度。先在这个高度
         # 把水平位置对齐、悬停稳,再垂直下降到 grip_z_low——避免在 grip_z_low
         # 这种低空做水平平移时高度下冲、起落架把 box 顶出吸附窗口(attach 竞态)。
         self.declare_parameter('grip_approach_z', 1.5)
+        # attach 后把 PX4 内环速率 PID 的总增益 MC_ROLLRATE_K/MC_PITCHRATE_K
+        # 按惯量比 (J+dJ)/J 放大。根因(2026-07-02 20:46 ulog 实测):挂 0.3kg
+        # 后真实 roll 惯量是空机的 ~4.4 倍,但 PX4 速率环增益是按空机整定的,
+        # 内环带宽掉到 1/4;NMPC 的 omega 指令方向每帧都对(正误差给负速率),
+        # 但实际角速率响应滞后 0.3-0.5s,外环(Q_att=400 按空机敏捷内环调的)
+        # 遇上迟钝内环 → 相位滞后 → roll 以 ~1Hz 增幅振荡(+3°→-13°→+50°→
+        # 倾覆),跟"力矩饱和"是同一现象的两个面。给 NMPC 建再准的 dJ/质心
+        # 模型都救不了这个:失配在"NMPC 规划的是力矩、执行的是 PX4 速率环"
+        # 这个接口上,必须让内环自己知道惯量变了。设 False 可做 A/B 对照。
+        self.declare_parameter('scale_px4_rate_gains', True)
         # use_mhe=False:MHE 估计不喂回 NMPC(m_est 固定),用于隔离验证控制器。
         # 默认 True,保持现有闭环行为不变。
         self.declare_parameter('use_mhe', True)
@@ -210,10 +231,21 @@ class AcadosNMPCNode(Node):
                 self.get_parameter('grip_payload_mass').value)
             self.grip_mass_step_sec = float(
                 self.get_parameter('grip_mass_step_sec').value)
+            self.grip_arm_d = float(self.get_parameter('grip_arm_d').value)
             self.grip_approach_z = float(
                 self.get_parameter('grip_approach_z').value)
             self.grip_high_aligned = False   # 两段式接近:第一段(高空对齐)是否完成
             self.grip_mass_stepped = False
+            # PX4 内环增益同步(见 scale_px4_rate_gains 参数声明处的根因注释)
+            self.scale_px4_rate_gains = bool(
+                self.get_parameter('scale_px4_rate_gains').value)
+            self.px4_gains_scaled = False
+            self.px4_base_req_sent = False
+            self.px4_rate_k_base = {}
+            self.param_get_client = self.create_client(
+                ParamGet, '/mavros/param/get')
+            self.param_set_client = self.create_client(
+                ParamSetV2, '/mavros/param/set')
             self.hover_test_mode = True     # 固定悬停,不追 figure8
             self.payload_enabled = False    # 不用 mass_changer 的 drop
             self.m_est = p.m                 # 空机起飞(不是 p.m+payload)
@@ -264,6 +296,14 @@ class AcadosNMPCNode(Node):
         # mhe_node 的质量估计,闭环喂回 NMPC 动力学(见 self.m_est 用法)
         self.mhe_mass_sub = self.create_subscription(
             Float64, '/acados_nmpc/mhe_mass_estimate', self.mhe_mass_cb, 10)
+
+        # proximity 节点在 attach 瞬间发布的真实几何偏移(TRANSIENT_LOCAL,
+        # 订阅方必须同 QoS 才能收到 latched 消息)
+        self.attach_offset_sub = self.create_subscription(
+            Float64MultiArray, '/gripper/attach_offset',
+            self.attach_offset_cb,
+            QoSProfile(depth=1,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL))
 
         self.att_pub = self.create_publisher(
             AttitudeTarget,
@@ -333,6 +373,20 @@ class AcadosNMPCNode(Node):
             return
         self.x_cur = x
         self._append_actual_path(msg)
+
+    def attach_offset_cb(self, msg):
+        data = np.asarray(msg.data, dtype=float)
+        if data.shape == (3,) and np.all(np.isfinite(data)):
+            self.attach_offset = data
+            self.get_logger().info(
+                f'attach offset received: box-drone = [{data[0]:+.3f}, '
+                f'{data[1]:+.3f}, {data[2]:+.3f}] m')
+            # attach 发生在 NMPC 接管前(posctl 低空悬停阶段),真实惯量从这一
+            # 刻起就已经变大,立刻放大内环增益、不等 NMPC 的质量阶跃——posctl
+            # 阶段的姿态保持同样受益,也避免接管瞬间"模型阶跃+增益阶跃"叠加。
+            if self.gripper_mode and self.grip_payload_mass > 0.0:
+                dJ, _ = self._payload_geometry(data)
+                self._scale_px4_rate_gains(dJ)
 
     def mhe_mass_cb(self, msg):
         # use_mhe=False 时:MHE 只当诊断,不把估计喂回 NMPC(m_est 保持固定)。
@@ -451,7 +505,7 @@ class AcadosNMPCNode(Node):
         self.solver.set(0, 'ubx', x_cur)
         for i in range(p.N + 1):
             self.solver.set(i, 'p', np.concatenate(
-                [Xref_win[:, i], [self.m_est], [self.dJ_est]]))
+                [Xref_win[:, i], [self.m_est], [self.dJ_est], self.c_est]))
 
         if not self.warm_start_enabled:
             # cold start:无论上一步成功与否,都丢掉历史 warm-start,每一步
@@ -634,17 +688,101 @@ class AcadosNMPCNode(Node):
 
     def _grip_mass_step(self, nmpc_time):
         """诊断:吸附后(grip_mass_step_sec)把 m_est 从空机手动阶跃到带载真值,
-        给 NMPC 正确的质量认知(和 MHE 解耦)。grip_payload_mass<=0 则不做。"""
+        并同时阶跃吊挂惯量增量 dJ_est 和复合质心水平偏移 c_est——给 NMPC 正确的
+        "质量+惯量+质心"认知(和 MHE 解耦),用来隔离验证"建模是否足够",而不是
+        "估计是否收敛"。几何优先用 proximity 发来的 attach 实测偏移 r_p(两次
+        实测 dz=0.593/0.393 差异很大,写死参数不可靠),没收到才退回 grip_arm_d
+        参数、且此时偏心只能按 0 算。grip_payload_mass<=0 则不做。
+
+        物理:机体 m_b 与载荷 m_p 两点刚体系,复合质心 r_c=(m_p/m_t)*r_p;
+        对复合质心的滚转/俯仰惯量增量按平行轴定理是约化质量 μ=m_b*m_p/m_t
+        乘力臂平方(dJxx=μ*(ry²+rz²), dJyy=μ*(rx²+rz²),模型里是单标量 dJ,
+        取两者均值);推力不过质心产生的常值力矩交给模型里的 c_sym 项。"""
         if not self.gripper_mode or self.grip_mass_stepped:
             return
         if self.grip_payload_mass <= 0.0 or nmpc_time < self.grip_mass_step_sec:
             return
         self.grip_mass_stepped = True
-        self.m_est = p.m + self.grip_payload_mass
+        m_p = self.grip_payload_mass
+        m_t = p.m + m_p
+        self.m_est = m_t
+        if self.attach_offset is not None:
+            r_p = self.attach_offset
+        else:
+            r_p = np.array([0.0, 0.0, -self.grip_arm_d])
+            self.get_logger().warn(
+                'no attach offset received, falling back to grip_arm_d '
+                f'{self.grip_arm_d:.2f}m with zero lateral offset')
+        self.dJ_est, self.c_est = self._payload_geometry(r_p)
+        self._scale_px4_rate_gains(self.dJ_est)  # 兜底:没收到 attach offset 时这里补
+        tau_hover_roll = abs(self.c_est[1]) * m_t * p.g
         self.get_logger().info(
-            f't={nmpc_time:.1f}s | MASS STEP: m_est {p.m:.2f}->'
-            f'{self.m_est:.2f}kg (payload {self.grip_payload_mass:.2f}kg, '
-            f'MHE bypass)')
+            f't={nmpc_time:.1f}s | MASS+INERTIA+COM STEP: m_est {p.m:.2f}->'
+            f'{m_t:.2f}kg, dJ 0->{self.dJ_est:.4f} kg·m², '
+            f'c_xy=[{self.c_est[0]*100:+.2f},{self.c_est[1]*100:+.2f}]cm '
+            f'(payload {m_p:.2f}kg @ r_p=[{r_p[0]:+.3f},{r_p[1]:+.3f},'
+            f'{r_p[2]:+.3f}]m, hover roll tau≈{tau_hover_roll:.3f}Nm '
+            f'of tau_max {p.tau_max}, MHE bypass)')
+
+    def _payload_geometry(self, r_p):
+        """由载荷相对机体的几何偏移 r_p=[rx,ry,rz](rz<0)算 (dJ, c_xy)。
+        机体 m_b 与载荷 m_p 两点刚体系:复合质心 r_c=(m_p/m_t)*r_p;对复合
+        质心的滚转/俯仰惯量增量按平行轴定理是约化质量 μ=m_b*m_p/m_t 乘力臂
+        平方(dJxx=μ*(ry²+rz²), dJyy=μ*(rx²+rz²),模型里是单标量 dJ,取均值)。"""
+        m_p = self.grip_payload_mass
+        m_t = p.m + m_p
+        mu = p.m * m_p / m_t
+        dJ = mu * (r_p[2] ** 2 + 0.5 * (r_p[0] ** 2 + r_p[1] ** 2))
+        c = (m_p / m_t) * np.asarray(r_p[0:2], dtype=float)
+        return float(dJ), c
+
+    # ---------- PX4 内环速率增益随惯量同步 ----------
+    def _request_rate_gain_bases(self):
+        """异步读一次 MC_*RATE_K 的基准值(机架配置可能不是默认 1.0),attach
+        时在基准上乘惯量比。服务没就绪前每帧重试,发出后不再重复。"""
+        if self.px4_base_req_sent or not self.param_get_client.service_is_ready():
+            return
+        self.px4_base_req_sent = True
+        for pid in ('MC_ROLLRATE_K', 'MC_PITCHRATE_K'):
+            fut = self.param_get_client.call_async(
+                ParamGet.Request(param_id=pid))
+            fut.add_done_callback(
+                lambda f, pid=pid: self._store_rate_gain_base(pid, f))
+
+    def _store_rate_gain_base(self, pid, fut):
+        try:
+            res = fut.result()
+        except Exception as e:
+            self.get_logger().warn(f'ParamGet {pid} failed: {e}')
+            return
+        if res.success:
+            self.px4_rate_k_base[pid] = float(res.value.real)
+            self.get_logger().info(
+                f'PX4 {pid} base = {self.px4_rate_k_base[pid]:.3f}')
+        else:
+            self.get_logger().warn(f'ParamGet {pid} unsuccessful, '
+                                   f'will fall back to base 1.0')
+
+    def _scale_px4_rate_gains(self, dJ):
+        """把 PX4 速率环总增益按惯量比 (J+dJ)/J 放大,恢复被载荷惯量压塌的
+        内环带宽(根因见 scale_px4_rate_gains 参数声明处注释)。只做一次;
+        ratio 上限 5 防止 dJ 异常大时把内环推成高频震荡。"""
+        if self.px4_gains_scaled or not self.scale_px4_rate_gains:
+            return
+        self.px4_gains_scaled = True
+        for pid, J0 in (('MC_ROLLRATE_K', p.Jxx), ('MC_PITCHRATE_K', p.Jyy)):
+            ratio = min((J0 + dJ) / J0, 5.0)
+            base = self.px4_rate_k_base.get(pid, 1.0)
+            req = ParamSetV2.Request()
+            req.force_set = False
+            req.param_id = pid
+            req.value = ParameterValue(
+                type=ParameterType.PARAMETER_DOUBLE,
+                double_value=float(base * ratio))
+            self.param_set_client.call_async(req)
+            self.get_logger().info(
+                f'PX4 {pid}: {base:.3f} -> {base * ratio:.3f} '
+                f'(inertia ratio {(J0 + dJ) / J0:.2f}, cap 5.0)')
 
     def _lift_phase(self, nmpc_time):
         """NMPC 接管(低空悬停 + proximity 完成 attach)满 grip_lift_after_sec
@@ -678,6 +816,9 @@ class AcadosNMPCNode(Node):
         if not self.state.connected:
             self.pub_hover_pos()
             return
+
+        if self.gripper_mode:
+            self._request_rate_gain_bases()
 
         if t_elapsed < self.ekf_wait_sec:
             self.pub_hover_pos()
