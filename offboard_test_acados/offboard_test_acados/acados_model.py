@@ -5,10 +5,10 @@
 # (CasADi/IPOPT 版本的 offboard_test/nmpc_node.py 不需要这个能力,继续用它
 # 自己原来的 build_dynamics(),两边没有耦合。)
 #
-# model.p = [xr(13维,参考状态); m(1维,当前质量估计)] = 14维。时变参考用
-# model.p 而不是 yref 来传,是因为代价里的四元数误差项对参考值是非线性的
-# (四元数乘法),没法写成简单的 "y - yref" 形式,必须让参考值进 CasADi
-# 表达式本身——质量参数顺路放在同一个 model.p 向量里,不用再加一个参数槛位。
+# model.p = [xr(13维,参考状态); m(1维,当前质量估计); dJ(1维,吊挂惯量增量)]
+# = 15维。时变参考用 model.p 而不是 yref 来传,是因为代价里的四元数误差项对
+# 参考值是非线性的(四元数乘法),没法写成简单的 "y - yref" 形式,必须让参考值
+# 进 CasADi 表达式本身——质量/惯量参数顺路放在同一个 model.p 向量里。
 
 import casadi as cs
 from acados_template import AcadosModel
@@ -25,6 +25,13 @@ def build_acados_model():
     u_sym = cs.MX.sym('u', p.nu)
     xr_sym = cs.MX.sym('xr', p.nx)
     m_sym = cs.MX.sym('m', 1)
+    # 吊挂载荷对滚转/俯仰惯量的增量 dJ = m_p*d^2(点质量 m_p 刚性焊在机体正
+    # 下方 d 处,平行轴定理;载荷在机体 z 轴上,Izz 不变,CoM 沿轴下移也不产生
+    # 推力/重力力矩——推力线始终过合成 CoM)。空机时 0。这是夹爪实验里"0.2kg
+    # 就把姿态打崩"的主导缺失物理:0.3kg@0.47m 臂 → dJ≈0.066,是空机
+    # Jxx(0.0217) 的 4 倍,NMPC 按空机惯量规划的角加速度真机做不到,力矩饱和
+    # 后 SQP 级联发散。跟 m_sym 一样走 model.p,attach 时随质量阶跃一起喂。
+    dJ_sym = cs.MX.sym('dJ', 1)
 
     vel = x_sym[3:6]
     q_  = x_sym[6:10]
@@ -53,7 +60,7 @@ def build_acados_model():
     )
     quat_dot = 0.5 * cs.mtimes(Xi_q, om)
 
-    J_vec = cs.MX([p.Jxx, p.Jyy, p.Jzz])
+    J_vec = cs.vertcat(p.Jxx + dJ_sym, p.Jyy + dJ_sym, p.Jzz)
     Jom   = J_vec * om
     om_dot = (tau_ - cs.cross(om, Jom)) / J_vec
 
@@ -63,7 +70,7 @@ def build_acados_model():
     model.name = MODEL_NAME
     model.x = x_sym
     model.u = u_sym
-    model.p = cs.vertcat(xr_sym, m_sym)
+    model.p = cs.vertcat(xr_sym, m_sym, dJ_sym)
     model.f_expl_expr = xdot
 
     e_track = tracking_error_sym(x_sym, xr_sym)        # 12维: [ep;ev;eq_vec;eomega]
