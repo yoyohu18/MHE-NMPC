@@ -46,11 +46,19 @@ class AcadosParams:
     # --- acados 控制器自己的时域/代价权重,独立调(不影响 offboard_test 那边) ---
     # acados controller's own horizon/cost weights, tuned independently
     # (changing these never affects the offboard_test CasADi/IPOPT side).
-    N  = 10   # 预测时域步数(horizon steps)。实测过 dt=0.05/N=20(同样 1s 时域但
-              # 步数翻倍)反而更糟(求解耗时峰值更高、更快失控),所以固定用这组
-              # Horizon length (steps). Tried dt=0.05/N=20 (same 1s horizon, double
-              # the steps) — it was worse (higher solve-time spikes, failed sooner),
-              # so this pair is kept fixed.
+    N  = 10   # 预测时域步数(horizon steps)。2026-07-08 复测过 dt=0.05/N=20
+              # (同样 1s 时域但步数翻倍,20Hz 控制环)——即使叠加了 dJ/c_xy
+              # 建模、MERIT_BACKTRACKING、方案(a)受控attach、descend 收敛判据
+              # 这些后续修复,同一个 ry=0.05 工况下 attach 瞬态 pos_err 峰值仍
+              # 从 <0.05m 恶化到 1.16m(虽然这次没像最早那次一样发散),solve
+              # 耗时也从 1-5ms 涨到 6-9ms。跟当年结论一致,改回这组固定值。
+              # Horizon length (steps). 2026-07-08 retested dt=0.05/N=20 (same 1s
+              # horizon, double the steps, 20Hz control loop) — even with the
+              # later dJ/c_xy modeling, MERIT_BACKTRACKING, controlled attach
+              # (方案a), and descend convergence-gate fixes, the same ry=0.05
+              # case still got a worse attach transient (pos_err peak 0.05m ->
+              # 1.16m, though it no longer diverged outright) and slower solves
+              # (1-5ms -> 6-9ms). Confirms the original finding; reverted.
     dt = 0.1  # 每步时长(s),N*dt=1.0s 是 NMPC 往前看的预测时域长度;dt 同时也是
               # ROS2 控制循环周期(acados_nmpc_node.py 的 self.timer 用的就是这个值)
               # Step length (s). N*dt=1.0s is the NMPC look-ahead horizon; dt also

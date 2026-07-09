@@ -31,6 +31,12 @@ def build_mhe_model() -> AcadosModel:
 
     w_sym = cs.MX.sym('w', mhe_p.nw)          # 过程噪声,装在 MHE 的 'u' 槛位
     u_known = cs.MX.sym('u_known', mhe_p.nu_known)  # 已知 [T, taux, tauy, tauz]
+    # 已知几何(dJ, c_xy):跟 acados_model.py 的 dJ_sym/c_sym 同一套物理,见
+    # mhe_params.py 的 n_geom 注释——不是新增被估计自由度,是喂给 MHE 自己
+    # 动力学模型的已知参数,修掉"固定空机 J 导致质量估计被姿态失配拖偏"的问题。
+    geom = cs.MX.sym('geom', mhe_p.n_geom)    # [dJ, cx, cy]
+    dJ_sym = geom[0]
+    c_sym = geom[1:3]
 
     T_   = u_known[0]
     tau_ = u_known[1:4]
@@ -54,9 +60,11 @@ def build_mhe_model() -> AcadosModel:
     )
     quat_dot = 0.5 * cs.mtimes(Xi_q, om)
 
-    J_vec = cs.MX([mhe_p.Jxx, mhe_p.Jyy, mhe_p.Jzz])
+    J_vec = cs.vertcat(mhe_p.Jxx + dJ_sym, mhe_p.Jyy + dJ_sym, mhe_p.Jzz)
     Jom   = J_vec * om
-    om_dot = (tau_ - cs.cross(om, Jom)) / J_vec
+    # 推力对复合质心的力矩(见 acados_model.py 同名注释):[-cy*T, +cx*T, 0]。
+    tau_thrust_com = cs.vertcat(-c_sym[1] * T_, c_sym[0] * T_, 0.0)
+    om_dot = (tau_ + tau_thrust_com - cs.cross(om, Jom)) / J_vec
 
     m_dot = cs.MX.zeros(1)  # 窗口内质量当常数,见文件头注释
 
@@ -69,7 +77,7 @@ def build_mhe_model() -> AcadosModel:
     model.name = MODEL_NAME
     model.x = x_aug
     model.u = w_sym
-    model.p = u_known
+    model.p = cs.vertcat(u_known, geom)
     model.f_expl_expr = f_expl
 
     # stage 0(窗口起点,带到达代价): [测量残差(13); 过程噪声残差(13); 到达代价残差(14)]

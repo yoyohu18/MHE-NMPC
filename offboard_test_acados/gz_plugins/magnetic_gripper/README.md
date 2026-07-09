@@ -7,13 +7,13 @@
 
 组成:
 - `MagneticGripper.{hh,cc}` + `CMakeLists.txt` —— gz-sim 8 **world 级** system 插件。
-- `../../offboard_test_acados/proximity_gripper_node.py` —— ROS 2 接近触发节点(**gz-transport 直读位姿、直发 attach/detach,不经 bridge**)。
-- `../../offboard_test_acados/gripper_flight_node.py` —— 简易 MAVROS 位置控制飞行节点(takeoff→飞到 box→吸附→带载悬停→投放),用于纯夹爪演示。
-- `../../config/gripper_params.yaml` —— 阈值/目标参数。
-- `../../config/gripper_bridge.yaml` —— ros_gz_bridge 配置(**现已不需要**,保留作参考;见 §4.2)。
-- `../../worlds/gripper_test.sdf` —— 含 x500 spawn 位 + 一个 box + 全套 PX4 system 插件的测试 world。
-- `../../../../run_sitl_gripper.sh` —— 一键跑"裸 MAVROS 控制 + 夹爪"完整演示。
-- `../../../../run_sitl_gripper_acados.sh` —— 一键跑"acados NMPC + MHE + 夹爪"重载实验(`acados_nmpc_node` 的 `gripper_mode`)。
+- `../../offboard_test_acados/gripper/proximity_gripper_node.py` —— ROS 2 接近触发节点(**gz-transport 直读位姿、直发 attach/detach,不经 bridge**)。
+- `../../offboard_test_acados/gripper/gripper_flight_node.py` —— 简易 MAVROS 位置控制飞行节点(takeoff→飞到 box→吸附→带载悬停→投放),用于纯夹爪演示。
+- `../../config/gripper/gripper_params.yaml` —— 阈值/目标参数。
+- `../../config/gripper/gripper_bridge.yaml` —— ros_gz_bridge 配置(**现已不需要**,保留作参考;见 §4.2)。
+- `../../worlds/gripper/gripper_test.sdf` —— 含 x500 spawn 位 + 一个 box + 全套 PX4 system 插件的测试 world。
+- `../../../scripts/gripper/run_sitl_gripper.sh` —— 一键跑"裸 MAVROS 控制 + 夹爪"完整演示。
+- `../../../scripts/gripper/run_sitl_gripper_acados.sh` —— 一键跑"acados NMPC + MHE + 夹爪"重载实验(`acados_nmpc_node` 的 `gripper_mode`)。
 
 > **先看结论**:100g 载荷下整套 pick→carry→hover→drop 完全跑通、飞行稳定;
 > **0.3kg 及以上,acados NMPC + MHE 也压不住会发散**——原因不是质量,是吊挂的
@@ -98,7 +98,7 @@ SDF 参数(`<plugin>` 块内,均可选,缺省即上表默认名):
 
 ## 4. 运行
 
-### 4.1 world SDF 接线(已在 `worlds/gripper_test.sdf` 内)
+### 4.1 world SDF 接线(已在 `worlds/gripper/gripper_test.sdf` 内)
 
 ```xml
 <world name="gripper_test">
@@ -128,10 +128,10 @@ attach/detach 的 `gz.msgs.StringMsg` 发给插件。**完全不需要 ros_gz_br
 
 ```bash
 ros2 run offboard_test_acados proximity_gripper_node \
-    --ros-args --params-file .../config/gripper_params.yaml -p drone_model:=x500_0
+    --ros-args --params-file .../config/gripper/gripper_params.yaml -p drone_model:=x500_0
 ```
 
-参数(`config/gripper_params.yaml`):
+参数(`config/gripper/gripper_params.yaml`):
 
 | 参数 | 含义 | 默认 |
 |------|------|------|
@@ -178,7 +178,7 @@ detach:`/gripper/release = true`,或 `/gripper/enable` 拉低。
 ## 6. 验收(端到端,可复现)
 
 > 前提:PX4 SITL 把 plain x500 spawn 进 `gripper_test` world。把
-> `worlds/gripper_test.sdf` 放到 PX4 的 `Tools/simulation/gz/worlds/`(或软链),
+> `worlds/gripper/gripper_test.sdf` 放到 PX4 的 `Tools/simulation/gz/worlds/`(或软链),
 > 并设 `GZ_SIM_SYSTEM_PLUGIN_PATH` 指向插件 build 目录,然后:
 > ```bash
 > export PX4_GZ_WORLD=gripper_test

@@ -71,6 +71,11 @@ class MassChanger:
   private: gz::transport::Node node;
   private: std::atomic<bool> dropRequested{false};
   private: bool dropApplied{false};
+  // 有效质量变化量(kg,负=减载/drop,正=加载/抓取等效)与对应的世界系 Z 力。
+  // 由环境变量 MASS_CHANGER_DELTA_KG 在 Configure 时读入,默认 -0.5(与
+  // 参数化之前的行为逐字节一致);触发消息本身仍是 gz.msgs.Empty 不变。
+  private: double deltaKg{-0.5};
+  private: double forceZ{0.0};
 };
 
 }  // namespace mass_changer

@@ -45,14 +45,15 @@ static constexpr double kGravity = 9.8;
 // in gz-sim Harmonic (gz-sim issue #2733: the ECM component changes and
 // `gz model` reads the new value, but the integrator keeps the mass it saw
 // at model-load time). So instead of swapping the inertial on drop, we hold
-// the inertial fixed at kLoadedMass and emulate the payload leaving with a
-// constant upward world-frame force of (kLoadedMass - kEmptyMass)*g. At
-// hover this makes the required thrust settle at kEmptyMass*g, i.e. the drone
-// flies as if it weighed kEmptyMass - which is exactly the effective mass the
-// MHE's translational (thrust/accel) estimate observes. Caveat: the rotational
-// inertia is unchanged, so this only emulates the translational mass step, not
-// a full inertia change - fine here, the MHE only estimates the mass scalar.
-static constexpr double kDropForceZ = (kLoadedMass - kEmptyMass) * kGravity;
+// the inertial fixed and emulate the payload change with a constant
+// world-frame Z force of -delta_kg*g (delta<0 drop -> upward force,
+// delta>0 grasp -> downward force). At hover this makes the required thrust
+// settle at (m_true + delta)*g - exactly the effective mass the MHE's
+// translational (thrust/accel) estimate observes. Caveat: the rotational
+// inertia is unchanged, so this only emulates the translational mass step,
+// not a full inertia change - fine here, the MHE only estimates the mass
+// scalar. delta_kg comes from env MASS_CHANGER_DELTA_KG (default -0.5,
+// byte-identical to the pre-parameterization behavior).
 
 //////////////////////////////////////////////////
 void MassChanger::Configure(
@@ -77,8 +78,23 @@ void MassChanger::Configure(
   }
 
   this->SetInertial(_ecm, kLoadedMass, kLoadedIxx, kLoadedIyy, kLoadedIzz);
+
+  if (const char *env = std::getenv("MASS_CHANGER_DELTA_KG"))
+  {
+    try
+    {
+      this->deltaKg = std::stod(env);
+    }
+    catch (const std::exception &)
+    {
+      gzerr << "[MassChanger] bad MASS_CHANGER_DELTA_KG='" << env
+            << "', keeping default " << this->deltaKg << " kg\n";
+    }
+  }
+  this->forceZ = -this->deltaKg * kGravity;
   gzmsg << "[MassChanger] Configured: base_link set to LOADED ("
-        << kLoadedMass << " kg)\n";
+        << kLoadedMass << " kg), delta on trigger = " << this->deltaKg
+        << " kg (force Z " << this->forceZ << " N)\n";
 
   this->node.Subscribe(
       "/payload/drop_mass", &MassChanger::OnDropMsg, this);
@@ -105,10 +121,10 @@ void MassChanger::PreUpdate(
   if (!this->dropApplied)
   {
     this->dropApplied = true;
-    gzmsg << "[MassChanger] Drop applied: emulating -"
-          << (kLoadedMass - kEmptyMass) << " kg via a constant +"
-          << kDropForceZ << " N world-Z force on base_link (inertial mass "
-          << "stays " << kLoadedMass << " kg, see class comment) at sim_time="
+    gzmsg << "[MassChanger] Mass step applied: emulating "
+          << this->deltaKg << " kg via a constant " << this->forceZ
+          << " N world-Z force on base_link (inertial mass stays "
+          << kLoadedMass << " kg, see class comment) at sim_time="
           << std::chrono::duration<double>(_info.simTime).count() << "s\n";
   }
 
@@ -118,7 +134,7 @@ void MassChanger::PreUpdate(
   // constant. Applied at the CoM (our inertial's CoM is at the link origin),
   // so it contributes no torque - a pure translational weight offset.
   gz::sim::Link baseLink(this->baseLinkEntity);
-  baseLink.AddWorldForce(_ecm, gz::math::Vector3d(0.0, 0.0, kDropForceZ));
+  baseLink.AddWorldForce(_ecm, gz::math::Vector3d(0.0, 0.0, this->forceZ));
 }
 
 //////////////////////////////////////////////////

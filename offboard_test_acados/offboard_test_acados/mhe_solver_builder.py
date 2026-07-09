@@ -52,10 +52,10 @@ def build_ocp() -> AcadosOcp:
     ocp.cost.yref_e = np.zeros(0)
     ocp.cost.Vx_e = np.zeros((0, mhe_p.nx_aug))
 
-    # 已知输入 [T, taux, tauy, tauz] 通过 model.p 传入,每步求解前用 solver.set(i,'p',...)
-    # 覆盖成历史窗口里那一步实际发出的指令——必须显式设置初值,否则 acados 在
-    # OCP 构建时会报维度不一致的错(跟 acados_solver_builder.py 里同样的坑)。
-    ocp.parameter_values = np.zeros(mhe_p.nu_known)
+    # 已知输入 [T, taux, tauy, tauz] + 已知几何 [dJ, cx, cy] 通过 model.p 传入,
+    # 每步求解前用 solver.set(i,'p',...) 覆盖——必须显式设置初值,否则 acados
+    # 在 OCP 构建时会报维度不一致的错(跟 acados_solver_builder.py 里同样的坑)。
+    ocp.parameter_values = np.zeros(mhe_p.nu_known + mhe_p.n_geom)
 
     # 质量这一维加个宽松的物理边界,纯粹防止激励不足的窗口把质量推到离谱的值,
     # 不是真实约束——必须连 idxbx 一起设,漏了的话 acados 不报错但约束形同虚设
