@@ -14,7 +14,8 @@ from collections import defaultdict
 import numpy as np
 
 sys.path.insert(0, '/home/clear/ros2_ws_HJH/src/scripts/masschanger')
-import parse_m0_logs as est  # noqa: E402
+import parse_m0_logs as est          # noqa: E402 估计层(mhe 日志)
+import parse_dropwindow_logs as ctl  # noqa: E402 控制层(nmpc [drop-window] 逐帧)
 
 D = '/home/clear/ros2_ws_HJH/nmpc_test_results/'
 M_EMPTY = 2.064  # x500 空机(真实平动质量,见 mhe_node THRUST_CAL_GAIN 注释)
@@ -32,7 +33,7 @@ def fmt(vals, prec=2):
 
 
 def load_manifest(path):
-    # (delta, cfg) -> [mhe_stamp, ...],只收 status=ok 的轮
+    # (delta, cfg) -> [(mhe_stamp, nmpc_stamp), ...],只收 status=ok 的轮
     groups = defaultdict(list)
     for line in open(path):
         line = line.strip()
@@ -44,7 +45,7 @@ def load_manifest(path):
         cfg, delta, rep, mhe_ts, nmpc_ts, status = parts[:6]
         if status != 'ok':
             continue
-        groups[(float(delta), cfg)].append(mhe_ts)
+        groups[(float(delta), cfg)].append((mhe_ts, nmpc_ts))
     return groups
 
 
@@ -71,25 +72,37 @@ def main():
         for cfg in CFG_ORDER:
             stamps = groups.get((delta, cfg), [])
             ent, stl, osd, mss = [], [], [], []
+            pk, rec = [], []          # 控制层:pos_err 峰值 / 恢复时间
             bad = []
-            for ts in stamps:
+            for mhe_ts, nmpc_ts in stamps:
                 try:
-                    r = est.parse(D + f'mhe_node_{ts}.log')
+                    r = est.parse(D + f'mhe_node_{mhe_ts}.log')
                 except (RuntimeError, FileNotFoundError):
-                    bad.append(ts)
+                    bad.append(mhe_ts)
                     continue
                 inband = (r['t'] >= 0) & (np.abs(r['m'] - m_true) <= band)
                 ent.append(r['t'][inband][0] if np.any(inband) else np.nan)
                 stl.append(r['t_settle'])
                 osd.append(abs(r['m_min'] - m_true))
                 mss.append(r['m_ss'])
+                # 控制层(A.3):nmpc [drop-window] 逐帧 pos_err 峰值 + 恢复时间。
+                # 与估计层同源判据(T 偏离基线 >1.5N 定物理生效)。缺日志或
+                # 无 drop-window 段则跳过该轮控制层(估计层仍计)。
+                try:
+                    c = ctl.parse(D + f'acados_nmpc_node_{nmpc_ts}.log')
+                    pk.append(c['pe_peak'])
+                    rec.append(c['t_rec'])
+                except (RuntimeError, FileNotFoundError):
+                    pass
             print(f'  --- {CFG_LABEL[cfg]} ---')
             if bad:
                 print(f'      剔除失效轮: {bad}')
-            print(f'      首次入带 [s]  : {fmt(ent)}')
-            print(f'      驻留收敛 [s]  : {fmt(stl)}')
-            print(f'      过冲深度 [kg] : {fmt(osd, 3)}')
-            print(f'      稳态估计 [kg] : {fmt(mss, 3)}')
+            print(f'    [估计层] 首次入带 [s]  : {fmt(ent)}')
+            print(f'    [估计层] 驻留收敛 [s]  : {fmt(stl)}')
+            print(f'    [估计层] 过冲深度 [kg] : {fmt(osd, 3)}')
+            print(f'    [估计层] 稳态估计 [kg] : {fmt(mss, 3)}')
+            print(f'    [控制层] pos_err峰 [m] : {fmt(pk, 3)}')
+            print(f'    [控制层] 恢复<5cm [s]  : {fmt(rec)}')
 
 
 if __name__ == '__main__':
