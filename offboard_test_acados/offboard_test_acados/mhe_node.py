@@ -139,6 +139,25 @@ class MHENode(Node):
         self.declare_parameter('schedule_theta', [float(v) for v in M0_THETA])
         self.declare_parameter('event_confirm_thresh_n', 1.5)
         self.declare_parameter('event_confirm_timeout_sec', 3.0)
+        # 无信号消融(2026-07-13,长期计划 A.2 / C.3):事件触发的调度机制不变,
+        # 但**去掉外部事件信号这一路**——检测器不再由 /acados_nmpc/mass_event 或
+        # /gripper/attach_offset 武装,改成纯从 T_phys 相对慢基线的残差自触发
+        # (低通基线 + 持续超阈值确认,同一个 confirm_thresh),量化"事件信号"
+        # 相对"仅靠残差检测"到底值多少。这是论文"学习/规则版对规则版增量"的
+        # 核心对照。'external'=默认(现有有信号行为,逐字节不变),'residual'=无信号。
+        # 持续帧数 resid_persist 是抗阵风脉冲的第二段(阵风残差是脉冲/宽带,质量
+        # 突变是台阶,持续超阈值才确认——正是 C.3 风扰消融要用的判据,提前上)。
+        self.declare_parameter('event_signal_mode', 'external')
+        self.declare_parameter('resid_baseline_tau_sec', 3.0)
+        self.declare_parameter('resid_persist_frames', 2)
+        # 预热门控(2026-07-13 冒烟实测加):起飞/NMPC 接管姿态的暂态期 T_phys
+        # 本身大幅摆动(frame 5 摆 1.66N),此时没有可信静基线,残差检测器会把
+        # 暂态摆动误当成质量突变(实测无信号版在 frame 5 假触发)。要求检测器先
+        # 自主确认基线已静(连续 resid_warmup_frames 帧 T_phys 贴基线,偏差
+        # <resid_settle_tol_n)才开放检测——完全不用外部时刻信息,与"无信号"
+        # 语义一致。暂态摆动会不断打断预热计数,预热自然推迟到真正悬停稳。
+        self.declare_parameter('resid_warmup_frames', 20)
+        self.declare_parameter('resid_settle_tol_n', 0.8)
         self.event_enabled = bool(
             self.get_parameter('event_trigger_enable').value)
         self.confirm_thresh = float(
@@ -146,11 +165,39 @@ class MHENode(Node):
         self.confirm_timeout_frames = int(round(
             float(self.get_parameter('event_confirm_timeout_sec').value)
             / mhe_p.dt))
+        self.signal_mode = str(
+            self.get_parameter('event_signal_mode').value).lower()
+        if self.signal_mode not in ('external', 'residual'):
+            self.get_logger().warn(
+                f"unknown event_signal_mode '{self.signal_mode}', "
+                "falling back to 'external'")
+            self.signal_mode = 'external'
+        # 慢基线 EMA 系数 alpha=dt/tau:tau 取几秒,足够慢不追台阶(冻结在过渡期
+        # 又进一步保证武装基线是阶跃前的真值),又能跟掉长期缓漂。
+        tau = max(float(self.get_parameter('resid_baseline_tau_sec').value),
+                  mhe_p.dt)
+        self.resid_ema_alpha = mhe_p.dt / tau
+        self.resid_persist = max(
+            1, int(self.get_parameter('resid_persist_frames').value))
+        self.resid_warmup = max(
+            1, int(self.get_parameter('resid_warmup_frames').value))
+        self.resid_settle_tol = float(
+            self.get_parameter('resid_settle_tol_n').value)
+        self._resid_baseline = None   # T_phys 慢基线(残差自检测用)
+        self._resid_pending = 0       # 已连续超阈值的帧数(持续确认计数)
+        self._resid_cross_frame = None  # 首次越阈那一帧的全局序号
+        self._resid_settled = False   # 基线是否已预热到"可信静基线"(开放检测)
+        self._resid_stable = 0        # 连续贴基线的帧数(预热计数)
         theta = np.array(self.get_parameter('schedule_theta').value,
                          dtype=float)
         self.scheduler = ParametricWeightSchedule(theta)
         self.get_logger().info(
-            f'weight schedule theta = [{", ".join(f"{v:.2f}" for v in theta)}]')
+            f'weight schedule theta = [{", ".join(f"{v:.2f}" for v in theta)}]'
+            f', signal mode = {self.signal_mode}'
+            + (f' (residual self-trigger: thresh={self.confirm_thresh:.1f}N '
+               f'persist={self.resid_persist} baseline_tau='
+               f'{mhe_p.dt / self.resid_ema_alpha:.1f}s)'
+               if self.signal_mode == 'residual' else ''))
         self._in_transition = False  # 上一窗口是否处于事件过渡期(日志用)
         self._armed_frame = None     # 检测器武装时刻的帧序号(None=未武装)
         self._armed_baseline = None  # 武装时刻的 T_phys 基线
@@ -285,6 +332,15 @@ class MHENode(Node):
                 f'mass event [{source}] received (trigger disabled, '
                 'logging only)')
             return
+        if self.signal_mode == 'residual':
+            # 无信号消融:外部事件只用来对齐诊断日志窗口(为了有 10Hz 数据可
+            # 解析对比),**绝不拿它武装检测器**——武装/确认全交给 _residual_detect
+            # 从 T_phys 残差自触发,这才是"无信号"的语义。
+            self.get_logger().info(
+                f'mass event [{source}] received (no-signal ablation: '
+                'external signal ignored for triggering, logging only; '
+                'detection deferred to T_phys residual)')
+            return
         # 两段式触发第一段:武装 T_phys 突变检测器,记下当前基线
         self._armed_frame = self.frames
         self._armed_baseline = self.thrust_phys
@@ -324,6 +380,65 @@ class MHENode(Node):
         self._armed_frame = None
         self._armed_baseline = None
 
+    def _residual_detect(self):
+        """无信号消融的自触发检测器(event_signal_mode='residual')。
+        不使用任何外部事件武装,纯从 T_phys 相对慢基线(EMA 低通)的残差做
+        两段式确认:①瞬时残差越过 confirm_thresh = 越阈(第一段),②连续
+        resid_persist 帧仍越阈 = 确认(第二段,抗阵风脉冲——阵风残差是脉冲/
+        宽带,质量突变是台阶)。确认后用"首次越阈帧"作为第一个事件后测量帧
+        通知调度器,与外部有信号版走同一条降权链路。每帧入缓冲后调用。"""
+        T = self.thrust_phys
+        if T is None:
+            return
+        a = self.resid_ema_alpha
+        if self.scheduler.event_frame is not None:
+            # 已在事件过渡期内,调度器接管;基线/预热全复位,过渡结束后由下面的
+            # None 分支重新播种到**新稳态** T_phys 并重新预热——否则过渡结束基线
+            # 还停在阶跃前旧值,会把已经永久的台阶反复当成新事件无限重触发。
+            self._resid_baseline = None
+            self._resid_pending = 0
+            self._resid_settled = False
+            self._resid_stable = 0
+            return
+        if self._resid_baseline is None:
+            self._resid_baseline = T
+            self._resid_stable = 0
+            return
+        dev = abs(T - self._resid_baseline)
+        if not self._resid_settled:
+            # 预热门控:连续 resid_warmup 帧 T_phys 贴基线(<settle_tol)才判定
+            # 基线可信、开放检测。暂态摆动(>settle_tol)会清零计数、推迟预热。
+            self._resid_baseline = (1.0 - a) * self._resid_baseline + a * T
+            if dev < self.resid_settle_tol:
+                self._resid_stable += 1
+                if self._resid_stable >= self.resid_warmup:
+                    self._resid_settled = True
+                    self.get_logger().info(
+                        '[no-signal] baseline settled at '
+                        f'{self._resid_baseline:.2f}N '
+                        f'(quiet {self.resid_warmup} frames); detector armed')
+            else:
+                self._resid_stable = 0
+            return
+        # 已预热:两段式确认
+        if dev > self.confirm_thresh:
+            if self._resid_pending == 0:
+                self._resid_cross_frame = self.frames - 1  # 首次越阈帧序号
+            self._resid_pending += 1
+            if self._resid_pending >= self.resid_persist:
+                self.scheduler.notify_event(self._resid_cross_frame)
+                self.get_logger().info(
+                    '[no-signal] mass mutation self-detected at frame '
+                    f'{self._resid_cross_frame}: T_phys={T:.2f}N vs baseline '
+                    f'{self._resid_baseline:.2f}N (dev {dev:.2f}N > '
+                    f'{self.confirm_thresh:.1f}N over {self.resid_persist} '
+                    'frames); de-weighting pre-event stages')
+                self._resid_pending = 0
+            return
+        # 未越阈(或阵风脉冲已回落):清持续计数,慢基线继续低通跟踪长期缓漂
+        self._resid_pending = 0
+        self._resid_baseline = (1.0 - a) * self._resid_baseline + a * T
+
     def u_opt_cb(self, msg):
         u = np.array(msg.data)
         if u.shape[0] == mhe_p.nu_known and np.all(np.isfinite(u)):
@@ -348,7 +463,10 @@ class MHENode(Node):
         if len(self.u_buf) > mhe_p.N:
             self.u_buf.pop(0)
         self.frames += 1
-        self._check_confirmation()
+        if self.event_enabled and self.signal_mode == 'residual':
+            self._residual_detect()
+        else:
+            self._check_confirmation()
 
         if len(self.y_buf) < mhe_p.N + 1:
             return  # 窗口还没攒满

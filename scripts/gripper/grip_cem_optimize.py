@@ -8,9 +8,10 @@ attach(不是 wrench 恒力),花名册换成质量×偏心网格,真值质量恒
 (没有 wrench 的 gz CLI ~1.1s 冷启动延迟)。
 
 5 维 θ = 4 维权重时间表(mhe_weight_learning.ParametricWeightSchedule)+ 1 维
-事件确认阈值 event_confirm_thresh_n [N]。首轮只验证"能学出收益"的存在性,不
-追求最优:小规模 pop/gens、2×2 花名册。θ 是否加维(偏心力矩残差 vs 质量残差
-分块调度)按首轮结果决定,不预先加。
+**无量纲确认阈值 α**(2026-07-09 重参数化,原为绝对值 [N])。实际阈值
+= α·GRAVITY·mass,见 BOUNDS/M0_THETA 处注释。首轮 N-绝对值版已证"能学出收益"
+的存在性,但留出中间质量外推失败(θ4 力量纲没归一化),移植诊断坐实根因,本版
+改无量纲 α 让阈值随 ΔT 自适应。节奏维 θ0/θ1/θ3 是有迁移价值的无量纲量,不动。
 
 用法: python3 grip_cem_optimize.py [--hours 4] [--gens 6] [--pop 4]
 """
@@ -37,15 +38,21 @@ import parse_dropwindow_logs as ctl  # noqa: E402
 # 空机质量常数(acados_params.py p.m / offboard_test.nmpc_node.Params.m)。
 # gripper 真值质量 = 空机 + payload,恒为加载。
 M_EMPTY = 2.0643
-# θ 第 5 维 = 事件确认阈值 event_confirm_thresh_n [N]。上界比 wrench 的 3.0 收窄
-# ——gripper attach 物理瞬时生效,不需要 wrench 那样等 ~1.1s 冷启动噪声,阈值只
-# 要够区分噪声底(~0.05N)与最小档 payload 的 ΔT(0.15kg→≈1.03N)。下界放低到
-# 0.1 让 CEM 在轻载档也能压低阈值抓早。
+GRAVITY = 9.81   # 静态 ΔT = GRAVITY*mass(载荷重量),θ4=α 的归一化基准
+# θ 第 5 维 = **无量纲确认阈值 α**(2026-07-09 重参数化,原来是绝对值 [N])。
+# 动机:θ4 是唯一力量纲维,直接跟 |T_phys-baseline|≈ΔT=g·m_p 比较,固定绝对值
+# 在不同质量上呈现的"有效相对门槛"差一倍(θ*=1.485N 在 0.15kg 是 α=1.01、在
+# 0.30kg 是 α=0.50),CEM 学出的折中在留出中间质量上外推失败。移植诊断坐实:
+# 只把 θ4 按 ΔT 归一化(节奏维 θ0/θ1/θ3 原样)就能在留出点稳定反超 M0
+# (Δloss 0.56>4σ,Δenter 0.16s>3σ)。改成搜 α,run_sitl_once 里实际阈值
+# = α·GRAVITY·mass,结构上就能外推到任意质量。区间 [0.1,1.0]:下界 0.1 保证
+# 0.1·ΔT 仍高于 T_phys 悬停噪声(~0.05N),上界 1.0=门槛等于满 ΔT(再高=等完全
+# 稳态才确认,无意义)。详见记忆 mhe-learning-m0-event-trigger。
 BOUNDS = np.array([[-6.0, -0.5], [-3.0, 2.0], [0.0, 20.0], [-2.0, 3.0],
-                   [0.1, 2.0]])
-# 种子:前 4 维 = M0 规则版(scenario-agnostic);第 5 维默认降到 0.8(在 0.15kg
-# ΔT≈1.03N 之下,不卡在旧盲区边界 1.5)。
-M0_THETA = np.array([-4.0, 0.0, 0.0, 0.0, 0.8])
+                   [0.1, 1.0]])
+# 种子:前 4 维 = M0 规则版节奏(scenario-agnostic,无量纲、直接沿用);第 5 维
+# = α 种子 0.5(移植诊断验证过的好值,scaled 成功 α≈0.505)。
+M0_THETA = np.array([-4.0, 0.0, 0.0, 0.0, 0.5])
 # 评估花名册:质量(0.15/0.30kg)× 偏心(0.05/0.10m)网格,精简 2×2 起步
 # (gripper 单集比 wrench 慢且方差大)。0.05/0.10 是今天(07-08)descend 修复后
 # 已验证稳定的两个偏心值,不引入未验证的新值。所有候选用同一花名册
@@ -59,7 +66,7 @@ ROSTER = ((0.30, 0.05), (0.30, 0.10), (0.15, 0.05), (0.15, 0.10))
 # 还测不出真实收益。
 GEOM_MP_FLOOR = min(m for m, _ in ROSTER)
 PENALTY = 20.0   # 单工况失效(重试仍失败)的罚分 loss
-SIGMA0 = np.array([1.5, 1.2, 5.0, 1.2, 0.5])   # 初始搜索宽度(逐维下限基准)
+SIGMA0 = np.array([1.5, 1.2, 5.0, 1.2, 0.3])   # 初始搜索宽度(第5维=α尺度,收窄)
 
 # 单集收尾等待:gripper attach 瞬态比 wrench 长(实测 20-60s+),不照抄 wrench 的
 # 固定 sleep(20)。设成略宽于 acados_nmpc_node 的 attach_window_sec(默认 40s),
@@ -93,13 +100,16 @@ def teardown():
 def run_sitl_once(theta, mass, ecc):
     """一轮无头 gripper SITL,返回指标 dict 或 None(失效)。"""
     t0 = time.time()
+    # θ4=α 无量纲 → 实际确认阈值 [N] = α·ΔT_static = α·GRAVITY·mass。
+    # 这样同一个 α 在不同质量上对应"相同的相对门槛",结构上可外推。
+    confirm_thresh_n = theta[4] * GRAVITY * mass
     env = dict(os.environ,
                GRIP_PAYLOAD_KG=f'{mass}',
                GRIP_ECC_Y=f'{ecc}',
                MHE_EVENT_TRIGGER='true',
                MHE_SCHEDULE_THETA='[' + ','.join(
                    f'{v:.4f}' for v in theta[:4]) + ']',
-               MHE_CONFIRM_THRESH=f'{theta[4]:.4f}',
+               MHE_CONFIRM_THRESH=f'{confirm_thresh_n:.4f}',
                GRIP_GEOM_MP_FLOOR=f'{GEOM_MP_FLOOR}')
     subprocess.run([LAUNCHER], env=env, stdout=subprocess.DEVNULL,
                    stderr=subprocess.DEVNULL)
@@ -231,9 +241,10 @@ def main():
 
     teardown()
     if best[0] is not None:
-        np.save(f'{RESULTS}/theta_grip_cem.npy', best[0])
-        print(f'FINAL best theta=[{", ".join(f"{v:.4f}" for v in best[0])}] '
-              f'loss={best[1]:.3f} -> theta_grip_cem.npy', flush=True)
+        # 无量纲 α 版单独存,不覆盖旧 N-绝对值版 theta_grip_cem.npy(对照要用)。
+        np.save(f'{RESULTS}/theta_grip_cem_alpha.npy', best[0])
+        print(f'FINAL best theta(α版)=[{", ".join(f"{v:.4f}" for v in best[0])}] '
+              f'loss={best[1]:.3f} -> theta_grip_cem_alpha.npy', flush=True)
 
 
 if __name__ == '__main__':

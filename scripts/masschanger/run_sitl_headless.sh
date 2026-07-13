@@ -69,6 +69,8 @@ nohup ros2 run offboard_test_acados mhe_node --ros-args \
     -p event_trigger_enable:=${MHE_EVENT_TRIGGER:-true} \
     -p schedule_theta:="${MHE_SCHEDULE_THETA:-[-4.0,0.0,0.0,0.0]}" \
     -p event_confirm_thresh_n:=${MHE_CONFIRM_THRESH:-1.5} \
+    -p event_signal_mode:=${MHE_SIGNAL_MODE:-external} \
+    -p resid_persist_frames:=${MHE_RESID_PERSIST:-2} \
     > "$MHE_LOG" 2>&1 &
 
-echo "headless stack up: nmpc=$NODE_LOG mhe=$MHE_LOG (event=${MHE_EVENT_TRIGGER:-true} theta=${MHE_SCHEDULE_THETA:-M0})"
+echo "headless stack up: nmpc=$NODE_LOG mhe=$MHE_LOG (event=${MHE_EVENT_TRIGGER:-true} theta=${MHE_SCHEDULE_THETA:-M0} signal=${MHE_SIGNAL_MODE:-external})"

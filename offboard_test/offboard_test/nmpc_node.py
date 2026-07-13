@@ -34,34 +34,6 @@ class Params:
     Jyy = 0.0142
     Jzz = 0.0210
     kd  = 0.05
-    # 控制频率 25Hz (dt=0.04),horizon = N*dt = 0.4s 与原来一致
-    # N 减半后决策变量从 ~340 降到 ~170,单次求解时间 ~线性下降
-    N   = 10
-    dt  = 0.1
-    nx  = 13
-    nu  = 4
-    Tmin    = 0.5
-    Tmax    = 2 * m * g
-    tau_max = 0.5
-    tau_psi = 0.2
-    Qp = np.diag([10.0, 10.0, 50.0])
-    Qv = 1  * np.eye(3)
-    Qq = 1  * np.eye(3)
-    Qw = 0.1 * np.eye(3)
-    Q  = np.block([
-        [4*np.eye(3),     np.zeros((3,3)), np.zeros((3,3)), np.zeros((3,3))],   # 位置 10→4
-        [np.zeros((3,3)), 2*np.eye(3),     np.zeros((3,3)), np.zeros((3,3))],   # 速度 1→2 加阻尼
-        [np.zeros((3,3)), np.zeros((3,3)), np.eye(3),       np.zeros((3,3))],
-        [np.zeros((3,3)), np.zeros((3,3)), np.zeros((3,3)), 0.1*np.eye(3)]
-    ])
-    R  = np.diag([2.0, 0.1, 0.1, 0.1])
-class Params:
-    m   = 2.0643
-    g   = 9.81
-    Jxx = 0.0142
-    Jyy = 0.0142
-    Jzz = 0.0210
-    kd  = 0.05
     N   = 10
     dt  = 0.1
     nx  = 13
