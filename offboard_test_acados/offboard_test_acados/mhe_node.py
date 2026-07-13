@@ -53,6 +53,18 @@ MOTOR_CONSTANT = 8.54858e-06
 # 真机标定时该增益由推力台 RPM→推力曲线直接给出。
 THRUST_CAL_GAIN = 1.0
 
+# 电机转速反算**体力矩**(B.3 Phase 0,2026-07-13):与 T_phys=k_f·Σω² 同源思路,
+# 但用各电机推力 F_i=k_f·ω_i² 乘力臂叉出 roll/pitch 力矩。这是强闭环 Δr 在线估计的
+# 观测量——模型无关、与 MHE/NMPC 状态完全解耦,规避 c_xy 进 model.p 后"估计↔模型"
+# 自举耦合(mhe 0.15kg 吃过的那类正反馈)。x500_base/model.sdf 几何:臂 0.174m,
+# velocity[i] 对应 motorNumber i(rotor_i)。FLU 体系(x前 y左 z上,与 odom_cb 同):
+#   τ_roll(绕x)= Σ y_i·F_i ,  τ_pitch(绕y)= -Σ x_i·F_i
+# 稳态偏心悬停时 τ_roll≈ m_p·g·ry、τ_pitch≈ -m_p·g·rx(07-03 实测 roll −0.35Nm 与
+# 质心模型精确吻合)。整体符号在 Phase 0 用已知 attach_offset 标定(见验证脚本)。
+ROTOR_X = np.array([0.174, -0.174,  0.174, -0.174])  # motorNumber 0..3 的机体 x
+ROTOR_Y = np.array([-0.174, 0.174,  0.174, -0.174])  # 同上 y
+TORQUE_SIGN = 1.0  # Phase 0 标定后固定的整体符号(默认+1,验证对表后确认/翻转)
+
 
 class MHENode(Node):
     def __init__(self):
@@ -63,6 +75,7 @@ class MHENode(Node):
         self.x_meas = None
         self.u_known = None
         self.thrust_phys = None  # 电机转速反算的真实总推力(见 MOTOR_CONSTANT 注释)
+        self.tau_phys = None     # 电机转速反算的真实体力矩 [roll,pitch,yaw](B.3 Phase0)
         # attach 实测几何 [rx,ry,rz](box-drone,机体系,rz<0),来自
         # /gripper/attach_offset;喂 _payload_geometry 算 dJ/c_xy 给 MHE 自己的
         # om_dot 用(2026-07-07 坏几何复测发现的修复,见 mhe_params.py n_geom
@@ -237,6 +250,9 @@ class MHENode(Node):
 
         self.mass_pub = self.create_publisher(
             Float64, '/acados_nmpc/mhe_mass_estimate', 10)
+        # 体力矩反算发布(B.3 Phase0):[roll,pitch,yaw] Nm,供强闭环 Δr 估计器订阅
+        self.tau_phys_pub = self.create_publisher(
+            Float64MultiArray, '/acados_nmpc/tau_phys', 10)
 
         self.timer = self.create_timer(mhe_p.dt, self.timer_cb)
         self.get_logger().info(
@@ -269,8 +285,16 @@ class MHENode(Node):
         if len(msg.velocity) >= 4:
             w = np.array(msg.velocity[:4])
             if np.all(np.isfinite(w)):
+                w2 = w * w
                 self.thrust_phys = float(
-                    THRUST_CAL_GAIN * MOTOR_CONSTANT * np.sum(w * w))
+                    THRUST_CAL_GAIN * MOTOR_CONSTANT * np.sum(w2))
+                # 体力矩反算(B.3 Phase0,见文件头 ROTOR_X/Y 注释)。F_i=k_f·ω_i²,
+                # τ_roll=Σy_i·F_i, τ_pitch=-Σx_i·F_i(FLU)。yaw 反扭这里不需要
+                # (c_xy 只靠 roll/pitch),留 0 占位保持三维接口。
+                f = THRUST_CAL_GAIN * MOTOR_CONSTANT * w2
+                tau_roll = TORQUE_SIGN * float(np.sum(ROTOR_Y * f))
+                tau_pitch = TORQUE_SIGN * float(-np.sum(ROTOR_X * f))
+                self.tau_phys = np.array([tau_roll, tau_pitch, 0.0])
 
     def mass_event_cb(self, msg):
         self._on_mass_event('drop (wrench)')
@@ -572,12 +596,28 @@ class MHENode(Node):
         self.x_guess = [x_sol[min(i + 1, N)].copy() for i in range(N + 1)]
 
         self.mass_pub.publish(Float64(data=self.m_est))
+        if self.tau_phys is not None:
+            self.tau_phys_pub.publish(
+                Float64MultiArray(data=[float(v) for v in self.tau_phys]))
 
         self.counter += 1
         if self.counter % 20 == 0:
             t_phys = self.thrust_phys if self.thrust_phys is not None else float('nan')
             self.get_logger().info(
                 f'MHE mass estimate: {self.m_est:.3f} kg (T_phys={t_phys:.2f}N)')
+            # B.3 Phase0 验证行:反算力矩 vs 质心模型预测(需 attach 真值对表)。
+            # 稳态偏心悬停 τ_roll 应≈ m_p·g·ry、τ_pitch≈ -m_p·g·rx(复现 07-03)。
+            if self.tau_phys is not None:
+                tr, tp = self.tau_phys[0], self.tau_phys[1]
+                pred = ''
+                if self.attach_offset is not None:
+                    m_p = max(self.m_est - mhe_p.m_nominal, 0.0)
+                    ry, rx = self.attach_offset[1], self.attach_offset[0]
+                    pred = (f' | model pred: roll={m_p*mhe_p.g*ry:+.3f} '
+                            f'pitch={-m_p*mhe_p.g*rx:+.3f} '
+                            f'(m_p={m_p:.3f} r=[{rx:+.3f},{ry:+.3f}])')
+                self.get_logger().info(
+                    f'[tau_phys] roll={tr:+.3f} pitch={tp:+.3f} Nm{pred}')
 
 
 def main():
