@@ -201,6 +201,30 @@ class MHENode(Node):
         self._resid_cross_frame = None  # 首次越阈那一帧的全局序号
         self._resid_settled = False   # 基线是否已预热到"可信静基线"(开放检测)
         self._resid_stable = 0        # 连续贴基线的帧数(预热计数)
+
+        # ---- 强闭环 c_xy 在线估计(B.3 Phase1,2026-07-14)----
+        # 从 tau_phys/thrust_phys 直接反解复合质心水平偏移 c_xy=[cx,cy]:
+        # τ_roll=cy·T → cy=τ_roll/T,τ_pitch=-cx·T → cx=-τ_pitch/T(Phase0 已实测
+        # 验证 <2%,且这两个量都来自电机转速反算,与 MHE 的 m_est 完全解耦——从根
+        # 上避开 c_xy↔model 自举耦合)。**Phase1 只记录不闭环**:估计值发话题+对真值
+        # 打日志,不喂任何模型。稳态门控:只在悬停稳(|ω|/|v_xy| 小)时更新 EMA,
+        # 避开 descend/LIFT/drop 暂态的力矩污染(思路同无信号消融的预热门控)。
+        # 不进 MHE 状态(窗外慢滤波),符合长期计划"两个新变量不同时上线"。
+        self.declare_parameter('c_xy_est_enable', False)   # 默认关(不扰其它实验);B.3 实验显式开
+        self.declare_parameter('c_xy_est_tau_sec', 2.0)    # EMA 时间常数
+        self.declare_parameter('c_xy_steady_omega', 0.15)  # 稳态门控角速度阈 rad/s
+        self.declare_parameter('c_xy_steady_vel', 0.20)    # 稳态门控水平速度阈 m/s
+        self.c_xy_est_enable = bool(
+            self.get_parameter('c_xy_est_enable').value)
+        ctau = max(float(self.get_parameter('c_xy_est_tau_sec').value), mhe_p.dt)
+        self.c_xy_ema_alpha = mhe_p.dt / ctau
+        self.c_xy_steady_omega = float(
+            self.get_parameter('c_xy_steady_omega').value)
+        self.c_xy_steady_vel = float(
+            self.get_parameter('c_xy_steady_vel').value)
+        self.c_xy_est = np.zeros(2)   # [cx, cy] 估计
+        self._c_xy_inited = False
+
         theta = np.array(self.get_parameter('schedule_theta').value,
                          dtype=float)
         self.scheduler = ParametricWeightSchedule(theta)
@@ -253,6 +277,10 @@ class MHENode(Node):
         # 体力矩反算发布(B.3 Phase0):[roll,pitch,yaw] Nm,供强闭环 Δr 估计器订阅
         self.tau_phys_pub = self.create_publisher(
             Float64MultiArray, '/acados_nmpc/tau_phys', 10)
+        # 在线 c_xy 估计发布(B.3 Phase1):[cx,cy] m,Phase2 合闸时 NMPC 订阅它替代
+        # attach 真值反推的几何(Phase1 只发+记录,NMPC 暂不吃)
+        self.c_xy_est_pub = self.create_publisher(
+            Float64MultiArray, '/acados_nmpc/c_xy_est', 10)
 
         self.timer = self.create_timer(mhe_p.dt, self.timer_cb)
         self.get_logger().info(
@@ -492,10 +520,40 @@ class MHENode(Node):
         else:
             self._check_confirmation()
 
+        if self.c_xy_est_enable:
+            self._update_c_xy_est()
+
         if len(self.y_buf) < mhe_p.N + 1:
             return  # 窗口还没攒满
 
         self._solve_window()
+
+    def _update_c_xy_est(self):
+        """强闭环 c_xy 在线估计(B.3 Phase1,只记录不闭环)。稳态悬停时从电机
+        转速反算的体力矩直接反解复合质心水平偏移,慢 EMA 滤噪。见 __init__ 里
+        c_xy_est 的注释。c_xy=[cx,cy]=[-τ_pitch/T, τ_roll/T]。"""
+        if self.tau_phys is None or self.thrust_phys is None \
+                or self.x_meas is None:
+            return
+        T = self.thrust_phys
+        if T < 1.0:
+            return  # 没有有效推力(未起飞/异常)
+        om = self.x_meas[10:13]
+        vel_xy = self.x_meas[3:5]
+        # 稳态门控:只在悬停稳时采样,避开 descend/LIFT/drop 暂态力矩污染
+        if (float(np.linalg.norm(om)) > self.c_xy_steady_omega or
+                float(np.linalg.norm(vel_xy)) > self.c_xy_steady_vel):
+            return
+        c_inst = np.array([-self.tau_phys[1] / T, self.tau_phys[0] / T])
+        if not self._c_xy_inited:
+            self.c_xy_est = c_inst
+            self._c_xy_inited = True
+        else:
+            a = self.c_xy_ema_alpha
+            self.c_xy_est = (1.0 - a) * self.c_xy_est + a * c_inst
+        self.c_xy_est_pub.publish(
+            Float64MultiArray(data=[float(self.c_xy_est[0]),
+                                    float(self.c_xy_est[1])]))
 
     def _solve_window(self):
         N, nx, nw = mhe_p.N, mhe_p.nx, mhe_p.nw
@@ -618,6 +676,22 @@ class MHENode(Node):
                             f'(m_p={m_p:.3f} r=[{rx:+.3f},{ry:+.3f}])')
                 self.get_logger().info(
                     f'[tau_phys] roll={tr:+.3f} pitch={tp:+.3f} Nm{pred}')
+            # B.3 Phase1 验证行:在线 c_xy 估计 vs attach 真值反推的 c_xy。真值
+            # 用 grip_true_payload_mass(诊断真值)优先,否则退回 m_est 反推 m_p。
+            if self.c_xy_est_enable and self._c_xy_inited:
+                ref = ''
+                if self.attach_offset is not None:
+                    m_p = (self.grip_true_payload_mass
+                           if self.grip_true_payload_mass > 0.0
+                           else max(self.m_est - mhe_p.m_nominal, 0.0))
+                    m_t = mhe_p.m_nominal + m_p
+                    if m_t > 0.0:
+                        c_true = (m_p / m_t) * self.attach_offset[0:2]
+                        ref = (f' | truth c=[{c_true[0]:+.4f},{c_true[1]:+.4f}] '
+                               f'(m_p={m_p:.3f})')
+                self.get_logger().info(
+                    f'[c_xy_est] cx={self.c_xy_est[0]:+.4f} '
+                    f'cy={self.c_xy_est[1]:+.4f} m{ref}')
 
 
 def main():
