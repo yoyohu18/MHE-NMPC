@@ -225,6 +225,11 @@ class AcadosNMPCNode(Node):
         self.declare_parameter('grip_z_high', 2.0)  # 抬升后悬停高度
         self.declare_parameter('grip_lift_after_sec', 12.0)
         self.declare_parameter('grip_lift_dur', 5.0)
+        # gripper drop 全流程(B.3,2026-07-14):lift 完成后悬停 grip_drop_after_sec
+        # 秒再释放磁吸夹爪(发 /gripper/enable=false,proximity 节点收到即 detach),
+        # 让 box 掉落,m_est 回空机、c_xy 归零——验证强闭环走完 attach→稳飞→drop。
+        # 0=禁用(保持现有 attach-only 行为)。
+        self.declare_parameter('grip_drop_after_sec', 0.0)
         # 定时质量阶跃(和 MHE 解耦的诊断):吸附后把 m_est 从空机手动抬到
         # p.m+grip_payload_mass,给 NMPC "正确的带载质量认知",用来区分发散到底
         # 是"NMPC 不知道质量变了"还是"吊挂物理(CoM/摆动/拴系)本身补不了"。
@@ -293,6 +298,8 @@ class AcadosNMPCNode(Node):
             self.grip_lift_after_sec = float(
                 self.get_parameter('grip_lift_after_sec').value)
             self.grip_lift_dur = float(self.get_parameter('grip_lift_dur').value)
+            self.grip_drop_after_sec = float(
+                self.get_parameter('grip_drop_after_sec').value)
             self.grip_payload_mass = float(
                 self.get_parameter('grip_payload_mass').value)
             self.grip_mass_step_sec = float(
@@ -345,6 +352,8 @@ class AcadosNMPCNode(Node):
             # 见 grip_settle_sec 参数声明处注释——给 MHE 窗口热身时间。
             self.z_hover = self.grip_approach_z
             self.grip_lift_started = False
+            self.grip_drop_done = False   # gripper drop 是否已触发(一次)
+            self.grip_dropped = False     # box 已释放(online 几何归零标志)
             self.ref_fn = self._grip_ref
             self.ref_window_fn = self._grip_ref_window
             # 放宽"到达悬停点"判据:box 在 move-to-start 阶段就被吸上,0.3kg
@@ -520,6 +529,11 @@ class AcadosNMPCNode(Node):
         (μ=m_b·m_p/m_t,rz=grip_arm_d 先验,水平分量由 c_xy 反推 r_h=c·m_t/m_p)。
         rz 主导 dJ,故 dJ 基本等于真值版(先验臂长≈实测)。rate 增益在 dJ_online
         起来后触发一次(自动对齐到 m_est 收敛,不用 attach 真值)。每次 solve 前调。"""
+        if self.grip_dropped:
+            # box 已释放(drop),载荷没了:几何归零(不再随残噪更新)
+            self.dJ_est = 0.0
+            self.c_est = np.zeros(2)
+            return
         m_p = self.m_est - p.m
         if m_p <= 1e-3:
             return  # 载荷还没被 MHE 认出来(m_est 未收敛),不改几何
@@ -1023,6 +1037,24 @@ class AcadosNMPCNode(Node):
                 f'PX4 {pid}: {base:.3f} -> {base * ratio:.3f} '
                 f'(inertia ratio {(J0 + dJ) / J0:.2f}, cap 5.0)')
 
+    def _reset_px4_rate_gains(self):
+        """把 MC_*RATE_K 复位到 base(drop 释放载荷后调):载荷卸掉、真实惯量
+        回到空机名义值,若增益还停在放大过的值(5x)就是严重过增益,空机内环
+        会高频振荡→姿态发散→掉高炸机(2026-07-14 drop 全流程实测)。复位并把
+        px4_gains_scaled 清回 False(万一后续再 attach 可重新放大)。"""
+        if not self.scale_px4_rate_gains or not self.px4_gains_scaled:
+            return
+        self.px4_gains_scaled = False
+        for pid in ('MC_ROLLRATE_K', 'MC_PITCHRATE_K'):
+            base = self.px4_rate_k_base.get(pid, 1.0)
+            req = ParamSetV2.Request()
+            req.force_set = False
+            req.param_id = pid
+            req.value = ParameterValue(
+                type=ParameterType.PARAMETER_DOUBLE, double_value=float(base))
+            self.param_set_client.call_async(req)
+            self.get_logger().info(f'PX4 {pid}: reset -> {base:.3f} (payload dropped)')
+
     def _descend_phase(self, nmpc_time):
         """07-07 新增:NMPC 在安全高度 grip_approach_z 接管后,先稳定悬停
         grip_settle_sec 秒(给 MHE 滑动窗口热身——见 grip_settle_sec 参数声明
@@ -1082,6 +1114,28 @@ class AcadosNMPCNode(Node):
             self.get_logger().info(
                 f't={nmpc_time:.1f}s | LIFT: raising hover '
                 f'{self.grip_z_low}->{self.grip_z_high}m to lift payload')
+
+    def _grip_drop_phase(self, nmpc_time):
+        """B.3 drop 全流程(2026-07-14):lift 完成后悬停 grip_drop_after_sec 秒,
+        释放磁吸夹爪(发 /gripper/enable=false,proximity 节点检到 enable 拉低即
+        detach box),同帧发 mass_event 通知 mhe_node 质量突变。online 模式下标记
+        grip_dropped,_update_online_geometry 随即把 dJ/c_est 归零(载荷已卸)。
+        只触发一次;grip_drop_after_sec<=0 禁用。"""
+        if (not self.gripper_mode or self.grip_drop_done
+                or self.grip_drop_after_sec <= 0.0 or self.attach_time is None):
+            return
+        t_drop = (self.attach_time + self.grip_lift_after_sec
+                  + self.grip_lift_dur + self.grip_drop_after_sec)
+        if nmpc_time < t_drop:
+            return
+        self.grip_drop_done = True
+        self.grip_dropped = True
+        self.enable_pub.publish(Bool(data=False))  # 拉低 → proximity 释放 box
+        self.mass_event_pub.publish(Empty())       # 通知 mhe_node 质量突变
+        self._reset_px4_rate_gains()               # 空机复位内环增益(否则过增益炸机)
+        self.get_logger().info(
+            f't={nmpc_time:.1f}s | DROP: released gripper (enable=false), '
+            'payload detached; geometry -> empty, rate gains reset')
 
     def timer_cb(self):
         if self.counter < 100:
@@ -1230,6 +1284,7 @@ class AcadosNMPCNode(Node):
         self._descend_phase(nmpc_time)
         self._grip_mass_step(nmpc_time)
         self._lift_phase(nmpc_time)
+        self._grip_drop_phase(nmpc_time)
         t_ref = 0.0 if self.hover_test_mode else nmpc_time
 
         if self.rate_test_mode:
