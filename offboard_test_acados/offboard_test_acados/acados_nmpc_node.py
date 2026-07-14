@@ -177,6 +177,21 @@ class AcadosNMPCNode(Node):
         # 收到。有它就用真实力臂/偏心算 dJ 和 c_est,没有才退回 grip_arm_d 参数。
         self.attach_offset = None
 
+        # ---- 强闭环几何来源 A/B 开关(B.3 Phase2,2026-07-14)----
+        # geom_source='truth'(默认,现有行为):dJ/c_est 从 attach_offset 真值算;
+        # 'online':c_est 吃 mhe_node 发的 /acados_nmpc/c_xy_est(电机力矩反算,
+        # 与真值无关),dJ 由 m_est+rz 几何先验(grip_arm_d)在线推——消掉对 attach
+        # 真值的依赖。attach_offset 仍收(用于 [attach-window] 评估对表),但 online
+        # 模式下不喂几何。Phase1 已验证 c_xy_est 追真值<5%。⚠️前提:m_est 须健康
+        # (信号质量依赖健康飞行,见 memory b3-strong-closed-loop-dr Phase1 教训),
+        # gripper 场景配 GRIP_GEOM_MP_FLOOR。
+        self.declare_parameter('geom_source', 'truth')
+        self.geom_source = str(self.get_parameter('geom_source').value).lower()
+        if self.geom_source not in ('truth', 'online'):
+            self.geom_source = 'truth'
+        self.c_xy_online = np.zeros(2)     # 最新在线 c_xy 估计(订阅)
+        self.geom_online_active = False    # attach 后 online 几何是否已接管
+
         # "投放包裹"场景,第三版实现(前两版分别撞上了"独立 dynamic 刚体致命
         # 飞不起来"和"DetachableJoint 在同模型内 self-reference 不生效"两个
         # 坑,具体见 model.sdf 注释):质量真正的切换由 x500_payload 模型上的
@@ -220,6 +235,13 @@ class AcadosNMPCNode(Node):
         # (见 acados_model.py dJ_sym)。跟 attach 时的 dz(proximity 日志里)
         # 对齐:当前窗口 h_min/h_max=[0.35,0.60],短臂稳态 dz≈0.47m。
         self.declare_parameter('grip_arm_d', 0.47)
+        # 抓取载荷操作先验 [kg](B.3 Phase2 online 模式用):强闭环估计滞后于物理
+        # attach 事件(m_est/c_xy 要 1-2s 才收敛),这期间若内环增益不足 0.3kg 偏心
+        # 惯量就会崩(实测炸机)。故 attach 瞬间用这个**操作先验**(部署已知"包裹
+        # 大致多重",非测量 attach 几何真值)+ grip_arm_d 立刻初始化 dJ 与 rate 增益
+        # 给即时鲁棒性,随后 _update_online_geometry 用在线 m_est/c_xy 精修。默认
+        # 0.3=花名册标称;真机对应操作员设定的"预期最大载荷"。
+        self.declare_parameter('grip_payload_prior', 0.3)
         # box 正上方的安全接近高度:两段式接近的第一段目标高度。先在这个高度
         # 把水平位置对齐、悬停稳,再垂直下降到 grip_z_low——避免在 grip_z_low
         # 这种低空做水平平移时高度下冲、起落架把 box 顶出吸附窗口(attach 竞态)。
@@ -276,6 +298,8 @@ class AcadosNMPCNode(Node):
             self.grip_mass_step_sec = float(
                 self.get_parameter('grip_mass_step_sec').value)
             self.grip_arm_d = float(self.get_parameter('grip_arm_d').value)
+            self.grip_payload_prior = float(
+                self.get_parameter('grip_payload_prior').value)
             self.grip_approach_z = float(
                 self.get_parameter('grip_approach_z').value)
             self.grip_settle_sec = float(
@@ -366,6 +390,9 @@ class AcadosNMPCNode(Node):
         # mhe_node 的质量估计,闭环喂回 NMPC 动力学(见 self.m_est 用法)
         self.mhe_mass_sub = self.create_subscription(
             Float64, '/acados_nmpc/mhe_mass_estimate', self.mhe_mass_cb, 10)
+        # 在线 c_xy 估计(B.3 Phase2,geom_source='online' 时喂 model.p 的 c_est)
+        self.c_xy_online_sub = self.create_subscription(
+            Float64MultiArray, '/acados_nmpc/c_xy_est', self.c_xy_online_cb, 10)
 
         # proximity 节点在 attach 瞬间发布的真实几何偏移(TRANSIENT_LOCAL,
         # 订阅方必须同 QoS 才能收到 latched 消息)
@@ -475,9 +502,36 @@ class AcadosNMPCNode(Node):
             # attach 发生在 NMPC 接管前(posctl 低空悬停阶段),真实惯量从这一
             # 刻起就已经变大,立刻放大内环增益、不等 NMPC 的质量阶跃——posctl
             # 阶段的姿态保持同样受益,也避免接管瞬间"模型阶跃+增益阶跃"叠加。
-            if self.gripper_mode and self.grip_payload_mass > 0.0:
+            # online 模式不用 attach 真值算增益(消依赖),改由 _update_online_geometry
+            # 在 dJ_online 起来后触发(见该方法);attach_offset 仅留作评估对表。
+            if (self.gripper_mode and self.grip_payload_mass > 0.0
+                    and self.geom_source == 'truth'):
                 dJ, _ = self._payload_geometry(data)
                 self._scale_px4_rate_gains(dJ)
+
+    def c_xy_online_cb(self, msg):
+        d = np.asarray(msg.data, dtype=float)
+        if d.shape == (2,) and np.all(np.isfinite(d)):
+            self.c_xy_online = d
+
+    def _update_online_geometry(self):
+        """B.3 Phase2:online 模式下用 m_est + 在线 c_xy + rz 几何先验(grip_arm_d)
+        推 dJ/c_est 喂 model.p,替代 attach 真值。c_est 直接 = 在线 c_xy;dJ 由平行轴
+        (μ=m_b·m_p/m_t,rz=grip_arm_d 先验,水平分量由 c_xy 反推 r_h=c·m_t/m_p)。
+        rz 主导 dJ,故 dJ 基本等于真值版(先验臂长≈实测)。rate 增益在 dJ_online
+        起来后触发一次(自动对齐到 m_est 收敛,不用 attach 真值)。每次 solve 前调。"""
+        m_p = self.m_est - p.m
+        if m_p <= 1e-3:
+            return  # 载荷还没被 MHE 认出来(m_est 未收敛),不改几何
+        m_t = self.m_est
+        mu = p.m * m_p / m_t
+        c = self.c_xy_online
+        r_h = c * (m_t / m_p)  # 复合质心偏移反推载荷水平偏移
+        self.dJ_est = float(mu * (self.grip_arm_d ** 2
+                                  + 0.5 * (r_h[0] ** 2 + r_h[1] ** 2)))
+        self.c_est = c.copy()
+        # rate 增益已在 attach 瞬间用先验缩放过(见 _grip_mass_step online 分支),
+        # 这里只精修 model.p 的 dJ/c_est,不再动内环增益(避免随估计抖动反复改)。
 
     def mhe_mass_cb(self, msg):
         # use_mhe=False 时:MHE 只当诊断,不把估计喂回 NMPC(m_est 保持固定)。
@@ -591,6 +645,11 @@ class AcadosNMPCNode(Node):
 
     def solve_nmpc(self, x_cur, t_ref):
         Xref_win = self.ref_window_fn(t_ref, p.N, p.dt, z_hover=self.z_hover)
+
+        # B.3 Phase2:online 几何接管后,每次 solve 前用最新 m_est+在线 c_xy
+        # 刷新 dJ_est/c_est(替代 attach 真值一次性赋值)
+        if self.geom_online_active and self.geom_source == 'online':
+            self._update_online_geometry()
 
         self.solver.set(0, 'lbx', x_cur)
         self.solver.set(0, 'ubx', x_cur)
@@ -866,6 +925,25 @@ class AcadosNMPCNode(Node):
         # 前馈(它们本来就按已知 payload 走几何路径,与 MHE 无关)。
         if not self.use_mhe:
             self.m_est = m_t
+        # online 模式(B.3 Phase2):不从 attach 真值算几何,交给
+        # _update_online_geometry 用 m_est+在线 c_xy+rz 先验在线推;attach_offset
+        # 仅留作评估。dJ/c_est/gain 都在那里随 m_est 收敛起来。
+        if self.geom_source == 'online':
+            self.geom_online_active = True
+            # attach 瞬间用操作先验(grip_payload_prior + grip_arm_d)立刻初始化
+            # dJ 与 rate 增益(给内环即时鲁棒性,不等估计收敛——否则实测炸机);
+            # c_est 先 0,随后 _update_online_geometry 用在线 m_est/c_xy 精修。
+            mp0 = self.grip_payload_prior
+            mt0 = p.m + mp0
+            mu0 = p.m * mp0 / mt0 if mt0 > 0 else 0.0
+            self.dJ_est = float(mu0 * self.grip_arm_d ** 2)
+            self.c_est = np.zeros(2)
+            self._scale_px4_rate_gains(self.dJ_est)
+            self.get_logger().info(
+                f't={nmpc_time:.1f}s | ATTACH (geom_source=online): dJ/gain init '
+                f'from prior m_p={mp0:.2f}kg arm={self.grip_arm_d:.2f}m '
+                f'(dJ={self.dJ_est:.4f}); c_xy+dJ refine online, attach truth eval-only')
+            return
         if self.attach_offset is not None:
             r_p = self.attach_offset
         else:

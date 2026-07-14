@@ -129,6 +129,7 @@ nohup ros2 run offboard_test_acados acados_nmpc_node --ros-args \
     -p grip_mass_step_sec:=0.0 -p grip_payload_mass:=$GRIP_PAYLOAD_KG -p grip_arm_d:=0.47 \
     -p grip_lift_after_sec:=1.5 -p grip_lift_dur:=3.0 \
     -p use_mhe:=$USE_MHE \
+    -p geom_source:=${NMPC_GEOM_SOURCE:-truth} \
     > "$NODE_LOG" 2>&1 &
 
 # 8. MHE(dJ/c_xy + 棘轮修复已内建在 mhe_node.py,attach_offset 一到就自动生效)
