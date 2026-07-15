@@ -89,6 +89,17 @@ class MHENode(Node):
         # m_est 卡在 1.2-1.4kg,比修复前更差)。改成棘轮:只记录 attach 以来
         # 见过的最高 m_p_hat,某次暂态读数偏低不会让已经建立的几何修正撤销。
         self._m_p_hat_ratchet = 0.0
+        # 载荷是否在机上(物理状态,2026-07-15 加)。**不靠 attach_offset is None
+        # 判断**:最后一次 attach 几何要留给日志/下一轮规划,物理状态必须独立表达。
+        # 背景:棘轮/地板本为 attach-only 场景设计(防 attach 暂态估计坍缩),
+        # B.3/B.5 加 drop 后没同步释放——drop 后棘轮仍卡在带载值、attach_offset
+        # 仍在,_payload_geometry 继续按"幽灵载荷"给 om_dot 算 dJ/c_xy,姿态/力矩
+        # 残差被错误归因 → 质量估计系统性偏低(实测 drop 后 m_est -4.1%、z 下沉
+        # 5.8cm;同一轮带载段却只 -0.4%,这个不对称就是它的指纹)。这是 **drop
+        # 状态同步缺失的模型状态机 bug**,不是 figure8 机动下的固有估计偏置。
+        # ⚠️ drop 时只释放几何,**绝不硬重置质量状态**——让 MHE 从当前 m_est
+        # 连续跑、自行收敛回空机质量,才能证明"模型正确后估计器自己能回归"。
+        self._payload_attached = False
 
         # 诊断参数(2026-07-08,吊挂 CEM 首轮 0.15kg 结构性失败排查——两个明显
         # 不同的 θ 都 4/4 失败,怀疑是"用 self.m_est 反推 m_p_hat 再算 dJ/c_xy,
@@ -340,13 +351,23 @@ class MHENode(Node):
                 self.tau_phys = np.array([tau_roll, tau_pitch, 0.0])
 
     def mass_event_cb(self, msg):
-        self._on_mass_event('drop (wrench)')
+        """质量突变事件 = **卸载**(wrench drop / gripper drop——nmpc_node 释放
+        夹爪时同帧发这条)。真实载荷已不存在,必须立刻释放"幽灵几何",否则
+        _payload_geometry 会继续按带载棘轮给 om_dot 算 dJ/c_xy(见 __init__ 里
+        _payload_attached 注释)。**只释放几何,不动 m_est**——质量状态由 MHE
+        自己从当前值连续收敛回空机,这样才验证得了"模型正确后估计器能回归"。
+        wrench 场景本来就没几何(attach_offset 恒 None),这里是无害的 no-op。"""
+        self._payload_attached = False
+        self._m_p_hat_ratchet = 0.0
+        self.attach_offset = None
+        self._on_mass_event('drop')
 
     def attach_event_cb(self, msg):
         data = np.asarray(msg.data, dtype=float)
         if data.shape[0] == 3 and np.all(np.isfinite(data)):
             self.attach_offset = data
             self._m_p_hat_ratchet = 0.0  # 新 attach:棘轮重新从 0 起(见 __init__ 注释)
+            self._payload_attached = True   # 载荷上机,开放几何修正
         self._on_mass_event('attach (gripper)')
 
     def _payload_geometry(self, r_p):
@@ -369,7 +390,14 @@ class MHENode(Node):
         诊断分支(grip_true_payload_mass>0):跳过棘轮,直接用真值——彻底摘掉
         "self.m_est 反推 m_p_hat 再算 dJ/c_xy、dJ/c_xy 又反过来影响 self.m_est"
         这个自举耦合,只诊断用,见 __init__ 里该参数的注释。
+
+        ⚠️ 物理状态门控(2026-07-15):载荷不在机上就直接返回零几何,**不看棘轮
+        也不看 attach_offset**——棘轮只增不减、attach_offset 保留最后一次几何,
+        两者都不能表达"货已经卸了"。漏了这道门 = drop 后按幽灵载荷算 dJ/c_xy,
+        质量估计被系统性拖低(见 __init__ 里 _payload_attached 注释)。
         """
+        if not self._payload_attached:
+            return 0.0, np.zeros(2)
         if self.grip_true_payload_mass > 0.0:
             m_p_hat = self.grip_true_payload_mass
         else:
@@ -584,11 +612,20 @@ class MHENode(Node):
         # _payload_geometry),窗口内所有 stage 共用同一个当前值——geometry 是
         # 常量、只有 m_p_hat 随 m_est 缓慢变,不需要按帧存历史,跟 T/tau 的
         # 逐帧历史值语义不同。没有 attach(wrench 场景/attach 前)则为全零。
-        if self.attach_offset is not None:
+        # 门控用物理状态 _payload_attached(不是 attach_offset is None——后者
+        # 保留最后几何、表达不了"货已卸";见 __init__ 注释)。
+        if self._payload_attached and self.attach_offset is not None:
             dJ, c_xy = self._payload_geometry(self.attach_offset)
         else:
             dJ, c_xy = 0.0, np.zeros(2)
         geom = np.array([dJ, c_xy[0], c_xy[1]])
+        # 几何归零可验证性(B.5 验收要"drop 后一个 MHE 周期内 dJ/c_xy 归零"):
+        # 状态翻转时打一条,便于从日志直接判定释放时刻。
+        if getattr(self, '_geom_active_prev', None) != self._payload_attached:
+            self.get_logger().info(
+                f'[geom] payload_attached={self._payload_attached} -> '
+                f'dJ={dJ:.4f} c_xy=[{c_xy[0]:+.4f},{c_xy[1]:+.4f}]')
+            self._geom_active_prev = self._payload_attached
 
         yref_0 = np.concatenate([y_win[0], np.zeros(nw), self.x0_bar])
         self.solver.set(0, 'yref', yref_0)
