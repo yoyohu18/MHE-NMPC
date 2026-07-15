@@ -237,6 +237,10 @@ class AcadosNMPCNode(Node):
         self.declare_parameter('grip_dyn_r', 0.8)          # figure8 半径(载荷,收小)
         self.declare_parameter('grip_dyn_w', 0.25)         # figure8 角速率(收慢)
         self.declare_parameter('grip_dyn_settle_sec', 3.0)  # lift 完成后多久切动态
+        # drop 落点(动态模式):true=drop 精确落在 figure8 最左端(x=r·sin(a) 最小,
+        # a=3π/2),grip_drop_after_sec 退化为"最早哪一圈可 drop"的最小门;
+        # false=按 grip_drop_after_sec 固定时刻 drop。默认 false 保持现有行为。
+        self.declare_parameter('grip_drop_at_fig8_tip', False)
         # 定时质量阶跃(和 MHE 解耦的诊断):吸附后把 m_est 从空机手动抬到
         # p.m+grip_payload_mass,给 NMPC "正确的带载质量认知",用来区分发散到底
         # 是"NMPC 不知道质量变了"还是"吊挂物理(CoM/摆动/拴系)本身补不了"。
@@ -313,6 +317,8 @@ class AcadosNMPCNode(Node):
             self.grip_dyn_w = float(self.get_parameter('grip_dyn_w').value)
             self.grip_dyn_settle_sec = float(
                 self.get_parameter('grip_dyn_settle_sec').value)
+            self.grip_drop_at_fig8_tip = bool(
+                self.get_parameter('grip_drop_at_fig8_tip').value)
             self.grip_payload_mass = float(
                 self.get_parameter('grip_payload_mass').value)
             self.grip_mass_step_sec = float(
@@ -1186,6 +1192,16 @@ class AcadosNMPCNode(Node):
                   + self.grip_lift_dur + self.grip_drop_after_sec)
         if nmpc_time < t_drop:
             return
+        # 动态模式 + drop_at_fig8_tip:t_drop 只作"最早可 drop"的门,真正 drop
+        # 精确落在 figure8 最左端(x=r·sin(a) 最小 → a=3π/2 mod 2π)。10Hz 下 a
+        # 每帧进 w·dt≈0.025rad,用 0.12rad 窗口稳稳抓到过尖点那一帧。
+        if self.grip_drop_at_fig8_tip and self.grip_dynamic_active:
+            tc = nmpc_time - self.grip_dyn_t0 - 2.0  # 2.0 = figure8 hover_time
+            if tc <= 0.0:
+                return
+            a_mod = (self.grip_dyn_w * tc) % (2.0 * np.pi)
+            if not (1.5 * np.pi <= a_mod < 1.5 * np.pi + 0.12):
+                return
         self.grip_drop_done = True
         self.grip_dropped = True
         self.enable_pub.publish(Bool(data=False))  # 拉低 → proximity 释放 box

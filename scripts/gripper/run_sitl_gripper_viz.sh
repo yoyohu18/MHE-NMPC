@@ -120,7 +120,9 @@ nohup bash -c "source /opt/ros/jazzy/setup.bash && source '$WS/install/setup.bas
     -p grip_lift_after_sec:=1.5 -p grip_lift_dur:=3.0 -p use_mhe:=true \
     -p geom_source:=online -p grip_payload_prior:=0.3 \
     -p grip_drop_after_sec:=$DROP_AFTER \
-    -p grip_dynamic_after_lift:=$DYNAMIC" \
+    -p grip_dynamic_after_lift:=$DYNAMIC \
+    -p grip_drop_at_fig8_tip:=${GRIP_DROP_AT_TIP:-false} \
+    -p attach_window_sec:=${ATTACH_WINDOW_SEC:-40.0}" \
   > "$NODE_LOG" 2>&1 &
 
 # 9. MHE(主配置:x500_0 + θ* 调度 + α 无真值确认 + floor + c_xy 在线估计)
