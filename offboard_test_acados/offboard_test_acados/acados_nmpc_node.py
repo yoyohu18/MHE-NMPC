@@ -230,6 +230,13 @@ class AcadosNMPCNode(Node):
         # 让 box 掉落,m_est 回空机、c_xy 归零——验证强闭环走完 attach→稳飞→drop。
         # 0=禁用(保持现有 attach-only 行为)。
         self.declare_parameter('grip_drop_after_sec', 0.0)
+        # B.5 动态轨迹(2026-07-15):lift 完成+稳定后,从悬停切到 figure8 跟踪,
+        # 带偏心载荷飞机动、drop 落在 figure8 中途——验证"机动中突变"。figure8
+        # 偏移到切换瞬间 drone 的 xy(平滑过渡),z=grip_z_high。默认关。
+        self.declare_parameter('grip_dynamic_after_lift', False)
+        self.declare_parameter('grip_dyn_r', 0.8)          # figure8 半径(载荷,收小)
+        self.declare_parameter('grip_dyn_w', 0.25)         # figure8 角速率(收慢)
+        self.declare_parameter('grip_dyn_settle_sec', 3.0)  # lift 完成后多久切动态
         # 定时质量阶跃(和 MHE 解耦的诊断):吸附后把 m_est 从空机手动抬到
         # p.m+grip_payload_mass,给 NMPC "正确的带载质量认知",用来区分发散到底
         # 是"NMPC 不知道质量变了"还是"吊挂物理(CoM/摆动/拴系)本身补不了"。
@@ -300,6 +307,12 @@ class AcadosNMPCNode(Node):
             self.grip_lift_dur = float(self.get_parameter('grip_lift_dur').value)
             self.grip_drop_after_sec = float(
                 self.get_parameter('grip_drop_after_sec').value)
+            self.grip_dynamic_after_lift = bool(
+                self.get_parameter('grip_dynamic_after_lift').value)
+            self.grip_dyn_r = float(self.get_parameter('grip_dyn_r').value)
+            self.grip_dyn_w = float(self.get_parameter('grip_dyn_w').value)
+            self.grip_dyn_settle_sec = float(
+                self.get_parameter('grip_dyn_settle_sec').value)
             self.grip_payload_mass = float(
                 self.get_parameter('grip_payload_mass').value)
             self.grip_mass_step_sec = float(
@@ -354,6 +367,10 @@ class AcadosNMPCNode(Node):
             self.grip_lift_started = False
             self.grip_drop_done = False   # gripper drop 是否已触发(一次)
             self.grip_dropped = False     # box 已释放(online 几何归零标志)
+            self.grip_dynamic_active = False  # 是否已切到 figure8 动态跟踪(B.5)
+            self.grip_dyn_t0 = None       # figure8 起始 nmpc_time
+            self.grip_dyn_cx = 0.0        # figure8 xy 偏移(切换瞬间 drone 位置)
+            self.grip_dyn_cy = 0.0
             self.ref_fn = self._grip_ref
             self.ref_window_fn = self._grip_ref_window
             # 放宽"到达悬停点"判据:box 在 move-to-start 阶段就被吸上,0.3kg
@@ -904,6 +921,47 @@ class AcadosNMPCNode(Node):
     def _grip_ref_window(self, t_start, N, dt, z_hover=None):
         return np.tile(self._grip_ref().reshape(-1, 1), (1, N + 1))
 
+    # ---------- B.5 动态轨迹:lift 后带载荷飞 figure8 ----------
+    def _grip_dyn_ref(self, t=0.0, **kw):
+        xr = build_reference_figure8(
+            t - self.grip_dyn_t0, r=self.grip_dyn_r, w=self.grip_dyn_w,
+            z_hover=self.grip_z_high, dz=0.0)
+        xr[0] += self.grip_dyn_cx
+        xr[1] += self.grip_dyn_cy
+        return xr
+
+    def _grip_dyn_ref_window(self, t_start, N, dt, z_hover=None):
+        xref = build_reference_window_figure8(
+            t_start - self.grip_dyn_t0, N, dt, r=self.grip_dyn_r,
+            w=self.grip_dyn_w, z_hover=self.grip_z_high, dz=0.0)
+        xref[0, :] += self.grip_dyn_cx
+        xref[1, :] += self.grip_dyn_cy
+        return xref
+
+    def _grip_dynamic_phase(self, nmpc_time):
+        """B.5:lift 完成 + grip_dyn_settle_sec 秒后,从悬停切到 figure8 跟踪
+        (偏移到切换瞬间 drone 的 xy,平滑过渡),带偏心载荷飞机动。之后 drop 落在
+        figure8 中途。只切一次;grip_dynamic_after_lift=false 时禁用。"""
+        if (not self.gripper_mode or not self.grip_dynamic_after_lift
+                or self.grip_dynamic_active or not self.grip_lift_started
+                or self.attach_time is None or self.x_cur is None):
+            return
+        lift_done_t = (self.attach_time + self.grip_lift_after_sec
+                       + self.grip_lift_dur)
+        if nmpc_time < lift_done_t + self.grip_dyn_settle_sec:
+            return
+        self.grip_dynamic_active = True
+        self.grip_dyn_t0 = nmpc_time
+        self.grip_dyn_cx = float(self.x_cur[0])
+        self.grip_dyn_cy = float(self.x_cur[1])
+        self.hover_test_mode = False   # 放开 t_ref,让 figure8 随时间推进
+        self.ref_fn = self._grip_dyn_ref
+        self.ref_window_fn = self._grip_dyn_ref_window
+        self.get_logger().info(
+            f't={nmpc_time:.1f}s | DYNAMIC: switch to figure8 (r={self.grip_dyn_r} '
+            f'w={self.grip_dyn_w}) centered at [{self.grip_dyn_cx:.2f},'
+            f'{self.grip_dyn_cy:.2f}] z={self.grip_z_high}, tracking with payload')
+
     def _grip_mass_step(self, nmpc_time):
         """诊断:吸附后(grip_mass_step_sec)把 m_est 从空机手动阶跃到带载真值,
         并同时阶跃吊挂惯量增量 dJ_est 和复合质心水平偏移 c_est——给 NMPC 正确的
@@ -1284,6 +1342,7 @@ class AcadosNMPCNode(Node):
         self._descend_phase(nmpc_time)
         self._grip_mass_step(nmpc_time)
         self._lift_phase(nmpc_time)
+        self._grip_dynamic_phase(nmpc_time)
         self._grip_drop_phase(nmpc_time)
         t_ref = 0.0 if self.hover_test_mode else nmpc_time
 
