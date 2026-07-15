@@ -171,10 +171,25 @@ class MHENode(Node):
         # 语义一致。暂态摆动会不断打断预热计数,预热自然推迟到真正悬停稳。
         self.declare_parameter('resid_warmup_frames', 20)
         self.declare_parameter('resid_settle_tol_n', 0.8)
+        # 无真值确认阈值(B.4 学习+强闭环合流,2026-07-15):CEM 学出的 θ 第 5 维
+        # 是无量纲 α,实际确认阈值 = α·g·mass。训练/评估在外部用花名册**真值** mass
+        # 算好传 event_confirm_thresh_n;部署(无真值)必须换成**操作先验** mass。
+        # confirm_thresh_alpha>=0 时:confirm_thresh = α·g·confirm_payload_prior
+        # (与 nmpc_node grip_payload_prior 同类的操作先验,非测量真值);<0=禁用,
+        # 退回固定 event_confirm_thresh_n(现有行为)。⚠️先验≠实际质量时阈值会偏
+        # (先验偏大→小载荷 T_phys 达不到阈值→超时兜底退回事件帧,graceful),
+        # 单载荷部署 prior=预期载荷时无偏。
+        self.declare_parameter('confirm_thresh_alpha', -1.0)
+        self.declare_parameter('confirm_payload_prior', 0.3)
         self.event_enabled = bool(
             self.get_parameter('event_trigger_enable').value)
-        self.confirm_thresh = float(
-            self.get_parameter('event_confirm_thresh_n').value)
+        c_alpha = float(self.get_parameter('confirm_thresh_alpha').value)
+        if c_alpha >= 0.0:
+            m_prior = float(self.get_parameter('confirm_payload_prior').value)
+            self.confirm_thresh = c_alpha * mhe_p.g * m_prior
+        else:
+            self.confirm_thresh = float(
+                self.get_parameter('event_confirm_thresh_n').value)
         self.confirm_timeout_frames = int(round(
             float(self.get_parameter('event_confirm_timeout_sec').value)
             / mhe_p.dt))

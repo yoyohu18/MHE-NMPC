@@ -144,6 +144,8 @@ nohup ros2 run offboard_test_acados mhe_node --ros-args \
     -p event_trigger_enable:=${MHE_EVENT_TRIGGER:-true} \
     -p schedule_theta:="${MHE_SCHEDULE_THETA:-[-4.0,0.0,0.0,0.0]}" \
     -p event_confirm_thresh_n:=${MHE_CONFIRM_THRESH:-1.5} \
+    -p confirm_thresh_alpha:=${MHE_CONFIRM_ALPHA:--1.0} \
+    -p confirm_payload_prior:=${MHE_CONFIRM_PRIOR:-0.3} \
     -p grip_true_payload_mass:=${GRIP_TRUE_PAYLOAD_MASS:-0.0} \
     -p grip_geom_mp_floor:=${GRIP_GEOM_MP_FLOOR:-0.0} \
     -p c_xy_est_enable:=${MHE_C_XY_EST:-false} \
