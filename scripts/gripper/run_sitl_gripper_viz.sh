@@ -6,14 +6,27 @@
 # (online 无真值几何 + θ* 学习调度 + α 无真值确认 + drop + figure8 动态)。
 # 复用 masschanger 的 rviz 配置/URDF/viz 组件(NMPC 路径话题、drone 模型全通用)。
 #
-# 用法:  [GRIP_PAYLOAD_KG=0.3 GRIP_ECC_Y=0.10 METHOD=thetastar GRIP_DROP_AFTER=8.0 \
-#          GRIP_DYNAMIC=true] bash src/scripts/gripper/run_sitl_gripper_viz.sh
+# 用法:  [GRIP_PAYLOAD_KG=0.3 GRIP_ECC_Y=0.10 METHOD=thetastar GRIP_DROP_AFTER=60.0 \
+#          GRIP_DROP_AT_TIP=true GRIP_DYNAMIC=true] bash src/scripts/gripper/run_sitl_gripper_viz.sh
 # 收栈:关掉各 gnome-terminal 窗口即可;或 pkill -9 -f 'px4_sitl|gz sim|mhe_node|...'。
 
 PAYLOAD_KG="${GRIP_PAYLOAD_KG:-0.3}"
+# 载荷几何的独立操作先验(完全解耦路径,几何不读 m_est)。默认取本场景标称载荷,
+# 与 run_gripper_headless.sh 保持一致——2026-07-20 发现这个可视化脚本漏传该参数,
+# 会静默退回耦合路径(floor 兜底),导致"看到的行为"和"实验数据"跑的不是同一套架构。
+GEOM_MP_PRIOR="${GRIP_GEOM_MP_PRIOR:-$PAYLOAD_KG}"
 ECC_Y="${GRIP_ECC_Y:-0.10}"
 METHOD="${METHOD:-thetastar}"          # thetastar | M0
-DROP_AFTER="${GRIP_DROP_AFTER:-8.0}"   # 0=不 drop
+# drop 时机(2026-07-15 改):之前默认 8.0s + drop_at_fig8_tip=false 是"动态切换
+# 后不到 5 秒硬丢",连一圈 8 字(周期 2π/grip_dyn_w=2π/0.25≈25.1s)的零头都没跑完。
+# 改成 tip 对齐 + 60s 门槛:grip_drop_after_sec 是"lift 完成后最早可丢"的门槛,
+# 真正丢的时刻由 acados_nmpc_node._grip_drop_phase 里的 grip_drop_at_fig8_tip
+# 逻辑收紧到下一次到达 8 字最左端(a=3π/2)那一帧。tip 出现在 dyn_settle_sec
+# (3.0)+hover_time(2.0)+(3π/2+2πk)/w 处:k=1≈49.0s(1.75圈,门槛60s时已过,不会
+# 命中)、k=2≈74.1s(2.75圈)——60s 门槛卡在两者中间,稳稳落到 k=2,保证飞满
+# 两整圈以上才丢,同时留够余量不会因为 attach/lift 时长的小抖动误命中 k=1。
+DROP_AFTER="${GRIP_DROP_AFTER:-60.0}"  # 0=不 drop
+DROP_AT_TIP="${GRIP_DROP_AT_TIP:-true}"  # true=对齐到 8 字最左端丢,而非到点硬丢
 DYNAMIC="${GRIP_DYNAMIC:-true}"        # figure8 动态
 BOX_I=$(python3 -c "print(f'{$PAYLOAD_KG * 0.00375:.6f}')")
 R_XY=$(python3 -c "print(f'{max(0.20, $ECC_Y + 0.08):.3f}')")
@@ -98,7 +111,8 @@ gnome-terminal --title="Drone Model + Rotors" -- bash -c \
    ros2 run robot_state_publisher robot_state_publisher \
      --ros-args -p robot_description:=\"\$(cat '$URDF_FILE')\" & \
    ros2 run offboard_test_acados drone_tf_broadcaster & \
-   ros2 run offboard_test_acados prop_joint_state_publisher & \
+   ros2 run offboard_test_acados prop_joint_state_publisher --ros-args \
+     -p motor_speed_topic:=/x500_0/command/motor_speed & \
    wait"
 
 # 7. 接近触发节点
@@ -121,7 +135,7 @@ nohup bash -c "source /opt/ros/jazzy/setup.bash && source '$WS/install/setup.bas
     -p geom_source:=online -p grip_payload_prior:=0.3 \
     -p grip_drop_after_sec:=$DROP_AFTER \
     -p grip_dynamic_after_lift:=$DYNAMIC \
-    -p grip_drop_at_fig8_tip:=${GRIP_DROP_AT_TIP:-false} \
+    -p grip_drop_at_fig8_tip:=$DROP_AT_TIP \
     -p attach_window_sec:=${ATTACH_WINDOW_SEC:-40.0}" \
   > "$NODE_LOG" 2>&1 &
 
@@ -133,7 +147,8 @@ nohup bash -c "source /opt/ros/jazzy/setup.bash && source '$WS/install/setup.bas
     -p motor_speed_topic:=/x500_0/command/motor_speed \
     -p event_trigger_enable:=true -p schedule_theta:='$THETA' \
     -p confirm_thresh_alpha:=$CALPHA -p confirm_payload_prior:=$CPRIOR \
-    -p grip_geom_mp_floor:=0.15 -p c_xy_est_enable:=true" \
+    -p grip_geom_mp_floor:=0.15 -p c_xy_est_enable:=true \
+    -p grip_geom_mp_prior:=$GEOM_MP_PRIOR" \
   > "$MHE_LOG" 2>&1 &
 
 echo "All components up. Gazebo GUI = 物理飞行; RViz = 控制端跟踪。"

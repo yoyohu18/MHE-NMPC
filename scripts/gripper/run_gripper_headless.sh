@@ -129,6 +129,7 @@ nohup ros2 run offboard_test_acados acados_nmpc_node --ros-args \
     -p grip_mass_step_sec:=0.0 -p grip_payload_mass:=$GRIP_PAYLOAD_KG -p grip_arm_d:=0.47 \
     -p grip_lift_after_sec:=1.5 -p grip_lift_dur:=3.0 \
     -p use_mhe:=$USE_MHE \
+    -p decouple_publish:=${DECOUPLE_PUB:-true} -p publish_hz:=${PUBLISH_HZ:-50.0} \
     -p geom_source:=${NMPC_GEOM_SOURCE:-truth} \
     -p grip_drop_after_sec:=${GRIP_DROP_AFTER:-0.0} \
     -p grip_dynamic_after_lift:=${GRIP_DYNAMIC:-false} \
@@ -151,11 +152,12 @@ nohup ros2 run offboard_test_acados mhe_node --ros-args \
     -p confirm_thresh_alpha:=${MHE_CONFIRM_ALPHA:--1.0} \
     -p confirm_payload_prior:=${MHE_CONFIRM_PRIOR:-0.3} \
     -p grip_true_payload_mass:=${GRIP_TRUE_PAYLOAD_MASS:-0.0} \
-    -p grip_geom_mp_floor:=${GRIP_GEOM_MP_FLOOR:-0.0} \
+    -p grip_geom_mp_floor:=${GRIP_GEOM_MP_FLOOR:-0.15} \
+    -p grip_geom_mp_prior:=${GRIP_GEOM_MP_PRIOR:-$GRIP_PAYLOAD_KG} \
     -p c_xy_est_enable:=${MHE_C_XY_EST:-false} \
     > "$MHE_LOG" 2>&1 &
 
 echo "gripper headless stack up: nmpc=$NODE_LOG mhe=$MHE_LOG"
 echo "  payload=${GRIP_PAYLOAD_KG}kg ecc_y=${GRIP_ECC_Y}m r_xy=$R_XY"
 echo "  event=${MHE_EVENT_TRIGGER:-true} theta=${MHE_SCHEDULE_THETA:-M0} confirm_thresh=${MHE_CONFIRM_THRESH:-1.5}"
-echo "  true_payload_mass=${GRIP_TRUE_PAYLOAD_MASS:-0.0} geom_mp_floor=${GRIP_GEOM_MP_FLOOR:-0.0}kg"
+echo "  true_payload_mass=${GRIP_TRUE_PAYLOAD_MASS:-0.0} geom_mp_floor=${GRIP_GEOM_MP_FLOOR:-0.15}kg"

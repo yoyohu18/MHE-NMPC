@@ -434,13 +434,6 @@ class NMPCNode(Node):
             self.ref_fn = build_reference
             self.ref_window_fn = build_reference_window
 
-        # 诊断用:接管后跳过 NMPC 求解,只发一段固定的小 body_rate
-        # (roll_rate=+0.2 rad/s, 0.5s),悬停推力不变,用来核对
-        # /mavros/setpoint_raw/attitude 的 body_rate 坐标系/符号约定
-        self.rate_test_mode = False
-        self.rate_test_duration = 0.5
-        self.rate_test_cmd = np.array([0.2, 0.0, 0.0])
-
         xref0 = self.ref_fn(0.0)
         self.X_init = np.tile(xref0.reshape(-1,1), (1, p.N+1))
         self.U_init = np.tile(p.u_hover.reshape(-1,1), (1, p.N))
@@ -787,28 +780,13 @@ class NMPCNode(Node):
                      self.nmpc_start_time).nanoseconds / 1e9
         t_ref = 0.0 if self.hover_test_mode else nmpc_time
 
-        if self.rate_test_mode:
-            # 跳过 NMPC,只发固定 body_rate,核对坐标系约定
-            u_opt = p.u_hover.copy()
-            solve_time = 0.0
-            if nmpc_time < self.rate_test_duration:
-                omega_cmd = self.rate_test_cmd.copy()
-            else:
-                omega_cmd = np.zeros(3)
-            roll, pitch, yaw = quat_to_euler(*self.x_cur[6:10])
-            self.get_logger().info(
-                f't={nmpc_time:.3f}s | om_meas=[{self.x_cur[10]:+.3f} '
-                f'{self.x_cur[11]:+.3f} {self.x_cur[12]:+.3f}] | '
-                f'rpy=[{math.degrees(roll):+6.2f} {math.degrees(pitch):+6.2f} '
-                f'{math.degrees(yaw):+6.2f}]deg | cmd={omega_cmd}')
-        else:
-            u_opt, omega_cmd, solve_time = self.solve_nmpc(self.x_cur, t_ref)
-            # 接管头 bodyrate_ramp_time 秒平滑斜坡 body_rate,从 0 缓增到 NMPC 输出
-            # 避免位置环切姿态/速率环时 1kHz 内环看到突变给大转矩
-            if nmpc_time < self.bodyrate_ramp_time:
-                s = nmpc_time / self.bodyrate_ramp_time
-                ramp = 10*s**3 - 15*s**4 + 6*s**5  # smooth-step
-                omega_cmd = omega_cmd * ramp
+        u_opt, omega_cmd, solve_time = self.solve_nmpc(self.x_cur, t_ref)
+        # 接管头 bodyrate_ramp_time 秒平滑斜坡 body_rate,从 0 缓增到 NMPC 输出
+        # 避免位置环切姿态/速率环时 1kHz 内环看到突变给大转矩
+        if nmpc_time < self.bodyrate_ramp_time:
+            s = nmpc_time / self.bodyrate_ramp_time
+            ramp = 10*s**3 - 15*s**4 + 6*s**5  # smooth-step
+            omega_cmd = omega_cmd * ramp
         self.publish_attitude(u_opt, omega_cmd)
 
         # 轨迹误差:每帧都发布到 /nmpc/tracking_error,方便 rqt_plot/PlotJuggler 订阅

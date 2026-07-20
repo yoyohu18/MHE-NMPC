@@ -8,6 +8,8 @@
 # 悬停油门、推力裕度约束——见 配送无人机自适应学习控制_技术路线笔记.md 第4节、
 # 第1.2节)。质心偏移 Δr 和惯量 J 暂不估,留给以后需要时再加。
 
+import os
+
 import numpy as np
 from offboard_test.nmpc_node import Params as _BaseParams
 
@@ -55,7 +57,23 @@ class MHEParams:
     # "物理上说得通"的范围(空机~满载3kg包裹),纯粹是防止早期窗口激励不足时
     # 优化器把质量推到离谱的值——不是真实约束,只是数值上的安全带。
     m_nominal = _base.m
-    m_min = 1.0
+    # m_min:质量的**物理下界地板**(solver lbx 硬约束,见 mhe_solver_builder.py)。
+    # 原值 1.0 比空机(2.064kg)还轻 1.06kg,等于放任优化器在一整段**物理不可达**
+    # 区间里搜索——飞机不可能比空机轻,载荷只加不减。2026-07-17 坐实这是 gripper
+    # attach 25%(4/16 轮)失败的根因:de-weight 松开约束后 m_est 探底撞 m_min
+    # (实测 1.046),一旦跌破 m_nominal,mhe_node 的 m_p_hat=max(m_est-m_nominal,0)
+    # 就被钳成 0 → MHE 认定"无载荷"、dJ/c_xy 几何补偿全归零 → 失去爬回真值的驱动,
+    # 锁进自洽的错误平衡(1.44~1.46kg),在 T_phys=23.1N(明示 2.36kg)面前 30s 不
+    # 自纠;NMPC 消费这个错值后稳态下垂 0.6m、抬不到目标高度(不坠机,但任务失败)。
+    # 修法与 grip_geom_mp_floor 同一哲学:用真机可用的弱物理先验做永久下界地板。
+    # 取 0.95×空机而非空机本身:留 5% 裕度给标定误差,别卡死在标定值上。
+    # 可用环境变量 MHE_M_MIN 覆盖(默认 0.95*m_nominal≈1.961)。加这个开关是为了
+    # **消融实验**:m_min 本身会影响下垂塌陷率(1.0→1.961 实测把耦合路径的塌陷率
+    # 从 37.5% 降到 ~8.7%),所以要单独测"几何解耦"的效应时,必须把 m_min 固定在
+    # 同一档、避免两个变量混在一起。用环境变量而不是改默认值,是防止实验后忘记恢复。
+    # ⚠️ 改这个值会让 acados 重新生成 solver(lbx 变了),第一轮启动会慢约 30s。
+    m_min = float(os.environ['MHE_M_MIN']) if os.environ.get('MHE_M_MIN') \
+        else 0.95 * m_nominal   # ≈1.961 kg
     m_max = 5.0
 
     # --- 测量噪声标准差(用于标定 R 权重,也用于独立测试脚本生成合成噪声) ---

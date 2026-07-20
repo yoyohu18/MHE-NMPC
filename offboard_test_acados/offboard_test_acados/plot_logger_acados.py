@@ -6,6 +6,7 @@
 import os
 import time
 
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
@@ -32,6 +33,10 @@ class PlotLoggerAcados(Node):
         self.vel = []  # (t, vx, vy, vz),ENU 世界系,跟位置同坐标系
         self.mass = []  # (t, m),MHE 在线质量估计
         self.t0 = time.time()
+        # 原始数据落盘(论文出图用):png 只是诊断图,分轴速度/位置的原始
+        # 时间序列必须留 npz,否则事后无法重画论文级图(2026-07-16 加)。
+        self.dump_path = os.path.join(
+            RESULTS_DIR, f'acados_plot_data_{time.strftime("%Y%m%d_%H%M%S")}.npz')
 
         self.create_subscription(
             Path, '/acados_nmpc/reference_path', self.ref_cb, 10)
@@ -158,6 +163,18 @@ class PlotLoggerAcados(Node):
         fig.savefig(out_path, dpi=150)
         plt.close(fig)
         self.get_logger().info(f'Plot saved: {out_path}')
+
+        # 每次存图同时覆写原始数据 npz(同一 run 固定文件名,增量覆盖)
+        ref_xyz = []
+        if self.ref_path is not None:
+            ref_xyz = [(p.pose.position.x, p.pose.position.y, p.pose.position.z)
+                       for p in self.ref_path.poses]
+        np.savez(self.dump_path,
+                 actual_txyz=np.array(self.actual_xyz),
+                 vel_txyz=np.array(self.vel),
+                 err_tv=np.array(list(zip(self.err_t, self.err_v))),
+                 mass_tm=np.array(self.mass),
+                 ref_xyz=np.array(ref_xyz))
 
 
 def main():

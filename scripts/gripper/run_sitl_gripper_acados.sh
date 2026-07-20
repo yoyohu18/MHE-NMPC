@@ -1,4 +1,14 @@
 #!/bin/bash
+# ⚠️【已废弃 2026-07-20,保留仅供回溯 07-08 首次吊挂重载实验的细节】
+# 当前请改用:批量→run_gripper_headless.sh / 可视化→run_sitl_gripper_viz.sh
+# 本脚本与当前主力的实质差异(不只是风格,会影响实验有效性):
+#   1) attach 触发:本脚本靠飞机爬升途中**被动路过**几何窗口触发,实测导致
+#      attach 比 NMPC 接管早 5.5s、MHE 事件窗口没机会热身;主力已改为方案(a)
+#      受控 attach(NMPC 的 _descend_phase 到位后主动发一次)。
+#   2) 无 grip_geom_mp_prior → 走**耦合**几何路径(m_est 反推),而非当前的完全解耦。
+#   3) 无磁盘护栏(PX4 verbose 日志曾累计 479G 塞爆盘)和 PX4 参数持久化清理
+#      (上一局改过的增益会落盘污染下一局)。
+#   4) 位置参数而非环境变量,不便批量驱动。
 # 夹爪吊挂 + acados NMPC + MHE 重载实验:
 #   空机 plain x500 由 acados NMPC(姿态+推力控制)飞到 box 正上方低空悬停
 #   -> proximity 节点触发 DetachableJoint 把真实 0.3kg box 焊上来

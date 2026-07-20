@@ -1,4 +1,13 @@
 #!/bin/bash
+# 【保留 · 请勿删除 2026-07-20】这是**唯一不含 acados NMPC / MHE 的纯机构验证手段**:
+# 它用 gripper_flight_node 自己走飞行剖面,不经控制器。夹爪吸不住 / DetachableJoint
+# 出问题时,用它能把控制器整个摘出去、单独定位机构层故障——其余 gripper 脚本全部
+# 耦合了 NMPC,做不到这种隔离。
+# 也是唯一真正 `ros2 run` gripper_flight_node 的脚本(其它脚本里出现该名字都只是
+# 清栈 kill 列表),所以 gripper_flight_node 与 setup.py 里对应的 entry_point 也须保留。
+# 注意:本脚本不适合做控制/估计实验(无 NMPC、无 MHE、无护栏),那类请用
+# run_gripper_headless.sh(批量)或 run_sitl_gripper_viz.sh(可视化)。
+#
 # 磁吸夹爪 attach 演示 SITL:plain x500(空机)飞到 box 上方 -> 接近触发
 # attach(DetachableJoint 把 box 焊到 base_link)-> 带着 box 爬升悬停。
 #

@@ -68,12 +68,12 @@ class AcadosNMPCNode(Node):
         # 的线性启发式 norm=hover_thrust_pct*T/(p.m*g)——那条是过原点直线,只在满载
         # 工作点跟真实推力曲线相切,drop 到空载后失配,实测稳态偏低~12cm)。链路:
         #   1) offboard AttitudeTarget 的 thrust 走姿态速率环、直接当集合推力设定,
-        #      位置控制器被绕过,MPC_THR_HOVER 不参与(所以那个 0.60 是巧合、非标定点);
+        #      位置控制器被绕过,MPC_THR_HOVER-PX4 里"position controller"用来估算悬停油门的一个参数,默认值 0.6。不参与;
         #   2) THR_MDL_FAC=0(airframe 默认)→ PX4 不做推力曲线线性化,电机控制信号
         #      = 归一化推力,线性透传;
-        #   3) GZMixingInterfaceESC 把归一化[0,1]缩放成电机角速度:
+        #   3) GZMixingInterfaceESC仿真里的电机接口 把归一化[0,1]缩放成电机角速度:
         #      ω = OMEGA_MIN + OMEGA_SPAN*norm  (SIM_GZ_EC_MIN/MAX = 150/1000 rad/s);
-        #   4) gz MulticopterMotorModel 出力 T = THRUST_K * ω²(4 电机合计)。
+        #   4) gz MulticopterMotorModel电机物理模型 出力 T = THRUST_K * ω²(4 电机合计)。
         # 合成正向: T(norm) = THRUST_K*(OMEGA_MIN + OMEGA_SPAN*norm)²;反解在
         # publish_attitude 里。THRUST_K 就是 4×SDF motorConstant,不乘任何标定
         # 增益——这里曾短暂放过 ×1.2134,那是按"满载 2.5kg"错误前提标出的幽灵
@@ -112,10 +112,6 @@ class AcadosNMPCNode(Node):
             self.ref_fn = build_reference
             self.ref_window_fn = build_reference_window
 
-        self.rate_test_mode = False
-        self.rate_test_duration = 0.5
-        self.rate_test_cmd = np.array([0.2, 0.0, 0.0])
-
         # 求解失败处理用:偶尔失败一次不去扰动求解器内部的 warm-start(让它
         # 保留当前、哪怕没收敛的迭代值当下一次起点),只有连续失败太多次
         # (大概率已经飞出去了)才强制拉回安全悬停状态。
@@ -135,7 +131,11 @@ class AcadosNMPCNode(Node):
         # _traj_thrust: (N,) 推力轨迹(网格 t=0,..,(N-1)·dt);None=退化零阶保持。
         self._traj_omega = None
         self._traj_thrust = None
-        self._traj_stamp = 0.0     # 上次求解完成的 wall clock(time.time())
+        # 上次求解起点的 ROS 时刻(get_clock().now(),受 use_sim_time 控制)。
+        # 必须用 ROS clock 而非 time.time():插值网格刻度是 p.dt(仿真时间),
+        # 若用墙钟算 tau,RTF≠1 时会系统性错配(RTF<1 前推不足、RTF>1 撞 clamp),
+        # 悄悄削掉甚至反转解耦发布的收益。None=还没有第一条可信轨迹。
+        self._traj_stamp = None
         self._omega_grid = np.arange(p.N + 1) * p.dt
         self._thrust_grid = np.arange(p.N) * p.dt
 
@@ -580,7 +580,8 @@ class AcadosNMPCNode(Node):
             self.m_est = float(np.clip(m, mhe_p.m_min, mhe_p.m_max))
 
     def _build_ref_path_msg(self, r=1.0, w=0.3, z_hover=3.0,
-                            n_samples=400, hover_time=2.0, ramp_time=4.0):
+                            n_samples=400, hover_time=2.0, ramp_time=4.0,
+                            t_offset=0.0):
         # 从 hover_time+ramp_time 之后开始采样(振幅已经渐变完、alpha=1 的稳态
         # 轨迹),否则采样区间会覆盖 ramp-in 过程,画出的参考线会带渐变螺旋的
         # 痕迹,不是完整对称的形状——纯可视化 bug,不影响 NMPC 实际跟踪的参考。
@@ -589,10 +590,14 @@ class AcadosNMPCNode(Node):
         # 实际用的参考永远一致,不用在两处分别维护——之前 straight 用这个方法
         # 自己的 r=1.0 默认值会把可视化画成 ±1m,跟实际飞的 ±2.0m 不一致,就是
         # 这类参数没对齐导致的。
+        # t_offset:_grip_dyn_ref 内部按 t - self.grip_dyn_t0 算相位,t=0 是切
+        # 到动态跟踪那一刻的 nmpc_time,不是节点启动时的 0——不传的话采样区间
+        # 落在 grip_dyn_t0 之前,build_reference_figure8 会一直落在 t<hover_time
+        # 分支,画出来的"8"字会退化成一个点。
         msg = Path()
         msg.header.frame_id = 'map'
         period = 2.0 * math.pi / w
-        t0 = hover_time + ramp_time
+        t0 = t_offset + hover_time + ramp_time
         for i in range(n_samples + 1):
             t = t0 + i * period / n_samples
             xref = self.ref_fn(t, z_hover=z_hover)
@@ -699,6 +704,9 @@ class AcadosNMPCNode(Node):
             # 重新从参考轨迹/悬停猜测出发,切断"上一步解→这一步初值"的路径依赖。
             self._seed_initial_guess(x_cur, Xref_win)
 
+        # t_start_ros:轨迹 t=0 对应的采样时刻(ROS clock),给高频回调算 τ 用。
+        # t_start:墙钟,仅用于测 solve 耗时(solve_time),两者别混。
+        t_start_ros = self.get_clock().now()
         t_start = time.time()
         status = self.solver.solve()
 
@@ -801,8 +809,9 @@ class AcadosNMPCNode(Node):
                 u_opt = self.last_u_opt.copy()
                 omega_cmd = np.zeros(3)
 
-        # 轨迹的 t=0 对应 x_cur 采样时刻(≈t_start),高频回调据此算经过时间 τ。
-        self._traj_stamp = t_start
+        # 轨迹的 t=0 对应 x_cur 采样时刻(≈t_start_ros),高频回调据此算经过时间 τ。
+        # 用 ROS clock(t_start_ros)而非墙钟,与插值网格的仿真时间刻度对齐。
+        self._traj_stamp = t_start_ros
         solve_time = (time.time() - t_start) * 1000
         return u_opt, omega_cmd, solve_time
 
@@ -833,10 +842,9 @@ class AcadosNMPCNode(Node):
     def _publish_from_traj(self):
         """高频发布定时器(路 A):沿最近一次求解的预测轨迹插值前推,以 publish_hz
         发 body_rate + thrust。只在 NMPC 接管后生效——接管前的 position setpoint
-        仍由 10Hz 的 timer_cb 发;rate_test_mode 也走 timer_cb 的直发路径,这里不接管。
+        仍由 10Hz 的 timer_cb 发。
         单线程 executor 下本回调与 timer_cb 串行执行,读 _traj_* 无并发,无需加锁。"""
-        if (not self.nmpc_started or self.nmpc_start_time is None
-                or self.rate_test_mode):
+        if not self.nmpc_started or self.nmpc_start_time is None:
             return
         nmpc_time = (self.get_clock().now()
                      - self.nmpc_start_time).nanoseconds / 1e9
@@ -846,7 +854,7 @@ class AcadosNMPCNode(Node):
             # "看前一步(lookahead=dt,omega_cmd 原取 X_sol[:,1])"的语义,叠加 τ
             # 平滑前推;推力沿用原来取当前步(lookahead=0,U_sol[:,0])的语义。
             # τ 正常在 [0, dt] 内,clamp 到网格末端防两次求解间隔异常拉长时越界。
-            tau = time.time() - self._traj_stamp
+            tau = (self.get_clock().now() - self._traj_stamp).nanoseconds / 1e9
             t_om = min(max(p.dt + tau, 0.0), self._omega_grid[-1])
             t_th = min(max(tau, 0.0), self._thrust_grid[-1])
             omega_cmd = np.array([
@@ -963,6 +971,12 @@ class AcadosNMPCNode(Node):
         self.hover_test_mode = False   # 放开 t_ref,让 figure8 随时间推进
         self.ref_fn = self._grip_dyn_ref
         self.ref_window_fn = self._grip_dyn_ref_window
+        # RViz 的 Reference Path 是 init 时用彼时的 ref_fn(_grip_ref,固定悬停点)
+        # 建的一条退化短线,切到动态跟踪后必须用新 ref_fn 重建,否则 RViz 里一直
+        # 显示旧的悬停参考,看不出真实在飞的 8 字(t_offset=grip_dyn_t0,见
+        # _build_ref_path_msg 里的说明)。
+        self.ref_path_msg = self._build_ref_path_msg(
+            w=self.grip_dyn_w, z_hover=self.grip_z_high, t_offset=self.grip_dyn_t0)
         self.get_logger().info(
             f't={nmpc_time:.1f}s | DYNAMIC: switch to figure8 (r={self.grip_dyn_r} '
             f'w={self.grip_dyn_w}) centered at [{self.grip_dyn_cx:.2f},'
@@ -1362,31 +1376,26 @@ class AcadosNMPCNode(Node):
         self._grip_drop_phase(nmpc_time)
         t_ref = 0.0 if self.hover_test_mode else nmpc_time
 
-        if self.rate_test_mode:
-            u_opt = p.u_hover.copy()
-            solve_time = 0.0
-            if nmpc_time < self.rate_test_duration:
-                omega_cmd = self.rate_test_cmd.copy()
-            else:
-                omega_cmd = np.zeros(3)
-            roll, pitch, yaw = quat_to_euler(*self.x_cur[6:10])
-            self.get_logger().info(
-                f't={nmpc_time:.3f}s | om_meas=[{self.x_cur[10]:+.3f} '
-                f'{self.x_cur[11]:+.3f} {self.x_cur[12]:+.3f}] | '
-                f'rpy=[{math.degrees(roll):+6.2f} {math.degrees(pitch):+6.2f} '
-                f'{math.degrees(yaw):+6.2f}]deg | cmd={omega_cmd}')
-        else:
-            u_opt, omega_cmd, solve_time = self.solve_nmpc(self.x_cur, t_ref)
-            if nmpc_time < self.bodyrate_ramp_time:
-                s = nmpc_time / self.bodyrate_ramp_time
-                ramp = 10*s**3 - 15*s**4 + 6*s**5
-                omega_cmd = omega_cmd * ramp
+        u_opt, omega_cmd, solve_time = self.solve_nmpc(self.x_cur, t_ref)
+        if nmpc_time < self.bodyrate_ramp_time:
+            s = nmpc_time / self.bodyrate_ramp_time
+            ramp = 10*s**3 - 15*s**4 + 6*s**5
+            omega_cmd = omega_cmd * ramp
         # decouple 模式下 body_rate/thrust 由高频 _publish_from_traj 定时器发,这里
-        # 不再 10Hz 直发(rate_test_mode 例外:高频回调不接管它,仍走这里直发)。
-        if not self.decouple_publish or self.rate_test_mode:
+        # 不再 10Hz 直发。
+        if not self.decouple_publish:
             self.publish_attitude(u_opt, omega_cmd)
         # u_opt 仍以 10Hz 发给 MHE(它按这个量级消费,无需高频);decouple 下高频
-        # 实际施加的推力是插值值,稳态与此相等,差异只在接管头几百 ms 且早于 attach。
+        # 实际施加的推力是沿预测轨迹的插值值,稳态与此相等。
+        # 2026-07-16/17 SITL A/B(attach+lift,0.3kg/ecc0.05,on n=8 vs off n=8)实测:
+        # 稳态 rms 中位数 on 0.017m vs off 0.016m——**两者无差别,上面这句"稳态相等"
+        # 是对的**。塌陷率 on 12%(1/8) vs off 38%(3/8) 方向上 on 略优,但 Fisher
+        # p=0.285 **不显著**,且 on 自己也塌——即"解耦发布有效"目前**没有证据支持**,
+        # 别拿它当卖点。当时观察到的"off 稳态时好时坏(0.014~0.59m)"根因不在发布
+        # 频率,而是 MHE 的 m_est 在 attach 后有概率锁死在错值(见 mhe_node.py 的
+        # grip_geom_mp_floor 注释),已由该 floor 修掉(修后 0/8)。
+        # 教训:该 A/B 前三次判读(n=1/n=5)全部被小样本误导且每次反转,SITL 单工况
+        # 方差大,n<8 不要下结论。
         self.u_opt_pub.publish(Float64MultiArray(data=[float(v) for v in u_opt]))
 
         xref_now = self.ref_fn(t_ref)

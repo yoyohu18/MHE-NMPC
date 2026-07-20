@@ -114,6 +114,21 @@ class MHENode(Node):
         self.grip_true_payload_mass = float(
             self.get_parameter('grip_true_payload_mass').value)
 
+        # --- 完全解耦(2026-07-19):载荷几何大小由**独立操作先验**决定 ---
+        # >0 时 m_p_hat 直接取该值,**完全不读 m_est**(绕过反推/棘轮/floor),
+        # 于是 dJ 和 c_xy 同时脱离自举耦合——两者都只由 m_p_hat 驱动,这是唯一瓶颈。
+        # 与 grip_true_payload_mass 机制相同但**语义不同**:那个是真值(诊断专用,
+        # 真机拿不到),这个是"包裹标称质量"这类真机可用的弱先验。
+        # 证据(实验见记忆 mhe-geom-mest-decoupling):先验故意错 -33%(0.2 对真实
+        # 0.3)、floor 关闭、n=8 → 下垂塌陷 0/8,m_est 仍收敛到 2.357(真值 2.364,
+        # 误差 0.3%)。即**几何只需量级大致对以避免模型结构性失配,精确质量由 MHE
+        # 独立负责**;合并统计几何解耦 15/15 vs 耦合 10/15,Fisher p=0.021。
+        # 默认 0.0=关闭(退回 floor 路径,保持既有默认行为);MHE 是通用节点、
+        # 不同场景载荷不同,不硬编码先验,由启动脚本按场景标称值传入。
+        self.declare_parameter('grip_geom_mp_prior', 0.0)
+        self.grip_geom_mp_prior = float(
+            self.get_parameter('grip_geom_mp_prior').value)
+
         # 方案C 永久地板(2026-07-09,打破 m_est<->dJ/c_xy 自举耦合但**不喂
         # 真值**):grip_true_payload_mass 诊断坐实根因是自举正反馈——0.15kg
         # 陷入鸡生蛋(m_est 要收敛需 dJ/c_xy 够大,dJ/c_xy 够大需 m_est 先
@@ -124,8 +139,16 @@ class MHENode(Node):
         # 地板用真实值。**关键:地板不衰减、不交回**——2026-07-09 实测衰减版
         # (线性 w:0->1 撤除)在 ecc=0.10 脆:mp=0.3 过度补偿崩到 m_min,mp=0.15
         # 撤太早趴空机;换永久地板后 ecc=0.05/0.10 均干净收敛到真值(<0.3%)。
-        # 默认 0.0 = 关闭(退回原棘轮行为,保 0.3kg 已验证结果 + A/B 对照)。
-        self.declare_parameter('grip_geom_mp_floor', 0.0)
+        # 2026-07-17 默认从 0.0(关闭)改为 0.15(开启)。原先关着是为了"保已验证
+        # 结果 + 留 A/B 对照",但 A/B 已经做完,而且证明**关着它有 25% 的任务失败
+        # 率**:gripper attach 0.3kg/ecc0.05 跑 n=16(on 8 + off 8),4 轮里 m_est
+        # 在 de-weight 后没能冲过 m_nominal(2.064)→ m_p_hat 恒为 0 → dJ/c_xy 永不
+        # 上线 → 锁死在 1.44~2.03kg 不自纠(T_phys=23.1N 明示 2.36kg 也没用),NMPC
+        # 消费错值后稳态下垂 0.24~0.61m、抬不到目标高度(不坠机,但任务失败)。
+        # 开 floor=0.15 后 n=8 全部精确收敛 2.360、塌陷 0/8(机制上死锁路径被物理
+        # 排除;统计上 0/8 vs 3/8 的 Fisher p=0.10 尚未达显著,要论文级需每组 n≈25)。
+        # 原以为这只是 0.15kg 轻载的鸡生蛋,实测 0.3kg 一样中,只是变成概率事件。
+        self.declare_parameter('grip_geom_mp_floor', 0.15)
         self.grip_geom_mp_floor = float(
             self.get_parameter('grip_geom_mp_floor').value)
 
@@ -373,7 +396,12 @@ class MHENode(Node):
     def _payload_geometry(self, r_p):
         """由载荷相对机体的几何偏移 r_p=[rx,ry,rz](rz<0)算 (dJ, c_xy)。跟
         acados_nmpc_node.py 的同名方法完全一致(平行轴定理+复合质心),区别
-        是这里没有独立的 m_p/m_t 真值,需要用质量估计反推 m_p_hat——但不能
+        是这里没有 m_p/m_t 真值。m_p_hat 有三条来源,优先级从高到低:
+          ①grip_true_payload_mass>0:真值(诊断专用,真机拿不到)
+          ②grip_geom_mp_prior>0:**独立操作先验,完全不读 m_est(推荐的生产路径,
+            2026-07-19 完全解耦改造)**
+          ③否则:m_est 反推+棘轮+floor(旧的耦合路径,floor 只护低估方向)
+        ③之所以危险:它构成了"self.m_est 反推 m_p_hat 再算 dJ/c_xy、dJ/c_xy 又反过来影响 self.m_est"
         直接拿瞬时 self.m_est,棘轮(只增不减)的理由见 __init__ 里
         _m_p_hat_ratchet 的注释:瞬时值在 LIFT 暂态失败期间可能跌破
         m_nominal,把修正读成 0,恰好在最需要它的时候自己失效。
@@ -400,6 +428,12 @@ class MHENode(Node):
             return 0.0, np.zeros(2)
         if self.grip_true_payload_mass > 0.0:
             m_p_hat = self.grip_true_payload_mass
+        elif self.grip_geom_mp_prior > 0.0:
+            # 完全解耦路径:几何大小 = 独立操作先验,**不读 m_est**。
+            # 这一支同时切断 m_est→dJ 和 m_est→c_xy 两条自举链(共用 m_p_hat 瓶颈),
+            # 且不像 floor 那样只护住低估方向——向上超调被棘轮永久锁死的对称风险
+            # 也一并消除(棘轮在这条路径上根本不参与)。见 __init__ 里该参数注释。
+            m_p_hat = self.grip_geom_mp_prior
         else:
             m_p_hat = max(self.m_est - mhe_p.m_nominal, 0.0)
             self._m_p_hat_ratchet = max(self._m_p_hat_ratchet, m_p_hat)

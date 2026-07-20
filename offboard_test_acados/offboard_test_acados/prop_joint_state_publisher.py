@@ -34,8 +34,16 @@ class PropJointStatePublisher(Node):
         self.velocity = [0.0, 0.0, 0.0, 0.0]
         self.angle = [0.0, 0.0, 0.0, 0.0]
 
+        # 话题名做成参数,跟 mhe_node 的 motor_speed_topic 同一套约定:
+        # mass_changer 场景是 x500_payload_0,夹爪场景是空机 x500_0。默认保持
+        # 原值,不影响现有 run_sitl_acados.sh。之前硬编码 x500_payload_0 时,
+        # 夹爪场景的 bridge 发布的是 x500_0,这里订阅不到,RViz 里桨叶就不转。
+        self.declare_parameter('motor_speed_topic',
+                               '/x500_payload_0/command/motor_speed')
+        motor_topic = self.get_parameter('motor_speed_topic').value
+
         self.motor_speed_sub = self.create_subscription(
-            Actuators, '/x500_payload_0/command/motor_speed', self.motor_speed_cb, 10)
+            Actuators, motor_topic, self.motor_speed_cb, 10)
 
         self.joint_state_pub = self.create_publisher(JointState, '/joint_states', 10)
 

@@ -1,4 +1,9 @@
 #!/bin/bash
+# ⚠️【已废弃 2026-07-20,保留仅供回溯 07-06 自锁重锚修复复测的细节】
+# 当前偏心扫描请用 run_cxy_ecc_sweep.sh(2026-07-14,包装 run_gripper_headless.sh)。
+# 本脚本自述"与 run_sitl_gripper_acados.sh 唯一差异是 grip_y 参数化",因此
+# 继承了后者的全部过时之处(被动 attach 触发/几何耦合路径/无磁盘与PX4参数护栏),
+# 详见 run_sitl_gripper_acados.sh 头部的废弃说明。
 # 坏几何复测(长期计划_20260707.md §阶段B步骤1):扫横向偏心 ry,验证
 # mhe_node.py 的自锁重锚修复(2026-07-06,_fail_streak>=5 时重锚先验)在
 # 07-06 曾暴露自锁 bug 的大偏心几何下确实生效,顺带标定单集(attach->稳态)
