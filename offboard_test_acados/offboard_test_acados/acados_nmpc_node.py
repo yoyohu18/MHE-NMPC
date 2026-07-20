@@ -68,12 +68,13 @@ class AcadosNMPCNode(Node):
         # 的线性启发式 norm=hover_thrust_pct*T/(p.m*g)——那条是过原点直线,只在满载
         # 工作点跟真实推力曲线相切,drop 到空载后失配,实测稳态偏低~12cm)。链路:
         #   1) offboard AttitudeTarget 的 thrust 走姿态速率环、直接当集合推力设定,
-        #      位置控制器被绕过,MPC_THR_HOVER-PX4 里"position controller"用来估算悬停油门的一个参数,默认值 0.6。不参与;
+        #      位置控制器被绕过,MPC_THR_HOVER(PX4 位置控制器用来估算悬停油门的
+        #      参数,默认 0.6)不参与;
         #   2) THR_MDL_FAC=0(airframe 默认)→ PX4 不做推力曲线线性化,电机控制信号
         #      = 归一化推力,线性透传;
-        #   3) GZMixingInterfaceESC仿真里的电机接口 把归一化[0,1]缩放成电机角速度:
+        #   3) GZMixingInterfaceESC(仿真里的电机接口)把归一化[0,1]缩放成电机角速度:
         #      ω = OMEGA_MIN + OMEGA_SPAN*norm  (SIM_GZ_EC_MIN/MAX = 150/1000 rad/s);
-        #   4) gz MulticopterMotorModel电机物理模型 出力 T = THRUST_K * ω²(4 电机合计)。
+        #   4) gz MulticopterMotorModel(电机物理模型)出力 T = THRUST_K * ω²(4 电机合计)。
         # 合成正向: T(norm) = THRUST_K*(OMEGA_MIN + OMEGA_SPAN*norm)²;反解在
         # publish_attitude 里。THRUST_K 就是 4×SDF motorConstant,不乘任何标定
         # 增益——这里曾短暂放过 ×1.2134,那是按"满载 2.5kg"错误前提标出的幽灵
