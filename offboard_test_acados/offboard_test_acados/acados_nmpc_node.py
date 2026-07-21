@@ -91,13 +91,6 @@ class AcadosNMPCNode(Node):
         # 再切 False 去追轨迹
         self.hover_test_mode = False
 
-        # 证伪实验开关:True(默认)=正常 warm-start(shift 上一次解当初值);
-        # False=每一步都用参考轨迹重新 seed(cold start,丢掉历史路径依赖)。
-        # 假说是:warm-start 在 8 字交叉点附近的正反馈(线性化点偏了->tau 推得
-        # 更偏->下一步起点更差)是雪崩根因。如果 cold start 下发散消失或推迟,
-        # 就证实是这个机制;如果照样发散,说明跟 warm-start 无关。
-        self.warm_start_enabled = True
-
         # 'circle' / 'figure8' / 'straight' 三种参考轨迹都保留、互不影响,改这
         # 一个字符串就能切换。straight 是往返直线(yaw 固定不变,详见
         # straight_reference.py),用来直观验证机头朝向是否跟随飞行方向——比
@@ -140,15 +133,9 @@ class AcadosNMPCNode(Node):
         self._omega_grid = np.arange(p.N + 1) * p.dt
         self._thrust_grid = np.arange(p.N) * p.dt
 
-        # 诊断实验(tau_max 临时放宽到 2.0):记录力矩绝对值的峰值,看求解器
-        # 在不被约束卡住的情况下自己想要多大力矩。
-        self.max_roll_torque  = 0.0
-        self.max_pitch_torque = 0.0
-        self.max_yaw_torque   = 0.0
         self.max_res_stat = 0.0
         self.last_res_stat = 0.0
         self.last_sqp_iter = 0
-        self.sqp_trace_dumped = False
 
         # 闭环自适应质量:默认是 acados_params.py 里的标定常数 p.m,一旦
         # mhe_node 发来新估计就实时更新——下一次 solve_nmpc 调用就会用这个新
@@ -163,9 +150,8 @@ class AcadosNMPCNode(Node):
         # t≈2.1s 独立收敛到 2.06)。用 2.564 初始化 => 接管头 2s NMPC 悬停推力
         # 高估 ~25%(25.15 vs 真实 20.1N)=> 接管瞬间强烈上冲(vz 峰 +0.7m/s、
         # 过冲 +0.27m,就是观察到的"起飞"),直到 MHE 收敛才回落。故初值改回
-        # 真实空机 p.m,消掉这段过推。payload_mass 变量保留(暂无其它引用);
-        # 若将来修好 mass_changer 让满载真进 DART,这里需相应改回 p.m+payload。
-        self.payload_mass = 0.5
+        # 真实空机 p.m,消掉这段过推。若将来修好 mass_changer 让满载真进 DART,
+        # 这里需把 m_est 初值改回 p.m+payload。
         self.m_est = p.m
         # 吊挂载荷惯量增量(model.p 的第 15 维,见 acados_model.py dJ_sym 注释)。
         # mass_changer 场景是 wrench 模拟的纯平动质量变化、无惯量变化,恒 0;
@@ -700,11 +686,6 @@ class AcadosNMPCNode(Node):
             self.solver.set(i, 'p', np.concatenate(
                 [Xref_win[:, i], [self.m_est], [self.dJ_est], self.c_est]))
 
-        if not self.warm_start_enabled:
-            # cold start:无论上一步成功与否,都丢掉历史 warm-start,每一步
-            # 重新从参考轨迹/悬停猜测出发,切断"上一步解→这一步初值"的路径依赖。
-            self._seed_initial_guess(x_cur, Xref_win)
-
         # t_start_ros:轨迹 t=0 对应的采样时刻(ROS clock),给高频回调算 τ 用。
         # t_start:墙钟,仅用于测 solve 耗时(solve_time),两者别混。
         t_start_ros = self.get_clock().now()
@@ -721,21 +702,6 @@ class AcadosNMPCNode(Node):
         self.last_res_stat = float(res_stat)
         self.last_sqp_iter = int(sqp_iter)
 
-        # 一次性 dump:第一次顶满 max_iter 时,把完整的逐次迭代 res_stat/alpha
-        # 轨迹打出来,用来区分"震荡型"(非光滑代价,alpha 反复缩步长)还是
-        # "平台型"(参考轨迹本身不可行,alpha 接近 1 但 res_stat 单调躺平)。
-        # statistics 矩阵行定义(SQP): 0=iter,1=res_stat,2=res_eq,3=res_ineq,
-        # 4=res_comp,5=qp_status,6=qp_iter,7=alpha。
-        if sqp_iter >= 95 and not self.sqp_trace_dumped:
-            self.sqp_trace_dumped = True
-            stats = self.solver.get_stats('statistics')
-            n_iter = stats.shape[1]
-            self.get_logger().warn(
-                f't={t_ref:.2f}s | sqp_iter hit max ({sqp_iter}) for the first time, '
-                f'dumping full iteration trace ({n_iter} rows, format: it res_stat alpha):')
-            lines = [f'it={i:3d} res_stat={stats[1, i]:.4e} alpha={stats[7, i]:.4f}'
-                     for i in range(n_iter)]
-            self.get_logger().warn('\n'.join(lines))
         if res_stat > 10.0 or sqp_iter >= 95:
             self.get_logger().warn(
                 f't={t_ref:.2f}s | KKT residual abnormal! res_stat={res_stat:.3e} '
@@ -1428,29 +1394,12 @@ class AcadosNMPCNode(Node):
                     f'T={u_opt[0]:.2f}N z={self.x_cur[2]:.3f} '
                     f'm_est={self.m_est:.3f}')
 
-        # 诊断:力矩输出占约束上限的比例,以及实际绝对值峰值(tau_max 现在临时
-        # 放宽到 2.0,看求解器在不被约束卡住的情况下自己想要多大力矩)。
-        roll_pct  = abs(u_opt[1]) / p.tau_max * 100.0
-        pitch_pct = abs(u_opt[2]) / p.tau_max * 100.0
-        yaw_pct   = abs(u_opt[3]) / p.tau_psi * 100.0
-        self.max_roll_torque  = max(self.max_roll_torque, abs(u_opt[1]))
-        self.max_pitch_torque = max(self.max_pitch_torque, abs(u_opt[2]))
-        self.max_yaw_torque   = max(self.max_yaw_torque, abs(u_opt[3]))
-        max_pct   = max(roll_pct, pitch_pct, yaw_pct)
-        if max_pct > 85.0:
-            self.get_logger().warn(
-                f't={nmpc_time:.2f}s | Torque near constraint limit! roll={roll_pct:.0f}% '
-                f'pitch={pitch_pct:.0f}% yaw={yaw_pct:.0f}% | pos_err={pos_err:.3f}m | '
-                f'peak roll={self.max_roll_torque:.3f} pitch={self.max_pitch_torque:.3f} '
-                f'yaw={self.max_yaw_torque:.3f} Nm')
-
         self.counter += 1
         if self.counter % 50 == 0:
             self.get_logger().info(
                 f't={nmpc_time:.1f}s | pos_err={pos_err:.3f}m | '
                 f'T={u_opt[0]:.2f}N | tau=[r{u_opt[1]:.3f} p{u_opt[2]:.3f} '
-                f'y{u_opt[3]:.3f}]Nm | peak=[r{self.max_roll_torque:.3f} '
-                f'p{self.max_pitch_torque:.3f} y{self.max_yaw_torque:.3f}]Nm | '
+                f'y{u_opt[3]:.3f}]Nm | '
                 f'res_stat={self.last_res_stat:.3e}(peak {self.max_res_stat:.3e}) '
                 f'sqp_iter={self.last_sqp_iter} | solve={solve_time:.1f}ms')
 

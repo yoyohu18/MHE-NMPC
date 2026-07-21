@@ -113,10 +113,13 @@ def load_mission(stamp, t_end):
 
 PHASE_CN = {'ATTACH': '接近并抓取载荷', 'LIFT': '抬升(有效质量阶跃)',
             'DYNAMIC': '8 字动态轨迹跟踪', 'DROP': '投放载荷(突卸扰动)'}
+PHASE_EN = {'ATTACH': 'approach & grasp payload', 'LIFT': 'lift (effective mass step)',
+            'DYNAMIC': 'figure-8 trajectory tracking', 'DROP': 'release (sudden unloading)'}
 
 
-def build(d, payload, t_end, fps, width, height, out_path):
+def build(d, payload, t_end, fps, width, height, out_path, lang='zh'):
     cjk = _cjk_font()
+    use_cn = (lang == 'zh') and (cjk is not None)
     plt.rcParams.update({
         'font.size': 11, 'axes.labelsize': 11, 'legend.fontsize': 10,
         'xtick.labelsize': 9.5, 'ytick.labelsize': 9.5,
@@ -140,27 +143,27 @@ def build(d, payload, t_end, fps, width, height, out_path):
     for ax in axes:
         ax.set_facecolor((0, 0, 0, 0))
         ax.set_xlim(0, t_end)
-        ax.set_xlabel('任务时间 [s]' if cjk else 'mission time [s]')
+        ax.set_xlabel('任务时间 [s]' if use_cn else 'mission time [s]')
 
     ph = d['phases']
     t_att = ph.get('ATTACH', 7.0)
     t_drop = ph.get('DROP', t_end)
 
     # 1) 位置误差
-    axes[0].set_ylabel('位置误差 [m]' if cjk else 'position error [m]')
+    axes[0].set_ylabel('位置误差 [m]' if use_cn else 'position error [m]')
     axes[0].set_ylim(0, max(0.35, float(np.nanmax(d['v_err'])) * 1.1))
     # 2) 质量:真值阶跃 + MHE 估计
-    axes[1].set_ylabel('质量 [kg]' if cjk else 'mass [kg]')
+    axes[1].set_ylabel('质量 [kg]' if use_cn else 'mass [kg]')
     axes[1].set_ylim(M_DRY - 0.25, M_DRY + payload + 0.25)
     axes[1].plot([0, t_att, t_att, t_drop, t_drop, t_end],
                  [M_DRY, M_DRY, M_DRY + payload, M_DRY + payload, M_DRY, M_DRY],
                  color=C_TRUTH, lw=1.4, ls='--',
-                 label='真值' if cjk else 'truth')
+                 label='真值' if use_cn else 'truth')
     # 3) 偏心 c_y
-    axes[2].set_ylabel('质心偏心 $c_y$ [cm]' if cjk else 'CoM offset $c_y$ [cm]')
+    axes[2].set_ylabel('质心偏心 $c_y$ [cm]' if use_cn else 'CoM offset $c_y$ [cm]')
     if len(d['t_c']):
         axes[2].plot(d['t_c'], 1e2 * d['v_ct'], color=C_TRUTH, lw=1.4, ls='--',
-                     label='真值' if cjk else 'truth')
+                     label='真值' if use_cn else 'truth')
         lo = np.nanmin(1e2 * np.concatenate([d['v_c'], d['v_ct']]))
         hi = np.nanmax(1e2 * np.concatenate([d['v_c'], d['v_ct']]))
         pad = max(1.0, 0.2 * (hi - lo))
@@ -174,9 +177,9 @@ def build(d, payload, t_end, fps, width, height, out_path):
     # 动态元素
     ln_err, = axes[0].plot([], [], color=C_ERR, lw=1.8)
     ln_m, = axes[1].plot([], [], color=C_EST, lw=1.8,
-                         label='MHE 估计' if cjk else 'MHE estimate')
+                         label='MHE 估计' if use_cn else 'MHE estimate')
     ln_c, = axes[2].plot([], [], color=C_EST, lw=1.8,
-                         label='在线估计' if cjk else 'online estimate')
+                         label='在线估计' if use_cn else 'online estimate')
     cursors = [ax.axvline(0, color=FG, lw=1.0, alpha=0.85) for ax in axes]
     readouts = [ax.text(0.98, 1.06, '', transform=ax.transAxes, ha='right',
                         va='bottom', fontsize=13, color=FG) for ax in axes]
@@ -213,7 +216,7 @@ def build(d, payload, t_end, fps, width, height, out_path):
         cur_ph = ''
         for k, tv in sorted(ph.items(), key=lambda kv: kv[1]):
             if t >= tv:
-                cur_ph = PHASE_CN.get(k, k) if cjk else k
+                cur_ph = (PHASE_CN if use_cn else PHASE_EN).get(k, k)
         phase_txt.set_text(cur_ph)
         clock_txt.set_text(f't = {t:5.1f} s')
 
@@ -235,6 +238,8 @@ def main():
     ap.add_argument('--payload', type=float, default=0.3, help='载荷真值 [kg]')
     ap.add_argument('--t-end', type=float, default=mpf.T_END)
     ap.add_argument('--fps', type=int, default=25)
+    ap.add_argument('--lang', choices=('zh', 'en'), default='zh',
+                    help='曲线轴标签与阶段标注的语言')
     ap.add_argument('--width', type=int, default=1920)
     ap.add_argument('--height', type=int, default=340)
     a = ap.parse_args()
@@ -244,16 +249,17 @@ def main():
     print(f'阶段时刻: ' + ', '.join(f'{k}={v:.1f}s' for k, v in
                                  sorted(d['phases'].items(), key=lambda kv: kv[1])))
     print(f'墙钟→任务时间偏移 off={d["off"]:.3f}')
-    out = os.path.join(OUT, f'overlay_{a.stamp}.webm')
-    build(d, a.payload, a.t_end, a.fps, a.width, a.height, out)
+    sfx = '' if a.lang == 'zh' else f'_{a.lang}'
+    out = os.path.join(OUT, f'overlay_{a.stamp}{sfx}.webm')
+    build(d, a.payload, a.t_end, a.fps, a.width, a.height, out, a.lang)
 
-    meta = dict(stamp=a.stamp, off=d['off'], fps=a.fps, t_end=a.t_end,
+    meta = dict(stamp=a.stamp, lang=a.lang, off=d['off'], fps=a.fps, t_end=a.t_end,
                 width=a.width, height=a.height, payload=a.payload,
                 phases=d['phases'], overlay=out)
-    with open(os.path.join(OUT, f'overlay_{a.stamp}.meta.json'), 'w') as f:
+    with open(os.path.join(OUT, f'overlay_{a.stamp}{sfx}.meta.json'), 'w') as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
     print(f'\n已生成 {out}')
-    print(f'      {OUT}/overlay_{a.stamp}.meta.json')
+    print(f'      {OUT}/overlay_{a.stamp}{sfx}.meta.json')
 
 
 if __name__ == '__main__':
