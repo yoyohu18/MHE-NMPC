@@ -4,6 +4,12 @@
 # 通过标准:3/3 轮 drop 后几何立即归零、m_est 回到 2.064±0.03、原 5-8cm 持续
 # 高度偏差消失,且带载段质量误差/轨迹性能不退化。
 # 用法: REPS=3 bash src/scripts/gripper/run_drop_geom_verify.sh
+#
+# ⚠️2026-07-31 改:原先无条件硬传 θ*(CEM 学出的调度)+α=0.9875,但那不是主线部署
+# 配置(run_gripper_headless 默认 M0),等于"验收的不是要交付的东西"。且 θ* 已被
+# 2×2 析因消融(20Hz n=8/格)+10Hz 对照证明无可测收益(见记忆 cem-benefit-refuted)。
+# 现默认改为 M0 = 主线配置;要复现旧的 θ* 口径就显式传:
+#   MHE_SCHEDULE_THETA="[-4.8038,-1.2080,0.4930,-0.9602,0.9875]" MHE_CONFIRM_ALPHA=0.9875
 
 WS="/home/clear/ros2_ws_HJH"; RUNDIR="$WS/nmpc_test_results"
 REPS="${REPS:-3}"; STAMP=$(date +%Y%m%d_%H%M%S)
@@ -28,8 +34,8 @@ for rep in $(seq 1 "$REPS"); do
   LAUNCH="$RUNDIR/drop_geom_launch_${STAMP}_${rep}.log"
   GRIP_PAYLOAD_KG=0.3 GRIP_ECC_Y=0.10 USE_MHE=true MHE_C_XY_EST=true \
     GRIP_GEOM_MP_FLOOR=0.15 NMPC_GEOM_SOURCE=online \
-    MHE_SCHEDULE_THETA="[-4.8038,-1.2080,0.4930,-0.9602,0.9875]" \
-    MHE_CONFIRM_ALPHA=0.9875 MHE_CONFIRM_PRIOR=0.3 \
+    MHE_SCHEDULE_THETA="${MHE_SCHEDULE_THETA:-[-4.0,0.0,0.0,0.0]}" \
+    MHE_CONFIRM_ALPHA="${MHE_CONFIRM_ALPHA:--1.0}" MHE_CONFIRM_PRIOR="${MHE_CONFIRM_PRIOR:-0.3}" \
     GRIP_DYNAMIC=true GRIP_DROP_AT_TIP=true GRIP_DROP_AFTER=60.0 \
     ATTACH_WINDOW_SEC=130.0 \
     bash "$WS/src/scripts/gripper/run_gripper_headless.sh" > "$LAUNCH" 2>&1

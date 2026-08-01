@@ -14,13 +14,34 @@ WS="/home/clear/ros2_ws_HJH"
 RUNDIR="$WS/nmpc_test_results"
 MASSES="${MASSES:-0.2 0.3}"
 ECCS="${ECCS:-0.05 0.10}"
-MODES="${MODES:-truth online}"
+# mode 维(C.1 Phase 2 扩,2026-07-23):truth/online=几何来源 A/B(原 B.3);
+# **l1**=NMPC_CONTROL_MODE=l1(流派 B 对照:不估质量,L1 补 d_lumped+档位先验
+# 缩增益,ω_c 默认 0.5,见 memory c1-l1-nmpc-baseline)。
+MODES="${MODES:-truth online l1}"
 REPS="${REPS:-5}"
-NEED_AW="${NEED_AW:-110}"
+NEED_AW="${NEED_AW:-220}"    # ~11s @ 20Hz
 TIMEOUT="${TIMEOUT:-240}"
 STAMP=$(date +%Y%m%d_%H%M%S)
+
+# 单实例锁(2026-07-23,同 run_b4_decoupled_verify.sh:双批并发会经 headless
+# 前置清理互杀节点,当天实测两批全作废,教训第二次出现即上机制护栏)。
+exec 9>"/tmp/geom_grid.lock"
+if ! flock -n 9; then
+  echo "[grid] 已有另一个实例在跑(锁 /tmp/geom_grid.lock 被持有),退出。"
+  exit 1
+fi
+
 MANIFEST="${MANIFEST:-$RUNDIR/geom_grid_${STAMP}.txt}"
-[ -f "$MANIFEST" ] || echo "# B.3 geom grid $STAMP : mass ecc mode rep nmpc_stamp status" > "$MANIFEST"
+if [ ! -f "$MANIFEST" ]; then
+  # 分组元数据落盘(承 07-20 发散 sweep 未落盘教训)
+  {
+    echo "# B.3/C.1 geom grid $STAMP : mass ecc mode rep nmpc_stamp status"
+    echo "# 配置: modes=${MODES} masses=${MASSES} eccs=${ECCS} reps=${REPS}"
+    echo "# 配置: geom_prior=headless默认(=GRIP_PAYLOAD_KG 档位值) floor=0.15 m_min=默认1.961"
+    echo "# 配置: l1: omega_c=headless默认0.5 a=10 D2(b)档位先验缩增益"
+    echo "# 判据: DIVERGED=pos_err峰>2.0m ; NEED_AW=${NEED_AW}"
+  } > "$MANIFEST"
+fi
 echo "[grid] manifest: $MANIFEST"
 
 cleanup() {
@@ -45,8 +66,12 @@ for mass in $MASSES; do for ecc in $ECCS; do for mode in $MODES; do for rep in $
   fi
   echo "[grid] === mass=$mass ecc=$ecc mode=$mode rep=$rep ==="
   LAUNCH="$RUNDIR/geom_grid_launch_${STAMP}_${mass}_${ecc}_${mode}_${rep}.log"
+  # mode → (几何来源, 控制模式) 映射:l1 走 control_mode,geom_source 无关
+  # (l1 模式下 nmpc 侧几何前馈全被旁路,attach 真值仅评估)。
+  GS=$mode; CM=mhe
+  [ "$mode" = l1 ] && { GS=truth; CM=l1; }
   GRIP_PAYLOAD_KG=$mass GRIP_ECC_Y=$ecc USE_MHE=true MHE_C_XY_EST=true \
-    GRIP_GEOM_MP_FLOOR=0.15 NMPC_GEOM_SOURCE=$mode \
+    GRIP_GEOM_MP_FLOOR=0.15 NMPC_GEOM_SOURCE=$GS NMPC_CONTROL_MODE=$CM \
     bash "$WS/src/scripts/gripper/run_gripper_headless.sh" > "$LAUNCH" 2>&1
   NMPC=""; for k in $(seq 1 12); do
     NMPC=$(grep -oE "/home/[^ ]*grip_nmpc_[0-9_]+\.log" "$LAUNCH" 2>/dev/null | head -1)

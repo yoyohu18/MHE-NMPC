@@ -46,23 +46,14 @@ class AcadosParams:
     # --- acados 控制器自己的时域/代价权重,独立调(不影响 offboard_test 那边) ---
     # acados controller's own horizon/cost weights, tuned independently
     # (changing these never affects the offboard_test CasADi/IPOPT side).
-    N  = 10   # 预测时域步数(horizon steps)。2026-07-08 复测过 dt=0.05/N=20
-              # (同样 1s 时域但步数翻倍,20Hz 控制环)——即使叠加了 dJ/c_xy
-              # 建模、MERIT_BACKTRACKING、方案(a)受控attach、descend 收敛判据
-              # 这些后续修复,同一个 ry=0.05 工况下 attach 瞬态 pos_err 峰值仍
-              # 从 <0.05m 恶化到 1.16m(虽然这次没像最早那次一样发散),solve
-              # 耗时也从 1-5ms 涨到 6-9ms。跟当年结论一致,改回这组固定值。
-              # Horizon length (steps). 2026-07-08 retested dt=0.05/N=20 (same 1s
-              # horizon, double the steps, 20Hz control loop) — even with the
-              # later dJ/c_xy modeling, MERIT_BACKTRACKING, controlled attach
-              # (方案a), and descend convergence-gate fixes, the same ry=0.05
-              # case still got a worse attach transient (pos_err peak 0.05m ->
-              # 1.16m, though it no longer diverged outright) and slower solves
-              # (1-5ms -> 6-9ms). Confirms the original finding; reverted.
-    dt = 0.1  # 每步时长(s),N*dt=1.0s 是 NMPC 往前看的预测时域长度;dt 同时也是
-              # ROS2 控制循环周期(acados_nmpc_node.py 的 self.timer 用的就是这个值)
-              # Step length (s). N*dt=1.0s is the NMPC look-ahead horizon; dt also
-              # doubles as the ROS2 control-loop period (self.timer in acados_nmpc_node.py)
+    # 20 Hz NMPC: dt 同时是离散步长和 ROS2 求解定时器周期。N 随 dt 从原来的
+    # 10@0.1s 同步增至 20，保持 N*dt=1.0s 的预测时域不变。
+    # 旧实验曾观察到 20 Hz 配置的 attach 瞬态和求解耗时变差，因此切换频率后
+    # 必须重新做闭环验收；这里仍按当前要求启用 20 Hz，而不是缩短预测时域。
+    # 20 Hz NMPC: dt is both the shooting interval and ROS2 solve-timer period.
+    # N increases with the rate so the 1.0 s prediction horizon is preserved.
+    N  = 20
+    dt = 0.05
 
     # --- Bryson's rule 无量纲化: Q_ii = 1/(典型尺度)^2,R_jj 同理 ---
     # Bryson's rule non-dimensionalization: Q_ii = 1/(typical scale)^2, same for R_jj.
@@ -155,3 +146,67 @@ class AcadosParams:
 
 
 p = AcadosParams()
+
+# figure8(Gerono lemniscate)参考 yaw_rate 峰值与角速率 w 的比例常数,
+# yaw_rate_peak = YAW_RATE_K * w,与半径 r 无关。数值实测值,推导见
+# scaled_stage_terminal_W 的 docstring。
+YAW_RATE_K = 3.17
+
+
+def scaled_stage_terminal_W(r, w):
+    """按 figure8 轨迹尺度 (r, w) 重算 Bryson 权重,返回 (W_stage, W_e)。
+
+    L_vel/L_omega 的注释本身就把这两个"容许误差量级"定义成跟轨迹挂钩的量
+    (L_vel = 特征速度 r*w;L_omega 跟参考 yaw_rate 同量级),但类里是按
+    r=1.0/w=0.3 的低速工况写死的常数。轨迹尺寸/速度一提上去,这两项就跟实际
+    信号量级差一个数量级,Bryson 无量纲化失效、Gauss-Newton 的 Hessian 各方向
+    曲率重新失衡——正是当年 res_stat 崩到 6.26e5 的同一类病根。
+
+    Gerono lemniscate 的两个特征量:
+      特征速度      r*w             (峰值 √2*r*w,在交叉点)
+      yaw_rate 峰值 YAW_RATE_K*w    (与 r 无关)
+
+    YAW_RATE_K=3.17 是数值扫整圈量出来的(见 verify_traj_scale.py:yaw_rate 峰
+    与 w 严格成正比,比值 3.170)。解析上 yaw_rate(a)=w*(sa*c2a-2*ca*s2a)/
+    (ca^2+c2a^2),极值不在 a=π/4(那里只有 2.83)——按 π/4 估会低估 12%。
+
+    两者都取 max(原值, 新值):只放宽、不收紧,避免在低速工况下反而把权重改严。
+
+    注意低速代入后**不是**原封不动的那组数:
+      L_vel   r=1.0/w=0.3 → max(0.3, 0.30)=0.30,复现原值;
+      L_omega w=0.3       → max(0.3, 0.951)=0.951,放宽了 3.2 倍。
+    后者不是本函数引入的偏差,而是暴露了一处既有失配——L_omega=0.3 的注释写的
+    是"跟**圆形**轨迹的恒定 yaw_rate 同量级"(圆形 yaw_rate 恒为 w),但实际飞的
+    是 figure8,它的 yaw_rate 峰值是 3.17w,原值对 figure8 本来就偏紧 3.2 倍。
+    调用方默认不开这条路径(traj_scale_weights=False),历史批次不受影响;要在
+    高机动批次里用,就得接受 L_omega 一并被修正,别把它和速度尺度的效应混为
+    一谈(混算两种效应会压低统计功效)。
+
+    返回值直接喂 solver.cost_set(i,'W',·) / cost_set(N,'W',·),与
+    acados_solver_builder 里 ocp.cost.W / W_e 的构造保持同一形状。
+    """
+    L_vel   = max(p.L_vel,   float(r) * float(w))
+    L_omega = max(p.L_omega, YAW_RATE_K * float(w))
+
+    def _blocks(pos_k, att_k, om_k):
+        return np.block([
+            [pos_k*(1/p.L_pos**2)*np.eye(3), np.zeros((3, 3)),
+             np.zeros((3, 3)),               np.zeros((3, 3))],
+            [np.zeros((3, 3)),               (1/L_vel**2)*np.eye(3),
+             np.zeros((3, 3)),               np.zeros((3, 3))],
+            [np.zeros((3, 3)),               np.zeros((3, 3)),
+             att_k*(1/p.L_att**2)*np.eye(3), np.zeros((3, 3))],
+            [np.zeros((3, 3)),               np.zeros((3, 3)),
+             np.zeros((3, 3)),               om_k*(1/L_omega**2)*np.eye(3)],
+        ])
+
+    # stage:Q 与 R 的块对角,跟 acados_solver_builder 的拼法一致(R 不随轨迹
+    # 尺度变——它的典型尺度是推力/力矩约束,跟飞多快无关)
+    Q_s = _blocks(1.0, 1.0, 1.0)
+    W_stage = np.block([
+        [Q_s,                                np.zeros((Q_s.shape[0], p.R.shape[1]))],
+        [np.zeros((p.R.shape[0], Q_s.shape[1])), p.R],
+    ])
+    # terminal:沿用类里那组相对放大倍数(位置 20×、速度 1×、姿态 2×、角速度 0.2×)
+    W_e = _blocks(20.0, 2.0, 0.2)
+    return W_stage, W_e

@@ -61,7 +61,9 @@ def build_ocp() -> AcadosOcp:
     # 如果留 0 会在动力学里被 1/m 除,直接除零崩掉;dJ(吊挂惯量增量)和 c_xy
     # (复合质心水平偏移)默认 0=空机。这里只是构建时的占位默认值,实际运行时
     # acados_nmpc_node 每次 solve 前都会用当前估计覆盖(见 solve_nmpc)。
-    ocp.parameter_values = np.concatenate([np.zeros(nx), [p.m], [0.0, 0.0, 0.0]])
+    # [xr(13)=0; m=标定值; dJ=0; c_xy=0,0; d_lumped(3)=0] = 20维(d 见 acados_model.py)
+    ocp.parameter_values = np.concatenate(
+        [np.zeros(nx), [p.m], [0.0, 0.0, 0.0], np.zeros(3)])
 
     # 输入边界:必须连 idxbu 一起设,漏了的话 acados 不报错,但约束形同虚设
     ocp.constraints.lbu = np.array([p.Tmin, -p.tau_max, -p.tau_max, -p.tau_psi])
@@ -79,8 +81,7 @@ def build_ocp() -> AcadosOcp:
     ocp.solver_options.hessian_approx = 'GAUSS_NEWTON'
     ocp.solver_options.qp_solver_cond_N = p.N
     # 换回完整 SQP(RTI 不报错但会悄悄发散,见 acados_nmpc_node 实测记录)。
-    # dt=0.05/N=20(预测时域仍 1.0s)保留,用来单独验证"减小 dt"这个改动
-    # 本身对 SQP 版本是否有帮助,不跟 RTI 混在一起判断。
+    # 使用完整 SQP；当前 dt=0.05/N=20，预测时域仍为 1.0s。
     ocp.solver_options.nlp_solver_type = 'SQP'
     # 默认 globalization='FIXED_STEP'(每次都走满步长,没有线搜索)在四元数这种
     # 非线性代价项上实测会卡进一个两点来回振荡的死循环(alpha 一直是 1.0,

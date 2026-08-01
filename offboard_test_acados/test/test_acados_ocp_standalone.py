@@ -24,14 +24,14 @@ from offboard_test_acados.acados_solver_builder import (  # noqa: E402
 HOVER_X = np.array([0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
 
-def _set_reference(solver, xr, m=None, dJ=0.0, c=(0.0, 0.0)):
-    """model.p 现在是 [xr(13); m(1); dJ(1); c_xy(2)] 17维(质量/吊挂惯量增量/
-    复合质心偏移都是运行时参数,见 acados_model.py),m 默认用标定常数 p.m、
-    dJ/c 默认空机 0,跟改动前的行为一致——既有测试本来就是在验证"空机标定
-    质量下"的求解器行为,不是在测自适应参数。"""
+def _set_reference(solver, xr, m=None, dJ=0.0, c=(0.0, 0.0), d=(0.0, 0.0, 0.0)):
+    """model.p 现在是 [xr(13); m(1); dJ(1); c_xy(2); d_lumped(3)] 20维(质量/
+    吊挂惯量增量/复合质心偏移/平动lumped扰动都是运行时参数,见 acados_model.py),
+    m 默认用标定常数 p.m、dJ/c/d 默认空机无扰 0,跟改动前的行为一致——既有测试
+    本来就是在验证"空机标定质量下"的求解器行为,不是在测自适应参数。"""
     if m is None:
         m = p.m
-    param = np.concatenate([xr, [m], [dJ], c])
+    param = np.concatenate([xr, [m], [dJ], c, d])
     for i in range(p.N + 1):
         solver.set(i, 'p', param)
 
@@ -168,6 +168,39 @@ def test_hover_thrust_increases_with_mass_parameter():
         f'没真正进到动力学里(或者反过来,涨太多/太少都不对)')
 
 
+def test_hover_thrust_compensates_lumped_disturbance():
+    """C.1 L1 增广的核心前提(2026-07-23,d_lumped 进 model.p 第 18-20 维):
+    向下的 lumped 比力 d_z<0(等效"载荷变重但 NMPC 不知道质量变了"——流派 B
+    设定)应让悬停推力涨 ≈ m·|d_z|。u_hover 基准已带 d_z(T_hover=m(g−d_z),
+    见 acados_model.py),所以这里跟质量测试不同,不存在"旧基准拉扯"的折中,
+    可以断言得更紧。顺带验证 d=0 时行为与 17 维版逐位一致(T=u_hover[0])。"""
+    solver = ensure_acados_ocp_solver()
+
+    def hover_thrust_for_d(dz):
+        _seed_initial_guess(solver, HOVER_X)
+        solver.set(0, 'lbx', HOVER_X)
+        solver.set(0, 'ubx', HOVER_X)
+        _set_reference(solver, HOVER_X, d=(0.0, 0.0, dz))
+        last_u = None
+        for _ in range(20):
+            status = solver.solve()
+            assert status == 0, f'solver failed with status {status}'
+            last_u = solver.get(0, 'u')
+        return last_u[0]
+
+    dz = -1.4      # ≈0.3kg 载荷在 2.064kg 机体上的比力缺口量级
+    T_clean = hover_thrust_for_d(0.0)
+    T_dist = hover_thrust_for_d(dz)
+    assert np.isclose(T_clean, p.u_hover[0], atol=1e-2), (
+        f'd=0 时悬停推力应回退到 u_hover[0]={p.u_hover[0]:.3f}N(与 17 维版'
+        f'行为一致), got {T_clean:.3f}N')
+    expected_delta = p.m * (-dz)
+    actual_delta = T_dist - T_clean
+    assert 0.8 * expected_delta < actual_delta < 1.2 * expected_delta, (
+        f'd_z={dz} 应使悬停推力涨约 m·|d_z|={expected_delta:.3f}N,'
+        f'实涨 {actual_delta:.3f}N')
+
+
 def test_hover_torque_matches_com_offset():
     """质心偏移建模的核心验证:复合质心水平偏移 c=[cx,cy] 时,机体水平定点
     悬停的平衡输入应该是 [m*g, +cy*m*g, -cx*m*g, 0]——推力沿机体 z 轴不过
@@ -215,6 +248,8 @@ if __name__ == '__main__':
     print('[PASS] test_quaternion_norm_drift_within_tolerance')
     test_hover_thrust_increases_with_mass_parameter()
     print('[PASS] test_hover_thrust_increases_with_mass_parameter')
+    test_hover_thrust_compensates_lumped_disturbance()
+    print('[PASS] test_hover_thrust_compensates_lumped_disturbance')
     test_hover_torque_matches_com_offset()
     print('[PASS] test_hover_torque_matches_com_offset')
     test_solver_cache_hit_is_fast()

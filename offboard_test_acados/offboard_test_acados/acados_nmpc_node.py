@@ -4,6 +4,7 @@
 # 内部换成调 acados 求解器,其它行为(包括坐标系、限幅、推力归一化、body_rate
 # 斜坡)都保持不变,方便跟 CasADi/IPOPT 版本直接对比。
 
+import functools
 import math
 import subprocess
 import time
@@ -31,6 +32,7 @@ from offboard_test.nmpc_node import (
     quat_to_rotmat,
 )
 from .figure8_reference import (
+    auto_ramp_time,
     build_reference_figure8,
     build_reference_window_figure8,
 )
@@ -39,8 +41,9 @@ from .straight_reference import (
     build_reference_window_straight,
 )
 
-from .acados_params import p
+from .acados_params import YAW_RATE_K, p, scaled_stage_terminal_W
 from .acados_solver_builder import ensure_acados_ocp_solver
+from .l1_adaptive import L1Augmentation
 from .mhe_params import p as mhe_p
 
 
@@ -96,9 +99,40 @@ class AcadosNMPCNode(Node):
         # straight_reference.py),用来直观验证机头朝向是否跟随飞行方向——比
         # 圆形/8字更容易在 RViz 里一眼看出对不对。
         self.trajectory_shape = 'figure8'
+
+        # ---- figure8 轨迹尺度(高机动消融,2026-07-29)----
+        # 原来 r/w 是 figure8_reference 里写死的默认值(r=1.0/w=0.3),整条裸机
+        # 路径没有任何旋钮能调,提难度必须改源码。这里接成 ROS 参数,默认值跟
+        # 原来完全一致,所以不传参时历史批次逐字节复现。
+        #   包络 = 2r × r,峰值速度 v_peak = √2·r·w,峰值水平加速度 = v_peak²/r。
+        #   例:r=5.0/w=0.707 → 10m×5m 包络、5 m/s 峰值、5 m/s² (27° 倾角)。
+        # fig8_ramp: 0=沿用写死的 4.0(默认,不变);<0=按 auto_ramp_time(w) 自适应
+        # (高机动必须用,否则振幅渐增本身的额外速度会造成起步冲击);>0=显式指定。
+        self.declare_parameter('fig8_r', 1.0)
+        self.declare_parameter('fig8_w', 0.3)
+        self.declare_parameter('fig8_ramp', 0.0)
+        # 轨迹尺度联动 Bryson 权重(默认关,开了才动 Q/P)。L_vel/L_omega 在
+        # acados_params 里是按 r=1.0/w=0.3 写死的,高机动下跟实际信号量级差一个
+        # 数量级。开启后按最终生效的 (r,w) 重算并 cost_set 进求解器。见
+        # scaled_stage_terminal_W 的推导;它对低速工况取 max() 后返回原值,
+        # 所以即使误开也不会改变低速批次的结果。
+        self.declare_parameter('traj_scale_weights', False)
+        self.fig8_r = float(self.get_parameter('fig8_r').value)
+        self.fig8_w = float(self.get_parameter('fig8_w').value)
+        _fr = float(self.get_parameter('fig8_ramp').value)
+        self.fig8_ramp = (auto_ramp_time(self.fig8_w) if _fr < 0.0
+                          else (4.0 if _fr == 0.0 else _fr))
+
         if self.trajectory_shape == 'figure8':
-            self.ref_fn = build_reference_figure8
-            self.ref_window_fn = build_reference_window_figure8
+            # partial 绑住尺度参数,这样下游所有 ref_fn(t,...)/ref_window_fn(
+            # t,N,dt,...) 调用点一处都不用改,也不会漏掉某个调用点用回默认 r/w
+            # ——_build_ref_path_msg 那条注释记的就是这类"两处参数没对齐"的 bug。
+            self.ref_fn = functools.partial(
+                build_reference_figure8, r=self.fig8_r, w=self.fig8_w,
+                ramp_time=self.fig8_ramp)
+            self.ref_window_fn = functools.partial(
+                build_reference_window_figure8, r=self.fig8_r, w=self.fig8_w,
+                ramp_time=self.fig8_ramp)
         elif self.trajectory_shape == 'straight':
             self.ref_fn = build_reference_straight
             self.ref_window_fn = build_reference_window_straight
@@ -116,10 +150,9 @@ class AcadosNMPCNode(Node):
         self.last_u_opt = p.u_hover.copy()
         self.last_omega_cmd = np.zeros(3)
 
-        # --- 解耦发布(路 A):10Hz 求解出整条预测轨迹,由一个更高频的定时器
-        # 沿轨迹插值前推发 body_rate + thrust,把发布频率从 10Hz 提到 publish_hz,
-        # 而求解负担不变(solve 仅 1~4ms,10Hz 只用了几个百分点的算力预算)。
-        # 目的:消掉纯 10Hz 发布给闭环凭空加的 ~100ms 相位滞后,并让 attach/lift
+        # --- 解耦发布(路 A):NMPC 以 1/dt Hz 求解整条预测轨迹,由一个更高频的
+        # 定时器沿轨迹插值前推发 body_rate + thrust 到 publish_hz。
+        # 目的:减小低频零阶保持带来的相位滞后,并让 attach/lift
         # /drop 这类快暂态的指令在两次求解之间平滑演进而不是阶梯保持。
         # _traj_omega: (3, N+1) 未 ramp 的角速度轨迹(网格 t=0,dt,..,N·dt);
         # _traj_thrust: (N,) 推力轨迹(网格 t=0,..,(N-1)·dt);None=退化零阶保持。
@@ -160,6 +193,11 @@ class AcadosNMPCNode(Node):
         # 复合质心水平偏移 c=[cx,cy](model.p 第 16-17 维,见 acados_model.py
         # c_sym 注释)。同样只在 gripper attach 后由 _grip_mass_step 赋值。
         self.c_est = np.zeros(2)
+        # 平动 lumped 扰动比力 d(model.p 第 18-20 维,C.1 L1 增广,见
+        # acados_model.py d_sym 注释)。truth/online 模式恒零(行为与 17 维版
+        # 逐位一致);L1 模式(control_mode='l1',下一步接线)由 L1Augmentation
+        # 在线赋值。
+        self.d_lumped = np.zeros(3)
         # attach 瞬间的真实几何偏移(box-机体,proximity 节点发布),None=还没
         # 收到。有它就用真实力臂/偏心算 dJ 和 c_est,没有才退回 grip_arm_d 参数。
         self.attach_offset = None
@@ -179,6 +217,49 @@ class AcadosNMPCNode(Node):
         self.c_xy_online = np.zeros(2)     # 最新在线 c_xy 估计(订阅)
         self.geom_online_active = False    # attach 后 online 几何是否已接管
 
+        # ---- C.1 控制模式开关(2026-07-23,实施计划_C1 §8 D3 拍板:独立参数,
+        # 不复用 geom_source——geom_source 管"几何从哪来",control_mode 管
+        # "估质量(流派A) vs 补 lumped 扰动(流派B)"两条路线)----
+        # 'mhe'(默认):现有行为,m_est/dJ/c_est 喂模型,d_lumped 恒零。
+        # 'l1'  :L1-NMPC baseline——m_est 固定标称 p.m(mhe_mass_cb 旁路),
+        #         dJ/c_est 恒零,d_lumped 由 L1Augmentation 在 odom_cb 高频
+        #         更新;**不做 (J+dJ)/J 内环增益缩放**(对照设计:L1 只在外环
+        #         补力、不动内环,见实施计划 §4)。
+        # 三处门控已接线(2026-07-23,同日):①_grip_mass_step attach 旁路
+        # (不做 m_est 阶跃/几何/增益);②_grip_drop_phase 里 l1.reset()(掉包
+        # 残留 d̂ 会拽偏推力,同 rate 增益复位教训);③attach_offset_cb 的
+        # _scale_px4_rate_gains 门控。
+        self.declare_parameter('control_mode', 'mhe')
+        self.control_mode = str(self.get_parameter('control_mode').value).lower()
+        if self.control_mode not in ('mhe', 'l1'):
+            self.control_mode = 'mhe'
+        self.declare_parameter('l1_a_gain', 10.0)    # 预测器带宽(估计极点-a/2)
+        self.declare_parameter('l1_omega_c', 0.5)    # 补偿低通截止(Phase1 实测:0.5 稳、1.0/2.0 与外环带宽耦合致 z 振荡炸机,07-23 扫参定)
+        self.l1 = L1Augmentation(
+            a_gain=float(self.get_parameter('l1_a_gain').value),
+            omega_c=float(self.get_parameter('l1_omega_c').value))
+        self._l1_last_stamp = None      # odom 时间戳(算实际 dt,防墙钟/仿真钟混用)
+        self._l1_log_count = 0
+        # a_nom 的推力项用**电机转速反算的实际推力**,绝不用 last_u_opt(NMPC
+        # 指令)——首版实测(2026-07-23,grip_nmpc_162421)用指令推力在 lift 段
+        # 自激炸机:T 快变时 10Hz 零阶保持的指令与实际差一大截 → a_nom 错 →
+        # 垃圾进 d̂ → d̂ 喂回模型 → 推力更错 → bang-bang(40.5↔0.5N)。这正是
+        # 07-13 拍板"观测量用电机转速反算、不用 NMPC 指令"要避开的"估计↔模型"
+        # 自举,在 L1 上重演了一次。口径与 mhe_node 完全同源:
+        # T_phys = MOTOR_CONSTANT·Σω²(k 两侧抵消性质同样成立)。
+        if self.control_mode == 'l1':
+            from actuator_msgs.msg import Actuators
+            self._l1_T_phys = None      # None=还没收到转速,L1 不推进(起飞前安全)
+            self.declare_parameter('motor_speed_topic',
+                                   '/x500_0/command/motor_speed')
+            self.create_subscription(
+                Actuators, self.get_parameter('motor_speed_topic').value,
+                self._l1_motor_cb, 10)
+        if self.control_mode == 'l1':
+            self.get_logger().info(
+                f'CONTROL MODE: l1 (a={self.l1.a:.1f}, omega_c={self.l1.omega_c:.1f}'
+                f') — m_est 固定 {p.m}kg,几何/增益缩放停用,平动扰动走 d_lumped')
+
         # "投放包裹"场景,第三版实现(前两版分别撞上了"独立 dynamic 刚体致命
         # 飞不起来"和"DetachableJoint 在同模型内 self-reference 不生效"两个
         # 坑,具体见 model.sdf 注释):质量真正的切换由 x500_payload 模型上的
@@ -192,7 +273,15 @@ class AcadosNMPCNode(Node):
         # 加法,对 MHE 在线收敛能力的验证价值是等价的,阶跃方向不影响测试
         # 目的。设 payload_enabled=False 即可完全跳过 drop,退回"全程满载"
         # 的普通飞行(质量本身仍由插件管理,不会变成空机)。
-        self.payload_enabled = True
+        #
+        # 2026-07-29 接成 ROS 参数(默认 True,历史行为不变):纯速度阶梯诊断需要
+        # 关掉 drop。理由是 drop 会同时改三件事——有效质量阶跃、撞 MHE 质量下界、
+        # 引入一个与速度无关的大扰动,把"速度效应"彻底混掉。关掉后 MassChanger
+        # 不施加任何 wrench(drop 前本就没有),全程真实质量恒为裸机 2.0643kg,
+        # m_est 不会碰下界,e vs v 的关系才测得干净。
+        self.declare_parameter('payload_enabled', True)
+        self.payload_enabled = bool(
+            self.get_parameter('payload_enabled').value)
         self.drop_after_track_sec = 30.0
         self.drop_settle_sec = 2.0
         self.drop_triggered = False
@@ -223,6 +312,23 @@ class AcadosNMPCNode(Node):
         self.declare_parameter('grip_dynamic_after_lift', False)
         self.declare_parameter('grip_dyn_r', 0.8)          # figure8 半径(载荷,收小)
         self.declare_parameter('grip_dyn_w', 0.25)         # figure8 角速率(收慢)
+        # 带载 figure8 的 ramp_time,语义同 fig8_ramp:0=写死的 4.0(默认,历史
+        # 批次不变);<0=auto_ramp_time(grip_dyn_w) 自适应;>0=显式指定。
+        self.declare_parameter('grip_dyn_ramp', 0.0)
+        # 立体 8 字的高度起伏 dz[m](2026-07-30):z=grip_z_high+dz·sin(a),与 x
+        # 同相,所以右叶(x>0)整体抬高 dz、左叶压低 dz,两叶在原点交叉处等高——
+        # 裸机 fig8 一直是 dz=0.5 的立体 8 字,带载这条却写死 dz=0.0(平面),
+        # 现在参数化。**默认仍是 0.0**,阶段 B 的历史批次逐字节复现。
+        # 两处耦合,改 dz 前先过一遍:
+        #  ① 最低点 = grip_z_high - dz,box 还挂在下方 grip_arm_d(默认 0.47m)
+        #     处,要留离地余量:dz <= grip_z_high - grip_arm_d - 0.3 才稳妥。
+        #  ② grip_drop_at_fig8_tip 丢在 a=3π/2,那里 sin=-1 = **轨迹最低点**,
+        #     所以 dz 越大 drop 高度越低(落地冲击越小),不是等高丢。
+        # 对 MHE 事件触发器的影响可忽略:z 起伏的推力扰动 ΔT=m·dz·w²,再经
+        # 残差基线 EMA(τ=3s)高通打折,r=5/w=0.283/dz=0.8 只有 0.10N,相对
+        # confirm_thresh(θ* 档 ≈2.9N)是 3%——远够不着误触发带。真正会撞阈值的
+        # 是"小半径追高速"(ΔT=m·dz·v²/2r²),本场景 r=5.0 不在那个区。
+        self.declare_parameter('grip_dyn_dz', 0.0)
         self.declare_parameter('grip_dyn_settle_sec', 3.0)  # lift 完成后多久切动态
         # drop 落点(动态模式):true=drop 精确落在 figure8 最左端(x=r·sin(a) 最小,
         # a=3π/2),grip_drop_after_sec 退化为"最早哪一圈可 drop"的最小门;
@@ -302,6 +408,10 @@ class AcadosNMPCNode(Node):
                 self.get_parameter('grip_dynamic_after_lift').value)
             self.grip_dyn_r = float(self.get_parameter('grip_dyn_r').value)
             self.grip_dyn_w = float(self.get_parameter('grip_dyn_w').value)
+            _gr = float(self.get_parameter('grip_dyn_ramp').value)
+            self.grip_dyn_ramp = (auto_ramp_time(self.grip_dyn_w) if _gr < 0.0
+                                  else (4.0 if _gr == 0.0 else _gr))
+            self.grip_dyn_dz = float(self.get_parameter('grip_dyn_dz').value)
             self.grip_dyn_settle_sec = float(
                 self.get_parameter('grip_dyn_settle_sec').value)
             self.grip_drop_at_fig8_tip = bool(
@@ -375,6 +485,23 @@ class AcadosNMPCNode(Node):
                 f'GRIPPER MODE: hover over box ({self.grip_x},{self.grip_y}) '
                 f'z {self.grip_z_low}->{self.grip_z_high}m, lift after '
                 f'{self.grip_lift_after_sec}s, empty m_est={self.m_est:.2f}kg')
+
+        # ---- 轨迹尺度联动权重(必须放在 gripper 分支之后)----
+        # 实际要飞的 8 字是哪一组 (r,w) 取决于模式:gripper 动态用 grip_dyn_*,
+        # 裸机用 fig8_*。两个分支的参数都读完了才能选对,所以放这里而不是上面
+        # 声明处。整条 horizon(0..N-1 用 stage W,N 用终端 W_e)一次性设完,
+        # 之后不再改——与 MHE 侧 mhe_event_weights 的逐帧 cost_set 不是一回事。
+        if bool(self.get_parameter('traj_scale_weights').value):
+            _tr = self.grip_dyn_r if self.gripper_mode else self.fig8_r
+            _tw = self.grip_dyn_w if self.gripper_mode else self.fig8_w
+            W_stage, W_e = scaled_stage_terminal_W(_tr, _tw)
+            for _i in range(p.N):
+                self.solver.cost_set(_i, 'W', W_stage)
+            self.solver.cost_set(p.N, 'W', W_e)
+            self.get_logger().info(
+                f'TRAJ-SCALED WEIGHTS: (r={_tr}, w={_tw}) -> '
+                f'L_vel={max(p.L_vel, _tr*_tw):.3f} '
+                f'L_omega={max(p.L_omega, YAW_RATE_K*_tw):.3f}')
 
         xref0 = self.ref_fn(0.0)
         # 预热求解器:acados 第一次 solve 之外,SQP 在远离收敛点时可能需要几次
@@ -453,7 +580,12 @@ class AcadosNMPCNode(Node):
         self.mass_event_pub = self.create_publisher(
             Empty, '/acados_nmpc/mass_event', 10)
 
-        self.ref_path_msg = self._build_ref_path_msg()
+        # 传 fig8 尺度:period=2π/w 决定采样跨度、ramp_time 决定采样起点,两者
+        # 不传就会用方法签名里的 w=0.3/ramp=4.0,fig8_w 一改 RViz 参考线就画不满
+        # (或多画)一圈——正是方法注释里记的那类"两处参数没对齐"。gripper 模式
+        # 下此刻 ref_fn 还是固定悬停点(退化线),传了也无副作用。
+        self.ref_path_msg = self._build_ref_path_msg(
+            r=self.fig8_r, w=self.fig8_w, ramp_time=self.fig8_ramp)
         self.actual_path_msg = Path()
         self.actual_path_msg.header.frame_id = 'map'
         self.nmpc_traj_msg = Path()
@@ -470,8 +602,8 @@ class AcadosNMPCNode(Node):
         self.timer = self.create_timer(p.dt, self.timer_cb)
 
         # 解耦发布定时器(路 A)。decouple_publish=False 时完全退回旧行为
-        # (timer_cb 里以 10Hz 直接发 body_rate),便于 A/B 对照。publish_hz<=1/dt
-        # 时提频无意义但也不会出错(τ 恒接近 0,退化成 10Hz 直发)。
+        # (timer_cb 里以 1/dt Hz 直接发 body_rate),便于 A/B 对照。
+        # publish_hz<=1/dt 时提频无意义但也不会出错(τ 恒接近 0,退化成直接发布)。
         self.declare_parameter('decouple_publish', True)
         self.declare_parameter('publish_hz', 50.0)
         self.decouple_publish = bool(self.get_parameter('decouple_publish').value)
@@ -509,7 +641,55 @@ class AcadosNMPCNode(Node):
         if not np.all(np.isfinite(x)):
             return
         self.x_cur = x
+        if self.control_mode == 'l1':
+            self._l1_update(msg, R_wb, vel_world)
         self._append_actual_path(msg)
+
+    def _l1_motor_cb(self, msg):
+        # 口径与 mhe_node.motor_speed_cb 同源:T_phys = k_f·Σω²(4 电机)。
+        if len(msg.velocity) >= 4:
+            w = np.asarray(msg.velocity[:4], dtype=float)
+            if np.all(np.isfinite(w)):
+                self._l1_T_phys = float(8.54858e-06 * np.sum(w * w))
+
+    def _l1_update(self, odom_msg, R_wb, vel_world):
+        """L1 增广的高频更新(odom 频率,比 NMPC 求解频率快——估计要快、补偿被
+        omega_c 低通,时间尺度分离)。a_nom 按 acados_model 的 vel_dot 用**标称
+        质量 p.m、d=0** 算(流派 B 设定:控制器全程不知道真实质量);推力用
+        电机转速反算的 T_phys(实测量,见 __init__ 里 _l1_T_phys 注释——用
+        NMPC 指令推力会自举炸机,首版实测教训)。dt 用 odom 消息时间戳差
+        (仿真里是 sim time,墙钟会错拍)。"""
+        if self._l1_T_phys is None:     # 还没收到转速:不推进(起飞前/话题未通)
+            return
+        # 地面门控(2026-07-23 第二轮实测教训,grip_nmpc_163705):飞机在地面时
+        # T_phys≈0 但 v̇=0(地面支持力),L1 会把支持力"如实"估成 d_z=+g——数学
+        # 上对、控制上致命(NMPC 带着"有向上的力"起飞→推力全错)。与 MHE 无信号
+        # 版的预热门控是同款问题(nosignal-ablation 起飞暂态假触发)。低推力
+        # (=地面/怠速/坠地)时清零并挂起,离地重新从零估计(收敛只要几秒)。
+        if self._l1_T_phys < 0.4 * p.m * p.g:
+            if np.any(self.d_lumped != 0.0):
+                self.get_logger().info('[l1] low-thrust gate: reset (on ground)')
+            self.l1.reset()
+            self.d_lumped = np.zeros(3)
+            self._l1_last_stamp = None
+            return
+        t = odom_msg.header.stamp.sec + odom_msg.header.stamp.nanosec * 1e-9
+        if self._l1_last_stamp is None:
+            self._l1_last_stamp = t
+            return
+        dt = t - self._l1_last_stamp
+        self._l1_last_stamp = t
+        if not (0.0 < dt < 0.5):        # 时基跳变/暂停帧:跳过不推进
+            return
+        a_nom = (R_wb @ np.array([0.0, 0.0, self._l1_T_phys])
+                 - p.kd * vel_world) / p.m - np.array([0.0, 0.0, p.g])
+        self.d_lumped = self.l1.update(vel_world, a_nom, dt)
+        self._l1_log_count += 1
+        if self._l1_log_count % 100 == 0:   # ~每几秒一行,格式仿 [c_xy_est]
+            d = self.d_lumped
+            self.get_logger().info(
+                f'[l1] d_hat_f=[{d[0]:+.3f},{d[1]:+.3f},{d[2]:+.3f}]m/s^2 '
+                f'|equiv_dm={-d[2] * p.m / p.g:+.3f}kg')
 
     def attach_offset_cb(self, msg):
         data = np.asarray(msg.data, dtype=float)
@@ -523,8 +703,10 @@ class AcadosNMPCNode(Node):
             # 阶段的姿态保持同样受益,也避免接管瞬间"模型阶跃+增益阶跃"叠加。
             # online 模式不用 attach 真值算增益(消依赖),改由 _update_online_geometry
             # 在 dJ_online 起来后触发(见该方法);attach_offset 仅留作评估对表。
+            # control_mode='l1' 同样不缩增益(流派 B 对照:不动内环,见 §4)。
             if (self.gripper_mode and self.grip_payload_mass > 0.0
-                    and self.geom_source == 'truth'):
+                    and self.geom_source == 'truth'
+                    and self.control_mode != 'l1'):
                 dJ, _ = self._payload_geometry(data)
                 self._scale_px4_rate_gains(dJ)
 
@@ -534,33 +716,34 @@ class AcadosNMPCNode(Node):
             self.c_xy_online = d
 
     def _update_online_geometry(self):
-        """B.3 Phase2:online 模式下用 m_est + 在线 c_xy + rz 几何先验(grip_arm_d)
-        推 dJ/c_est 喂 model.p,替代 attach 真值。c_est 直接 = 在线 c_xy;dJ 由平行轴
-        (μ=m_b·m_p/m_t,rz=grip_arm_d 先验,水平分量由 c_xy 反推 r_h=c·m_t/m_p)。
-        rz 主导 dJ,故 dJ 基本等于真值版(先验臂长≈实测)。rate 增益在 dJ_online
-        起来后触发一次(自动对齐到 m_est 收敛,不用 attach 真值)。每次 solve 前调。"""
+        """B.3 Phase2:online 模式下 c_est 吃 mhe_node 发的在线 c_xy(τ_phys 反算,
+        与 m_est 无关);**dJ 不在这里更新**——它在 attach 瞬间由操作先验
+        (grip_payload_prior + grip_arm_d)一次算定,之后保持不变。每次 solve 前调。
+
+        2026-07-28 改:原实现每帧用 m_p=m_est-p.m 重推 dJ,等于把 07-19 在 MHE 侧
+        切断的 m_est→dJ 链在 NMPC 侧接了回来。两个方向都不安全:m_est 高估时 dJ
+        无界跟涨(实测见过 m_est=3.734 → dJ=0.204,真值 0.058 的 3.5 倍),而这一侧
+        没有 MHE 的棘轮/地板/m_min 保护;m_est 低于空机时旧的 `m_p<=1e-3` 门又把
+        几何整个冻住(LIFT 段常态)。代价只有 dJ 的水平项 ½(rx²+ry²)——占 dJ 2.2%
+        (rz² 主导 97.8%),而 dJ 只需量级对(几何解耦实验:先验错 33% 时 m_est 仍准
+        0.3%)。按可辨识性分配:c_xy 有独立观测(τ_phys)→在线估;rz 在力矩通道上
+        不可辨识(叉乘消掉)→弱先验;两者都不吃 m_est。
+
+        rate 增益已在 attach 瞬间用先验缩放过(见 _grip_mass_step online 分支),
+        这里只精修 model.p 的 c_est,不再动内环增益(避免随估计抖动反复改)。"""
         if self.grip_dropped:
             # box 已释放(drop),载荷没了:几何归零(不再随残噪更新)
             self.dJ_est = 0.0
             self.c_est = np.zeros(2)
             return
-        m_p = self.m_est - p.m
-        if m_p <= 1e-3:
-            return  # 载荷还没被 MHE 认出来(m_est 未收敛),不改几何
-        m_t = self.m_est
-        mu = p.m * m_p / m_t
-        c = self.c_xy_online
-        r_h = c * (m_t / m_p)  # 复合质心偏移反推载荷水平偏移
-        self.dJ_est = float(mu * (self.grip_arm_d ** 2
-                                  + 0.5 * (r_h[0] ** 2 + r_h[1] ** 2)))
-        self.c_est = c.copy()
-        # rate 增益已在 attach 瞬间用先验缩放过(见 _grip_mass_step online 分支),
-        # 这里只精修 model.p 的 dJ/c_est,不再动内环增益(避免随估计抖动反复改)。
+        self.c_est = self.c_xy_online.copy()
 
     def mhe_mass_cb(self, msg):
         # use_mhe=False 时:MHE 只当诊断,不把估计喂回 NMPC(m_est 保持固定)。
         # 用来隔离验证控制器本身能否扛住载荷,与 MHE 估计质量解耦。
-        if not self.use_mhe:
+        # control_mode='l1' 时同样旁路:流派 B 全程不消费质量估计(m_est 固定
+        # 标称),变载荷全靠 d_lumped 补——这是 C.1 对照的定义本身。
+        if not self.use_mhe or self.control_mode == 'l1':
             return
         m = float(msg.data)
         if math.isfinite(m):
@@ -572,11 +755,13 @@ class AcadosNMPCNode(Node):
         # 从 hover_time+ramp_time 之后开始采样(振幅已经渐变完、alpha=1 的稳态
         # 轨迹),否则采样区间会覆盖 ramp-in 过程,画出的参考线会带渐变螺旋的
         # 痕迹,不是完整对称的形状——纯可视化 bug,不影响 NMPC 实际跟踪的参考。
-        # 不传 r/w/dz,让 ref_fn 用各自的默认值(circle=半径1.0平面,
-        # figure8=半径1.0+0.5立体,straight=±2.0往返),这样可视化跟 solve_nmpc
+        # 形状本身始终由 ref_fn 决定(不在这里传 r/dz),这样可视化跟 solve_nmpc
         # 实际用的参考永远一致,不用在两处分别维护——之前 straight 用这个方法
         # 自己的 r=1.0 默认值会把可视化画成 ±1m,跟实际飞的 ±2.0m 不一致,就是
-        # 这类参数没对齐导致的。
+        # 这类参数没对齐导致的。(形参 r 因此是留着的,方法体并不使用。)
+        # 但 w 和 ramp_time 这里要用:w 定采样跨度 period=2π/w、ramp_time 定采样
+        # 起点,调用方必须传实际生效的那一组,否则 fig8_w/grip_dyn_w 一改就画不满
+        # 一圈。
         # t_offset:_grip_dyn_ref 内部按 t - self.grip_dyn_t0 算相位,t=0 是切
         # 到动态跟踪那一刻的 nmpc_time,不是节点启动时的 0——不传的话采样区间
         # 落在 grip_dyn_t0 之前,build_reference_figure8 会一直落在 t<hover_time
@@ -684,7 +869,8 @@ class AcadosNMPCNode(Node):
         self.solver.set(0, 'ubx', x_cur)
         for i in range(p.N + 1):
             self.solver.set(i, 'p', np.concatenate(
-                [Xref_win[:, i], [self.m_est], [self.dJ_est], self.c_est]))
+                [Xref_win[:, i], [self.m_est], [self.dJ_est], self.c_est,
+                 self.d_lumped]))
 
         # t_start_ros:轨迹 t=0 对应的采样时刻(ROS clock),给高频回调算 τ 用。
         # t_start:墙钟,仅用于测 solve 耗时(solve_time),两者别混。
@@ -769,8 +955,8 @@ class AcadosNMPCNode(Node):
             else:
                 # 连续失败第 2 次起:推力可以继续延用上一次的值(安全,不会让
                 # 飞机产生持续的姿态变化),但角速度必须归零——之前在这里也
-                # 延用上一次的 omega_cmd,结果连续失败 5~10 帧(@10Hz 只有
-                # 0.5~1 秒)时飞机会带着同一个非零角速度持续旋转、完全没有
+                # 延用上一次的 omega_cmd,结果连续失败约 0.5~1 秒时飞机会
+                # 带着同一个非零角速度持续旋转、完全没有
                 # 刹车,几秒内就倾覆自由下坠摔机。归零角速度只是"停止主动
                 # 旋转",不会像整体重置成悬停那样粗暴。
                 u_opt = self.last_u_opt.copy()
@@ -809,7 +995,7 @@ class AcadosNMPCNode(Node):
     def _publish_from_traj(self):
         """高频发布定时器(路 A):沿最近一次求解的预测轨迹插值前推,以 publish_hz
         发 body_rate + thrust。只在 NMPC 接管后生效——接管前的 position setpoint
-        仍由 10Hz 的 timer_cb 发。
+        仍由 1/dt Hz 的 timer_cb 发。
         单线程 executor 下本回调与 timer_cb 串行执行,读 _traj_* 无并发,无需加锁。"""
         if not self.nmpc_started or self.nmpc_start_time is None:
             return
@@ -847,7 +1033,7 @@ class AcadosNMPCNode(Node):
     def _trigger_payload_detach(self):
         # 发给 mass_changer 插件(gz_plugins/mass_changer/)的 /payload/drop_mass
         # topic——插件收到后会在物理引擎层面把 base_link 从 2.5kg 切回
-        # 2.0kg,只切一次。用 Popen 而不是 run/check_call:这是在 10Hz 定时器
+        # 2.0kg,只切一次。用 Popen 而不是 run/check_call:这是在 NMPC 定时器
         # 回调(timer_cb)里发起的调用,回调线程绝不能被一次子进程同步阻塞——
         # gz CLI 首次冷启动的 gz-transport discovery 实测可能要将近 1 秒,
         # 真要等它跑完,这一帧就直接卡成了"飞机瞬间失去所有姿态指令"。这次
@@ -906,7 +1092,8 @@ class AcadosNMPCNode(Node):
     def _grip_dyn_ref(self, t=0.0, **kw):
         xr = build_reference_figure8(
             t - self.grip_dyn_t0, r=self.grip_dyn_r, w=self.grip_dyn_w,
-            z_hover=self.grip_z_high, dz=0.0)
+            z_hover=self.grip_z_high, dz=self.grip_dyn_dz,
+            ramp_time=self.grip_dyn_ramp)
         xr[0] += self.grip_dyn_cx
         xr[1] += self.grip_dyn_cy
         return xr
@@ -914,7 +1101,8 @@ class AcadosNMPCNode(Node):
     def _grip_dyn_ref_window(self, t_start, N, dt, z_hover=None):
         xref = build_reference_window_figure8(
             t_start - self.grip_dyn_t0, N, dt, r=self.grip_dyn_r,
-            w=self.grip_dyn_w, z_hover=self.grip_z_high, dz=0.0)
+            w=self.grip_dyn_w, z_hover=self.grip_z_high, dz=self.grip_dyn_dz,
+            ramp_time=self.grip_dyn_ramp)
         xref[0, :] += self.grip_dyn_cx
         xref[1, :] += self.grip_dyn_cy
         return xref
@@ -943,7 +1131,8 @@ class AcadosNMPCNode(Node):
         # 显示旧的悬停参考,看不出真实在飞的 8 字(t_offset=grip_dyn_t0,见
         # _build_ref_path_msg 里的说明)。
         self.ref_path_msg = self._build_ref_path_msg(
-            w=self.grip_dyn_w, z_hover=self.grip_z_high, t_offset=self.grip_dyn_t0)
+            r=self.grip_dyn_r, w=self.grip_dyn_w, z_hover=self.grip_z_high,
+            ramp_time=self.grip_dyn_ramp, t_offset=self.grip_dyn_t0)
         self.get_logger().info(
             f't={nmpc_time:.1f}s | DYNAMIC: switch to figure8 (r={self.grip_dyn_r} '
             f'w={self.grip_dyn_w}) centered at [{self.grip_dyn_cx:.2f},'
@@ -977,6 +1166,27 @@ class AcadosNMPCNode(Node):
             return
         self.grip_mass_stepped = True
         self.attach_time = nmpc_time  # _lift_phase 从这个时刻起算,而非 NMPC 接管时刻
+        # C.1 L1 模式(流派 B):attach 不做模型侧前馈——不阶跃 m_est、不给
+        # dJ/c_est,平动变载荷全靠 L1 在 d_lumped 上在线补(对照定义,实施计划
+        # §4)。attach_time/grip_mass_stepped 照常置位:lift 时序与
+        # [attach-window] 日志是评估口径,与控制路线无关,两个流派必须一致。
+        # **D2(b) 拍板(2026-07-23,用户)**:允许用**档位操作先验**缩内环增益
+        # ——纯平动版实测 0.3kg/ecc0.10 姿态失稳(x/y d̂ 大幅乱跳=07-02 内环
+        # 带宽问题裸奔,grip_nmpc_163705);增益缩放用与主方法 online 模式同款
+        # 的 grip_payload_prior(非测量真值),不破坏"不知精确质量"设定,对照
+        # 更公平(否则是绑着 baseline 的手打,审稿必疑)。drop 复位走公共路径
+        # (_reset_px4_rate_gains 已在 _grip_drop_phase)。
+        if self.control_mode == 'l1':
+            mp0 = self.grip_payload_prior
+            mt0 = p.m + mp0
+            mu0 = p.m * mp0 / mt0 if mt0 > 0 else 0.0
+            dJ0 = float(mu0 * self.grip_arm_d ** 2)
+            self._scale_px4_rate_gains(dJ0)
+            self.get_logger().info(
+                f't={nmpc_time:.1f}s | ATTACH (control_mode=l1): rate gains from '
+                f'prior m_p={mp0:.2f}kg (dJ={dJ0:.4f}); no model-side feedforward,'
+                f' translational payload handled by L1 d_lumped only')
+            return
         m_p = self.grip_payload_mass
         m_t = p.m + m_p
         # 弱闭环(use_mhe=True)时 m 全程只来自 MHE,这里不许塞真值——哪怕
@@ -1174,20 +1384,30 @@ class AcadosNMPCNode(Node):
         if nmpc_time < t_drop:
             return
         # 动态模式 + drop_at_fig8_tip:t_drop 只作"最早可 drop"的门,真正 drop
-        # 精确落在 figure8 最左端(x=r·sin(a) 最小 → a=3π/2 mod 2π)。10Hz 下 a
-        # 每帧进 w·dt≈0.025rad,用 0.12rad 窗口稳稳抓到过尖点那一帧。
+        # 精确落在 figure8 最左端(x=r·sin(a) 最小 → a=3π/2 mod 2π)。
+        # 窗口宽度必须跟着 w 走:相位每帧进 w·dt,窗口窄于一帧就会整圈整圈地
+        # 漏过尖点、drop 永不触发。原来写死的 0.12rad 是按 w=0.25(每帧 0.025rad,
+        # ~5 帧余量)标的,w 一提到 0.7 每帧就进 0.07rad、只剩 1 帧余量,再快直接
+        # 漏。取 3 帧宽度保底(3·w·dt),低速时 0.12 仍占优、行为不变。
         if self.grip_drop_at_fig8_tip and self.grip_dynamic_active:
             tc = nmpc_time - self.grip_dyn_t0 - 2.0  # 2.0 = figure8 hover_time
             if tc <= 0.0:
                 return
             a_mod = (self.grip_dyn_w * tc) % (2.0 * np.pi)
-            if not (1.5 * np.pi <= a_mod < 1.5 * np.pi + 0.12):
+            tip_win = max(0.12, 3.0 * self.grip_dyn_w * p.dt)
+            if not (1.5 * np.pi <= a_mod < 1.5 * np.pi + tip_win):
                 return
         self.grip_drop_done = True
         self.grip_dropped = True
         self.enable_pub.publish(Bool(data=False))  # 拉低 → proximity 释放 box
         self.mass_event_pub.publish(Empty())       # 通知 mhe_node 质量突变
         self._reset_px4_rate_gains()               # 空机复位内环增益(否则过增益炸机)
+        if self.control_mode == 'l1':
+            # 掉包后真实 lumped 扰动阶跃回零,残留 d̂_f 会把推力拽偏(等价于
+            # 带着幽灵载荷飞)——与 rate 增益复位同一类必需处理。复位后 L1 从
+            # 零重新估计(若有残余未建模效应会自行爬回)。
+            self.l1.reset()
+            self.d_lumped = np.zeros(3)
         self.get_logger().info(
             f't={nmpc_time:.1f}s | DROP: released gripper (enable=false), '
             'payload detached; geometry -> empty, rate gains reset')
@@ -1349,11 +1569,11 @@ class AcadosNMPCNode(Node):
             ramp = 10*s**3 - 15*s**4 + 6*s**5
             omega_cmd = omega_cmd * ramp
         # decouple 模式下 body_rate/thrust 由高频 _publish_from_traj 定时器发,这里
-        # 不再 10Hz 直发。
+        # 不再由 NMPC 定时器直接发布。
         if not self.decouple_publish:
             self.publish_attitude(u_opt, omega_cmd)
-        # u_opt 仍以 10Hz 发给 MHE(它按这个量级消费,无需高频);decouple 下高频
-        # 实际施加的推力是沿预测轨迹的插值值,稳态与此相等。
+        # u_opt 以 NMPC 求解频率发布；MHE 保持自己的 10Hz 定时器并消费最新值。
+        # decouple 下高频实际施加的推力是沿预测轨迹的插值值,稳态与此相等。
         # 2026-07-16/17 SITL A/B(attach+lift,0.3kg/ecc0.05,on n=8 vs off n=8)实测:
         # 稳态 rms 中位数 on 0.017m vs off 0.016m——**两者无差别,上面这句"稳态相等"
         # 是对的**。塌陷率 on 12%(1/8) vs off 38%(3/8) 方向上 on 略优,但 Fisher
@@ -1384,8 +1604,10 @@ class AcadosNMPCNode(Node):
         # 下的 nmpc_time 浮点秒,不是 ROS Time,不用转纳秒)。字段与 [drop-window]
         # 完全一致,parse_dropwindow_logs.py 用同一份正则解析两种 tag。窗口时长
         # 用 attach_window_sec 参数(默认 40s),不复用 [drop-window] 的 8.0s——
-        # gripper attach 瞬态更长。供 CEM 学习脚本(grip_cem_optimize.py)控制层
-        # 指标解析用。
+        # gripper attach 瞬态更长。供离线分析脚本(aggregate_b4_matrix.py /
+        # aggregate_alpha_only.py)的控制层指标解析用。
+        # (原文写"供 CEM 学习脚本 grip_cem_optimize.py 用",该脚本已于 2026-07-31
+        #  随 CEM 删除;这段 [attach-window] 日志本身仍是所有 A/B 分析的数据源。)
         if self.gripper_mode and self.attach_time is not None:
             _dt_ev = nmpc_time - self.attach_time
             if 0.0 <= _dt_ev < self.attach_window_sec:
@@ -1395,7 +1617,8 @@ class AcadosNMPCNode(Node):
                     f'm_est={self.m_est:.3f}')
 
         self.counter += 1
-        if self.counter % 50 == 0:
+        # 保持约每 5 秒一条摘要日志，不让频率变化悄悄改变日志密度。
+        if self.counter % max(1, round(5.0 / p.dt)) == 0:
             self.get_logger().info(
                 f't={nmpc_time:.1f}s | pos_err={pos_err:.3f}m | '
                 f'T={u_opt[0]:.2f}N | tau=[r{u_opt[1]:.3f} p{u_opt[2]:.3f} '

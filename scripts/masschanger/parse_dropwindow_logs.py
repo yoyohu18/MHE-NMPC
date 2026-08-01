@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""解析 nmpc 日志的 [drop-window]/[attach-window] 逐帧记录(10Hz),对齐物理
+"""解析 nmpc 日志的 [drop-window]/[attach-window] 逐帧记录,对齐物理
 生效时刻后对比控制层暂态:pos_err 峰值、z 偏移峰值、恢复时间。配 mhe 日志判据
 同源(T 偏离基线 >THRESH)。两种 tag 字段格式完全一致(wrench=drop,
 gripper=attach),同一份正则解析。用法: parse_dropwindow_logs.py 标签1=nmpc日志1 标签2=... """
@@ -25,6 +25,11 @@ def parse(path):
         raise RuntimeError(f'{path}: 没有 [drop-window] 记录')
     a = np.array(rows)
     t, pe, T, z, mest = a.T
+    # 新旧实验可能分别来自 20/10 Hz。用完整记录的平均相邻时间差推断 dt，
+    # 避免恢复时间仍写死补 0.1s；日志时间戳保留两位小数，足以区分两种频率。
+    dt = float((t[-1] - t[0]) / (len(t) - 1)) if len(t) > 1 else 0.0
+    if not np.isfinite(dt) or dt <= 0.0:
+        dt = 0.1
     base = np.mean(T[:3])
     dev = np.abs(T - base) > THRESH
     if not np.any(dev):
@@ -35,9 +40,9 @@ def parse(path):
     z_exc = float(np.max(np.abs(z[after] - z[0])))
     # 恢复时间:物理生效后最后一次 pos_err > RECOVER
     bad = after & (pe > RECOVER)
-    t_rec = float(t[bad][-1] + 0.1 - t_phys) if np.any(bad) else 0.0
+    t_rec = float(t[bad][-1] + dt - t_phys) if np.any(bad) else 0.0
     return dict(t=t - t_phys, pe=pe, z=z - z[0], mest=mest,
-                pe_peak=pe_peak, z_exc=z_exc, t_rec=t_rec)
+                pe_peak=pe_peak, z_exc=z_exc, t_rec=t_rec, dt=dt)
 
 
 if __name__ == '__main__':
@@ -63,7 +68,7 @@ if __name__ == '__main__':
         axes[1].set_ylabel('m_est [kg]'); axes[1].set_xlabel(
             't since physical mass change [s]')
         axes[1].legend(); axes[1].grid(True)
-        axes[0].set_title('SITL drop transient: control-level comparison (10Hz)')
+        axes[0].set_title('SITL drop transient: control-level comparison')
         out = ('/home/clear/ros2_ws_HJH/nmpc_test_results/'
                'mhe_dropwindow_control_compare.png')
         fig.savefig(out, dpi=120, bbox_inches='tight')

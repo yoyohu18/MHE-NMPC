@@ -6,7 +6,8 @@
 # 自己原来的 build_dynamics(),两边没有耦合。)
 #
 # model.p = [xr(13维,参考状态); m(1维,当前质量估计); dJ(1维,吊挂惯量增量);
-#            c_xy(2维,复合质心在机体系的水平偏移)] = 17维。时变参考用 model.p
+#            c_xy(2维,复合质心在机体系的水平偏移); d_lumped(3维,平动 lumped
+#            扰动比力,C.1 L1 增广用)] = 20维。时变参考用 model.p
 # 而不是 yref 来传,是因为代价里的四元数误差项对参考值是非线性的(四元数乘法),
 # 没法写成简单的 "y - yref" 形式,必须让参考值进 CasADi 表达式本身——质量/
 # 惯量/质心参数顺路放在同一个 model.p 向量里。
@@ -41,6 +42,13 @@ def build_acados_model():
     # 把这个力矩显式建进 om_dot,NMPC 才知道"带偏心载荷悬停本来就要一个常值
     # 力矩",而不是把它当成需要用姿态机动去消灭的异常。空机时 0。
     c_sym = cs.MX.sym('c_xy', 2)
+    # 平动 lumped 扰动比力 d [m/s²](C.1 L1-NMPC baseline,2026-07-23,实施计划
+    # §3/D1 拍板"进模型"):L1 增广在线估计的未建模平动效应(流派 B——变载荷
+    # 不显式估质量,当 lumped 扰动补偿;Hanover RA-L 2021 同款位置)。直接加在
+    # vel_dot 上(比力量纲,与质量假设解耦——换算成力要乘质量,而"质量是多少"
+    # 正是两个流派的分歧点,见 l1_adaptive.py 量纲约定)。主方法(truth/online
+    # 模式)恒零,行为与 17 维版逐位一致。
+    d_sym = cs.MX.sym('d_lumped', 3)
 
     vel = x_sym[3:6]
     q_  = x_sym[6:10]
@@ -59,7 +67,8 @@ def build_acados_model():
     # 跟 build_dynamics() 唯一的数学差异:用 model.p 里的 m_sym(变量)而不是
     # 常数 p.m——这一行就是闭环自适应的关键,质量估计变了,这里的加速度
     # 映射立刻跟着变,NMPC 下一次求解就会用新的质量重新规划推力。
-    vel_dot = (1.0/m_sym) * (cs.mtimes(R_q, cs.vertcat(0.0, 0.0, T_)) - p.kd * vel) - g_vec
+    vel_dot = (1.0/m_sym) * (cs.mtimes(R_q, cs.vertcat(0.0, 0.0, T_)) - p.kd * vel) \
+        - g_vec + d_sym
 
     Xi_q = cs.vertcat(
         cs.horzcat(-qx, -qy, -qz),
@@ -83,7 +92,7 @@ def build_acados_model():
     model.name = MODEL_NAME
     model.x = x_sym
     model.u = u_sym
-    model.p = cs.vertcat(xr_sym, m_sym, dJ_sym, c_sym)
+    model.p = cs.vertcat(xr_sym, m_sym, dJ_sym, c_sym, d_sym)
     model.f_expl_expr = xdot
 
     e_track = tracking_error_sym(x_sym, xr_sym)        # 12维: [ep;ev;eq_vec;eomega]
@@ -99,7 +108,12 @@ def build_acados_model():
     # 对复合质心的力矩不为零,必须由常值力矩 tau=[+cy*T, -cx*T, 0] 抵消(即
     # om_dot 里 tau_thrust_com 的相反数)。惩罚基准不带这一项的话,R 会持续把
     # 力矩往 0 拽,跟"u_hover 用过时质量基准把推力拽低"是同一类稳态偏差。
-    T_hover = m_sym * p.g
+    # d 进模型后悬停推力平衡变为 T/m − g + d_z = 0 → T_hover = m·(g − d_z)。
+    # 惩罚基准不带 d_z 的话,L1 模式下(如 attach 后 d_z<0)R 会持续把推力拽回
+    # 无扰动基准 m·g——跟上面"u_hover 用过时质量把推力拽低"是同一类稳态偏差,
+    # 这里在引入 d 的同时一并处理,不等实测踩坑。水平分量 d_x/d_y 由姿态倾斜
+    # 抵消,不进推力/力矩基准。truth/online 模式 d≡0,该式退化回 m·g 不变。
+    T_hover = m_sym * (p.g - d_sym[2])
     u_hover_dyn = cs.vertcat(
         T_hover, c_sym[1] * T_hover, -c_sym[0] * T_hover, 0.0)
     model.cost_y_expr = cs.vertcat(e_track, u_sym - u_hover_dyn)     # 16维

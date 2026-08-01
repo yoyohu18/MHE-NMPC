@@ -17,8 +17,9 @@ sys.path.insert(0, '/home/clear/ros2_ws_HJH/src/scripts/masschanger')
 import parse_dropwindow_logs as ctl  # noqa: E402
 
 D = '/home/clear/ros2_ws_HJH/nmpc_test_results/'
-MODE_ORDER = ['truth', 'online']
-MODE_LABEL = {'truth': '真值几何', 'online': '在线 c_xy 估计'}
+MODE_ORDER = ['truth', 'online', 'l1']
+MODE_LABEL = {'truth': '真值几何', 'online': '在线 c_xy 估计',
+              'l1': 'L1-NMPC(流派B对照)'}
 
 
 def fmt(vals, prec=3):

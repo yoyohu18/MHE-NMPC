@@ -11,6 +11,7 @@
 # 是质量估计的次要误差来源,不是主要的。
 
 import math
+import time
 
 import numpy as np
 import rclpy
@@ -25,6 +26,7 @@ from offboard_test.nmpc_node import quat_to_rotmat
 from .mhe_params import p as mhe_p
 from .mhe_solver_builder import ensure_mhe_ocp_solver
 from .mhe_weight_learning import M0_THETA, ParametricWeightSchedule
+from .residual_logger import ResidualLogger
 
 
 # Gazebo MulticopterMotorModel 推力系数(x500_base/model.sdf 里每个电机的
@@ -331,11 +333,50 @@ class MHENode(Node):
         self.c_xy_est_pub = self.create_publisher(
             Float64MultiArray, '/acados_nmpc/c_xy_est', 10)
 
+        # ---- 残差可辨识性诊断采集(2026-07-31,默认关) ----
+        # residual_log_dir 为空 = 完全关闭,回调里只多一次 `if not enabled: return`。
+        # 开启时四条异步原始流各写各的 CSV,**不在线拼表**(三个话题时钟域/频率
+        # 不同,在线拼行会把时间错位烙进数据,而那正是要诊断的东西)。
+        self.declare_parameter('residual_log_dir', '')
+        _rl_dir = str(self.get_parameter('residual_log_dir').value)
+        _stamp = time.strftime('%Y%m%d_%H%M%S')
+        self.resid_log = ResidualLogger(_rl_dir, _stamp, meta={
+            # 标定常数:tau_phys 的标签质量完全由这几个数决定
+            'MOTOR_CONSTANT': MOTOR_CONSTANT,
+            'THRUST_CAL_GAIN': THRUST_CAL_GAIN,
+            'ROTOR_X': list(ROTOR_X), 'ROTOR_Y': list(ROTOR_Y),
+            'TORQUE_SIGN': TORQUE_SIGN,
+            # 刚体常数:算 J·omega_dot + omega x J·omega 要用
+            'Jxx': mhe_p.Jxx, 'Jyy': mhe_p.Jyy, 'Jzz': mhe_p.Jzz,
+            'm_nominal': mhe_p.m_nominal, 'g': mhe_p.g,
+            'mhe_N': mhe_p.N, 'mhe_dt': mhe_p.dt,
+            # 真值条件(诊断分桶/留出全靠它)
+            'grip_true_payload_mass': self.grip_true_payload_mass,
+            'motor_speed_topic': motor_topic,
+            # 语义声明:后处理不能靠猜
+            'odom_frame': 'twist.linear/angular = body FLU (原始值,未转 world)',
+            'tau_phys_def': 'tau=TORQUE_SIGN*sum(ROTOR_{Y,-X}*k_f*w^2), 执行器输出力矩,不含 J*omega_dot',
+            'command_semantics': 'u_opt=NMPC理想输出[T,tx,ty,tz],非执行器输入(下游转 body-rate setpoint 给PX4)',
+            'command_has_header': 'False (Float64MultiArray 无时间戳,只有接收时刻)',
+            'clock_note': 'use_sim_time 未设;motor 经 ros_gz_bridge(Gazebo), odom 经 mavros(PX4) — 时钟域须用数据验证',
+        })
+        if self.resid_log.enabled:
+            # 仅诊断采集时才订阅 IMU(MHE 本身不用它),避免平时多一路无谓回调。
+            # 动机:odom 实测只有 ~31Hz,用它差分算 omega_dot 会被微分噪声主导;
+            # IMU 的 angular_velocity 频率高得多,是 omega_dot 的更好来源。
+            from sensor_msgs.msg import Imu
+            self.imu_sub = self.create_subscription(
+                Imu, '/mavros/imu/data',
+                lambda m: self.resid_log.log_imu(m), mavros_sensor_qos)
+            self.get_logger().info(f'[resid] 诊断采集已开启 -> {_rl_dir}'
+                                   ' (含 IMU 流)')
+
         self.timer = self.create_timer(mhe_p.dt, self.timer_cb)
         self.get_logger().info(
             'MHE node initialized! Waiting for odometry + control data...')
 
     def odom_cb(self, msg):
+        self.resid_log.log_odom(msg)   # 记原始 body 值,在任何变换之前
         # 跟 acados_nmpc_node.odom_cb 完全一样的 body(FLU)->world(ENU) 速度转换,
         # 两边必须用同一套约定,否则喂给 MHE 的"测量"跟它的动力学模型对不上。
         pos = msg.pose.pose.position
@@ -372,6 +413,8 @@ class MHENode(Node):
                 tau_roll = TORQUE_SIGN * float(np.sum(ROTOR_Y * f))
                 tau_pitch = TORQUE_SIGN * float(-np.sum(ROTOR_X * f))
                 self.tau_phys = np.array([tau_roll, tau_pitch, 0.0])
+                self.resid_log.log_motor(msg, w, self.tau_phys,
+                                         self.thrust_phys)
 
     def mass_event_cb(self, msg):
         """质量突变事件 = **卸载**(wrench drop / gripper drop——nmpc_node 释放
@@ -571,6 +614,9 @@ class MHENode(Node):
     def u_opt_cb(self, msg):
         u = np.array(msg.data)
         if u.shape[0] == mhe_p.nu_known and np.all(np.isfinite(u)):
+            # 记 NMPC **原始**理想输出:必须在下面把 u[0] 换成 thrust_phys 之前,
+            # 否则 command 流的推力列会变成 motor 流的量,两流不再独立。
+            self.resid_log.log_command(u)
             # 推力分量(u[0])换成电机转速反算的真实物理推力(见 MOTOR_CONSTANT
             # 注释),力矩 tau(u[1:4])仍沿用 NMPC 意图值(对质量估计是次要项)。
             # motor_speed 还没到时退回 NMPC 的推力,避免丢帧。
@@ -584,6 +630,9 @@ class MHENode(Node):
         # 这段时间没有意义的输入,直接跳过,不往缓冲区塞假数据。
         if self.x_meas is None or self.u_known is None:
             return
+        # internal 流:MHE 自身状态,供离线诊断做分桶(空载/带载)与几何真值对照
+        self.resid_log.log_internal(self.m_est, self._payload_attached,
+                                    self.attach_offset, self.thrust_phys)
 
         self.y_buf.append(self.x_meas.copy())
         if len(self.y_buf) > mhe_p.N + 1:
@@ -783,7 +832,14 @@ class MHENode(Node):
 def main():
     rclpy.init()
     node = MHENode()
-    rclpy.spin(node)
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        # 批次脚本每轮结束用 kill -9,SIGKILL 捕不到 → 采集器已按 200 行分批落盘,
+        # 最坏只丢尾部不足一批的行(诊断可接受)。正常退出路径这里补全。
+        node.resid_log.close()
     rclpy.shutdown()
 
 

@@ -20,7 +20,7 @@ import sys
 
 import numpy as np
 
-M_EMPTY, Z_REF, BAND, DT = 2.064, 2.5, 0.03, 0.1
+M_EMPTY, Z_REF, BAND = 2.064, 2.5, 0.03
 AW = re.compile(r'\[attach-window\] t=([\d.]+)s pos_err=([\d.]+)m T=([\d.]+)N '
                 r'z=(-?[\d.]+) m_est=([\d.]+)')
 DROP = re.compile(r't=([\d.]+)s \| DROP: released')

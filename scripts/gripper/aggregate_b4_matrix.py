@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """B.4 学习+强闭环合流矩阵聚合(2026-07-15)。读 run_b4_matrix.sh 的 manifest,按
 (method,mass,ecc) 分组,估计层(mhe 日志:入带/驻留/过冲)+ 控制层(nmpc
-[attach-window]:pos_err 峰/恢复)用与 grip_cem_optimize 同一口径(per-mass
-M_TRUE/BAND/THRESH)解析,M0 vs θ* 逐格并列——问"θ* 在 online 无真值配置下对 M0
+[attach-window]:pos_err 峰/恢复)用 per-mass M_TRUE/BAND/THRESH 口径解析,M0 vs θ* 逐格并列——问"θ* 在 online 无真值配置下对 M0
 的收益是否保持"。
 
 用法:  python3 aggregate_b4_matrix.py [manifest]  (不给取最新 b4_matrix_*.txt)"""
@@ -32,7 +31,8 @@ def fmt(vals, prec=3):
 
 
 def parse_run(nstamp, mass):
-    """复用 grip_cem_optimize 口径:per-mass M_TRUE/BAND/THRESH。返回指标 dict 或 None。"""
+    """per-mass M_TRUE/BAND/THRESH 口径(原 grip_cem_optimize 同款,该脚本已于
+    2026-07-31 随 CEM 一并删除,口径定义保留在此)。返回指标 dict 或 None。"""
     est.M_TRUE = M_EMPTY + mass
     est.BAND = max(0.15 * mass, 0.03)
     est.THRESH = min(1.5, max(0.7 * 9.81 * mass, 0.2))
