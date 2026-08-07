@@ -167,6 +167,9 @@ class MHENode(Node):
         self._fail_streak = 0
         self.counter = 0
         self.frames = 0  # 已入缓冲的总帧数(事件调度器的全局帧序号基准)
+        # 论文 timing 表的原始样本:整轮飞行的 solve 耗时都留着,收尾时一次性
+        # 出分位数(轮次才 ~100s、10Hz,总量千级,不必限长)。
+        self._solve_ms = []
 
         # 事件触发权重调度(M0,规则版):抓/放是已知事件,收到事件后把窗口内
         # 事件前 stage 降权,让质量估计在一两帧内跳到新值而不是等 2s 窗口
@@ -733,7 +736,11 @@ class MHENode(Node):
                     if in_transition else 'ended: nominal weights restored'))
             self._in_transition = in_transition
 
+        # 实时性仪表:只测 solver.solve() 本身的墙钟耗时,用于论文 timing 表。
+        # 与 acados_nmpc_node 里的 solve_time 同口径(墙钟、单位 ms),便于对表。
+        _t_solve0 = time.time()
         status = self.solver.solve()
+        self._solve_ms.append((time.time() - _t_solve0) * 1000.0)
         if status != 0:
             self._fail_streak += 1
             self.get_logger().warn(
@@ -796,8 +803,11 @@ class MHENode(Node):
         self.counter += 1
         if self.counter % 20 == 0:
             t_phys = self.thrust_phys if self.thrust_phys is not None else float('nan')
+            # 与 NMPC 那条 solve=X.Xms 同格式,batch 收尾直接 grep 出 timing 表。
+            _s = self._solve_ms[-20:]
             self.get_logger().info(
-                f'MHE mass estimate: {self.m_est:.3f} kg (T_phys={t_phys:.2f}N)')
+                f'MHE mass estimate: {self.m_est:.3f} kg (T_phys={t_phys:.2f}N) '
+                f'| solve={sum(_s)/len(_s):.1f}ms (max{max(_s):.1f})')
             # B.3 Phase0 验证行:反算力矩 vs 质心模型预测(需 attach 真值对表)。
             # 稳态偏心悬停 τ_roll 应≈ m_p·g·ry、τ_pitch≈ -m_p·g·rx(复现 07-03)。
             if self.tau_phys is not None:

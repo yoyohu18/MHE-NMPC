@@ -210,7 +210,18 @@ nohup ros2 run offboard_test_acados acados_nmpc_node --ros-args \
 # 结构性失败是否是"用质量反推几何缩放"这个自举耦合导致的。诊断专用,不是
 # 正式 CEM 花名册的默认路径。
 MHE_LOG="$RUNDIR/grip_mhe_$STAMP.log"
+# ⚠️ residual_log_dir 只在非空时才传(2026-08-03 修):rclpy 的 --ros-args 解析
+# 不接受空的参数值,`-p residual_log_dir:=` 会让 mhe_node 启动即崩
+# (RCLError: Couldn't parse parameter override rule),而崩在自己的 nohup 日志里,
+# 批次脚本照跑不误——整轮**静默没有 MHE**。07-31 加残差采集时引入,当时所有批次
+# 都经 run_residual_collect.sh 带着 RESID_LOG_DIR 进来,所以一直没暴露;任何不设
+# 该变量的裸跑都会中招。
+RESID_ARG=()
+if [ -n "${RESID_LOG_DIR:-}" ]; then
+  RESID_ARG=(-p "residual_log_dir:=$RESID_LOG_DIR")
+fi
 nohup ros2 run offboard_test_acados mhe_node --ros-args \
+    "${RESID_ARG[@]}" \
     -p motor_speed_topic:=/x500_0/command/motor_speed \
     -p event_signal_mode:=${MHE_SIGNAL_MODE:-external} \
     -p event_trigger_enable:=${MHE_EVENT_TRIGGER:-true} \
@@ -222,7 +233,6 @@ nohup ros2 run offboard_test_acados mhe_node --ros-args \
     -p grip_geom_mp_floor:=$GRIP_GEOM_MP_FLOOR_D \
     -p grip_geom_mp_prior:=$GRIP_GEOM_MP_PRIOR_D \
     -p c_xy_est_enable:=${MHE_C_XY_EST:-false} \
-    -p residual_log_dir:="${RESID_LOG_DIR:-}" \
     > "$MHE_LOG" 2>&1 &
 
 echo "gripper headless stack up: nmpc=$NODE_LOG mhe=$MHE_LOG"

@@ -33,8 +33,8 @@ import parse_dropwindow_logs as ctl  # noqa: E402
 D = '/home/clear/ros2_ws_HJH/nmpc_test_results/'
 M_EMPTY = 2.064
 ARMS = ['M0', 'alphaonly', 'rhythmonly', 'thetastar']
-LABEL = {'M0': 'M0 基线', 'alphaonly': 'α-only', 'rhythmonly': 'rhythm-only',
-         'thetastar': 'θ* 完整'}
+LABEL = {'M0': 'M0@1.5N', 'alphaonly': 'α-only', 'rhythmonly': 'rhythm-only',
+         'thetastar': 'θ* 完整', 'M0_08N': 'M0@0.8N'}
 # (基准臂, 对比臂, 这条差估计的是什么)
 CONTRASTS = [
     ('M0', 'alphaonly', 'α 主效应 @节奏=M0'),
@@ -42,6 +42,19 @@ CONTRASTS = [
     ('M0', 'rhythmonly', '节奏 主效应 @阈值=1.5N'),
     ('alphaonly', 'thetastar', '节奏 主效应 @阈值=α'),
     ('M0', 'thetastar', '总收益(校验 B.4)'),
+]
+
+# ---- ARMS_MODE=3(2026-08-03):基线阈值口径消解三臂 ----
+# 问的是"07-10 那次 6/6 全胜,是 θ* 真赢了,还是只是打赢了一个用 0.8N 的差基线"。
+# 三条对比各自回答一问:
+#   ①M0@1.5N→M0@0.8N  阈值本身值多少(**混杂的大小**)
+#   ②M0@0.8N→θ*       复现 07-10 的那次比较(同口径,能否重现 6/6)
+#   ③M0@1.5N→θ*       表2 口径下的总收益(应与表2一致=归零,作设施自洽校验)
+ARMS_3 = ['M0', 'M0_08N', 'thetastar']
+CONTRASTS_3 = [
+    ('M0', 'M0_08N', '基线阈值效应 1.5N→0.8N(混杂本身有多大)'),
+    ('M0_08N', 'thetastar', '07-10 口径复现(θ* vs M0@0.8N)'),
+    ('M0', 'thetastar', '表2 口径总收益(自洽校验,预期归零)'),
 ]
 # (key, 标签, 小数位, 是否越小越好)
 METRICS = [
@@ -172,6 +185,14 @@ def main():
             return
         manifest = cands[-1]
     print(f'manifest: {manifest}')
+
+    # 臂集按 manifest 实际内容自动切换:三臂批(ARMS_MODE=3)的臂名里有 M0_08N,
+    # 与 2×2 析因批的臂名不相交,靠这个判别即可,不必再传一个模式开关。
+    global ARMS, CONTRASTS
+    body = [l for l in open(manifest) if not l.startswith('#')]
+    if any(l.split()[:1] == ['M0_08N'] for l in body if l.strip()):
+        ARMS, CONTRASTS = ARMS_3, CONTRASTS_3
+        print('检测到 M0_08N 臂 → 基线阈值口径消解模式(三臂)')
     print(f'主指标 = {PRIMARY}(预先固定);enter 仅辅助(暂态穿带不稳健)\n')
 
     runs = {}

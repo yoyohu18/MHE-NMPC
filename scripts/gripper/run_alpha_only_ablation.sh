@@ -82,8 +82,23 @@ ALPHA_STAR="0.9875"
 # ARMS_MODE=2:只跑 M0 vs θ*,用于在**别的 solve 频率**下对上论文表2的口径
 #   (2026-07-30 用途:主线已切 solve@20Hz,而表2数据出自 solve@10Hz,
 #    需在 10Hz 下配对交错重测才能判表2真伪)。2 臂用简单交替消顺序效应。
+# ARMS_MODE=3(2026-08-03 新增):**基线阈值口径消解**三臂 M0@1.5N / M0@0.8N / θ*。
+#   问什么:07-10 holdout 那次 6/6 全胜是 CEM 路线**唯一的正面证据**,但它的 M0
+#   基线用固定 **0.8N** 阈值,而 2×2 析因(表2,收益归零那个)用 headless 默认
+#   **1.5N**。若 0.8N 本身就是个明显更差的基线,6/6 就只是"打赢了一个选差了的
+#   基线",与 θ* 学到什么无关。三臂同批配对即可分离这两种解释。
+#   ⚠️ 本批**不会**改变表2/§VI-B 的结论(那里全程单一基线),只定早期正面结果的地位。
+#   工况固定在 07-10 的留出判决点(mass=0.225 × ecc=0.05):两轴都不在 CEM 训练
+#   网格上,且小偏心 σ 最小(07-10 实测大偏心 σ 高达 0.3-0.7,判决优先看小偏心)。
 ARMS_MODE="${ARMS_MODE:-4}"
-if [ "$ARMS_MODE" = 2 ]; then
+if [ "$ARMS_MODE" = 3 ]; then
+  # 3 阶拉丁方:每臂在每个位置各出现一次(rep 数为 3 的倍数时完全平衡)
+  ORDER_0="M0 M0_08N thetastar"
+  ORDER_1="thetastar M0 M0_08N"
+  ORDER_2="M0_08N thetastar M0"
+  ORDER_3="$ORDER_0"     # 占位:%NORDERS 取模后用不到,留着防手滑
+  METHODS_ALL="M0 M0_08N thetastar"; NARMS=3; NORDERS=3
+elif [ "$ARMS_MODE" = 2 ]; then
   ORDER_0="M0 thetastar";  ORDER_1="thetastar M0"
   ORDER_2="M0 thetastar";  ORDER_3="thetastar M0"
   METHODS_ALL="M0 thetastar"; NARMS=2
@@ -114,6 +129,7 @@ if [ ! -f "$MANIFEST" ]; then
     echo "# 配置: masses=${MASSES}  eccs=${ECCS}  reps=${REPS}  methods=${METHODS_ALL}"
     echo "# 配置: theta_star=[${THETA_STAR}]  star_rhythm=[${STAR_RHYTHM}]  m0_rhythm=[${M0_RHYTHM}]  alpha_star=${ALPHA_STAR}"
     echo "# 配置: M0/rhythmonly 臂 alpha=-1.0 → 固定 event_confirm_thresh_n=1.5N (headless 默认, 同 B.4 矩阵)"
+    [ "$ARMS_MODE" = 3 ] && echo "# 配置: M0_08N 臂 = 节奏同 M0, 仅固定阈值改 0.8N (=07-10 holdout 批 M0 口径); 本批用途=基线阈值口径消解"
     echo "# 配置: ARMS_MODE=${ARMS_MODE}  NMPC solve=${SOLVE_HZ}  (MHE 恒 10Hz)"
     echo "# 设计: 正交2x2析因(节奏M0/θ* × 阈值1.5N/α0.9875); rep最外method最内=各臂背靠背; 臂序逐rep轮转"
     echo "# 判据: DIVERGED=pos_err峰>2.0m ; NEED_AW=${NEED_AW} attach-window 帧"
@@ -141,26 +157,36 @@ trap 'echo "[aonly] interrupted"; cleanup; exit 130' INT TERM
 
 # rep 最外、method 最内 = 配对交错;臂序逐 rep 走拉丁方轮转
 for rep in $(seq 1 "$REPS"); do
- eval "METHODS=\$ORDER_$(( (rep - 1) % 4 ))"
+ eval "METHODS=\$ORDER_$(( (rep - 1) % ${NORDERS:-4} ))"
  echo "[aonly] --- rep=$rep 臂序: $METHODS ---"
  for mass in $MASSES; do for ecc in $ECCS; do for method in $METHODS; do
   if grep -qE "^$method $mass $ecc $rep .* ok " "$MANIFEST" 2>/dev/null; then
     echo "[aonly] skip $method $mass $ecc $rep (ok)"; continue
   fi
   # 2×2 析因:节奏维(TH) × 阈值路径(ALPHA)。ALPHA=-1.0 → 固定 1.5N 那条路径。
+  # M0_08N:节奏与 M0 逐字相同,只把固定阈值从 headless 默认 1.5N 换成 0.8N,
+  # 即 07-10 holdout 批 M0 基线的口径。走同一条 alpha=-1.0 固定阈值代码路径,
+  # 与 M0 臂的唯一差别就是那个标量——这正是本批要分离的那一个变量。
+  CONFIRM_N=""      # 空=不传,用 headless 默认 1.5N(与表2/B.4矩阵逐字一致)
   case "$method" in
     thetastar)  TH="[$THETA_STAR]";  ALPHA="$ALPHA_STAR"; PRIOR="$mass" ;;
     alphaonly)  TH="[$M0_RHYTHM]";   ALPHA="$ALPHA_STAR"; PRIOR="$mass" ;;
     rhythmonly) TH="[$STAR_RHYTHM]"; ALPHA="-1.0";        PRIOR="0.3"   ;;
+    M0_08N)     TH="[$M0_RHYTHM]";   ALPHA="-1.0";        PRIOR="0.3"; CONFIRM_N="0.8" ;;
     *)          TH="[$M0_RHYTHM]";   ALPHA="-1.0";        PRIOR="0.3"   ;;
   esac
   if [ "$GEOM_PRIOR" = truth ]; then GP="$mass"; else GP="$GEOM_PRIOR"; fi
 
   echo "[aonly] === rep=$rep mass=$mass ecc=$ecc method=$method theta=$TH alpha=$ALPHA ==="
   LAUNCH="$RUNDIR/aonly_launch_${STAMP}_${method}_${mass}_${ecc}_${rep}.log"
-  GRIP_PAYLOAD_KG=$mass GRIP_ECC_Y=$ecc USE_MHE=true MHE_C_XY_EST=true \
+  # ⚠️ 用 `env` 而非裸赋值前缀:可选项 `${CONFIRM_N:+NAME=val}` 若放在赋值前缀位,
+  # bash 在**解析阶段**就已确定哪些词是赋值,参数展开发生在那之后 → 展开出来的
+  # `MHE_CONFIRM_THRESH=0.8` 会被当成**命令名**而不是环境变量(报 command not found)。
+  # env 把它们当普通参数收,展开后语义才正确。对既有各臂完全等价。
+  env GRIP_PAYLOAD_KG=$mass GRIP_ECC_Y=$ecc USE_MHE=true MHE_C_XY_EST=true \
     GRIP_GEOM_MP_FLOOR=0.15 GRIP_GEOM_MP_PRIOR="$GP" NMPC_GEOM_SOURCE=online \
     MHE_SCHEDULE_THETA="$TH" MHE_CONFIRM_ALPHA="$ALPHA" MHE_CONFIRM_PRIOR="$PRIOR" \
+    ${CONFIRM_N:+MHE_CONFIRM_THRESH=$CONFIRM_N} \
     bash "$WS/src/scripts/gripper/run_gripper_headless.sh" > "$LAUNCH" 2>&1 9>&-
   NMPC=""; for k in $(seq 1 12); do
     NMPC=$(grep -oE "/home/[^ ]*grip_nmpc_[0-9_]+\.log" "$LAUNCH" 2>/dev/null | head -1)
