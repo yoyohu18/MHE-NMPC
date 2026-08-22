@@ -43,6 +43,11 @@ echo "录制区域: $GRAB_SIZE 偏移 $GRAB_OFF  DISPLAY=$DISPLAY  时长=${DURA
 #    第一次那样匹配到几天前的旧 gviz 日志、瞬间误判就绪、把启动画面录满 125s。
 MARKER="$OUTDIR/.launch_marker"
 touch "$MARKER"
+# ⚠️2026-08-21:光靠 mtime(-newer $MARKER)会匹配到**上一轮还在写**的日志——
+# 它的 mtime 一直在更新,必然比 marker 新。后果是 stamp 指向旧 run、相机跟随
+# 在新 Gazebo 起来之前就调掉(录出来全程远景)、meta 里的 nmpc_log 也是错的。
+# 改成文件名快照对比:只认快照里没有的**新文件名**。
+ls "$LOGDIR"/gviz_nmpc_*.log 2>/dev/null | xargs -r -n1 basename > "$OUTDIR/.logs_before"
 echo ">>> 启动 run_sitl_gripper_viz.sh ..."
 bash "$WS/src/scripts/gripper/run_sitl_gripper_viz.sh" > "$OUTDIR/viz_launch.log" 2>&1 &
 LAUNCH_PID=$!
@@ -61,8 +66,10 @@ echo ""
 echo ">>> 等待本次仿真的 NMPC 日志(最多 300s)..."
 STAMP=""; NMPC_LOG=""
 for i in $(seq 1 300); do
-  NMPC_LOG=$(find "$LOGDIR" -maxdepth 1 -name 'gviz_nmpc_*.log' \
-             -newer "$MARKER" -print 2>/dev/null | sort | tail -1)
+  NMPC_LOG=$(for f in "$LOGDIR"/gviz_nmpc_*.log; do
+               [ -e "$f" ] || continue
+               grep -qxF "$(basename "$f")" "$OUTDIR/.logs_before" || echo "$f"
+             done | sort | tail -1)
   if [ -n "$NMPC_LOG" ]; then
     STAMP=$(basename "$NMPC_LOG" .log); STAMP=${STAMP#gviz_nmpc_}
     break
@@ -86,9 +93,16 @@ export GZ_CONFIG_PATH="${GZ_CONFIG_PATH:-/usr/share/gz}"
 FOLLOW_TARGET="${DEMO_FOLLOW:-x500_0}"
 FOLLOW_OFF="${DEMO_FOLLOW_OFFSET:-x: -3.5, y: 0.0, z: 1.6}"
 if [ -n "$FOLLOW_TARGET" ] && command -v gz >/dev/null 2>&1; then
-  if gz service -s /gui/follow --reqtype gz.msgs.StringMsg \
+  # 重试:GUI 进程在、但 /gui/follow 服务晚几秒才注册的情况实测存在
+  FOLLOW_OK=1
+  for _try in 1 2 3 4 5; do
+    gz service -s /gui/follow --reqtype gz.msgs.StringMsg \
        --reptype gz.msgs.Boolean --timeout 3000 \
-       --req "data: \"$FOLLOW_TARGET\"" >/dev/null 2>&1; then
+       --req "data: \"$FOLLOW_TARGET\"" 2>/dev/null | grep -q 'data: true' \
+      && { FOLLOW_OK=0; break; }
+    sleep 2
+  done
+  if [ $FOLLOW_OK -eq 0 ]; then
     gz service -s /gui/follow/offset --reqtype gz.msgs.Vector3d \
        --reptype gz.msgs.Boolean --timeout 3000 \
        --req "$FOLLOW_OFF" >/dev/null 2>&1 || true

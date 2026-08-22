@@ -133,10 +133,29 @@ def fig3():
 # 图4 c_xy 在线估计:收敛时间线 + 偏心扫格 est vs truth
 # =====================================================================
 CXY = re.compile(WALL + r'.*\[c_xy_est\] cx=([+-][\d.]+) cy=([+-][\d.]+) m'
-                 r'(?: \| truth c=\[([+-][\d.]+),([+-][\d.]+)\])?')
+                 r'(?: \| truth c=\[([+-][\d.]+),([+-][\d.]+)\]'
+                 r'(?: \(m_p=([\d.]+)\))?)?')
 ATTACH_EV = re.compile(WALL + r'.*mass event \[attach')
 SWEEP_ROW = re.compile(r'^([\d.]+)\s+ok.*cx=([+-][\d.]+) cy=([+-][\d.]+) m \| '
-                       r'truth c=\[([+-][\d.]+),([+-][\d.]+)\]')
+                       r'truth c=\[([+-][\d.]+),([+-][\d.]+)\]'
+                       r'(?:\s+\(m_p=([\d.]+)\))?')
+
+# ⚠️2026-08-21:日志里那个 `truth c=` **只有几何因子是真值**。质量因子在
+# mhe_node 没收到 grip_true_payload_mass(默认 0.0,且**故意不开**——它会拿真值
+# 替换 m_p_hat 去喂载荷几何,等于把真值灌进模型)时,退回 m_est 反推的 m_p,
+# 于是"真值"跟着 m_est 抖(实测 m_p=0.259~0.298,真值是 0.300)。
+# 修法:c_true=(m_p/m_t)·d 里 d 是常量,反算 d 再用**已知真值** m_p=0.3 重算,
+# 等价于给每个样本乘一个系数。收敛后差 1.8%、暂态段差约 14%。
+M_DRY = 2.0643          # 空机质量 [kg](与 mhe_params.m_nominal 一致)
+M_P_TRUE = 0.3          # SITL 载荷真值 [kg]
+
+
+def _true_c(c_logged, m_p):
+    """把日志里 m_p 估计值算出的 c 换算成真值 m_p 对应的 c。"""
+    if not m_p or m_p <= 0.0:
+        return c_logged
+    k = (M_P_TRUE / (M_DRY + M_P_TRUE)) / (m_p / (M_DRY + m_p))
+    return c_logged * k
 
 
 def fig4():
@@ -153,7 +172,9 @@ def fig4():
             t.append(_wall(mc)); cx.append(float(mc.group(3)))
             cy.append(float(mc.group(4)))
             if mc.group(5):
-                tcx.append(float(mc.group(5))); tcy.append(float(mc.group(6)))
+                _mp = float(mc.group(7)) if mc.group(7) else 0.0
+                tcx.append(_true_c(float(mc.group(5)), _mp))
+                tcy.append(_true_c(float(mc.group(6)), _mp))
     t = np.array(t) - (t_attach if t_attach else t[0])
     cx, cy = np.array(cx), np.array(cy)
     truth_cx = np.median(tcx) if tcx else None
@@ -185,7 +206,9 @@ def fig4():
         ms = SWEEP_ROW.match(line)
         if ms:
             ecc.append(float(ms.group(1)))
-            est.append(float(ms.group(3))); tru.append(float(ms.group(5)))
+            est.append(float(ms.group(3)))
+            tru.append(_true_c(float(ms.group(5)),
+                               float(ms.group(6)) if ms.group(6) else 0.0))
     est, tru = 1e2 * np.array(est), 1e2 * np.array(tru)
     lim = [min(est.min(), tru.min()) - 0.3, 0.3]
     ax2.plot(lim, lim, color=INK2, lw=0.8, ls='--')

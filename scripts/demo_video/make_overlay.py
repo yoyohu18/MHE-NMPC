@@ -64,6 +64,7 @@ def load_mission(stamp, t_end):
 
     tp, ep, tw, ew = [], [], [], []
     phases, offsets = {}, []
+    r_att = [None]
     for line in open(nmpc):
         mw = mpf.NMPC_WIN.search(line)
         if mw:
@@ -77,6 +78,11 @@ def load_mission(stamp, t_end):
         mf = mpf.PHASE.search(line)
         if mf and mf.group(4) not in phases:
             phases[mf.group(4)] = float(mf.group(3))
+        # 2026-08-21:抓取几何真值(Gazebo 给的 box 相对机体偏移),给 c_y 真值用
+        ma = re.search(r'attach offset received: box-drone = '
+                       r'\[\s*([-+0-9.]+),\s*([-+0-9.]+),', line)
+        if ma and r_att[0] is None:
+            r_att[0] = (float(ma.group(1)), float(ma.group(2)))
     if not offsets:
         sys.exit(f'{nmpc}: 没解析到任何 NMPC 时间行')
     off = float(np.median(offsets))
@@ -108,7 +114,8 @@ def load_mission(stamp, t_end):
     t_c, v_c, v_ct = t_c[keep_c], v_c[keep_c], v_ct[keep_c]
 
     return dict(off=off, phases=phases, t_err=t_err, v_err=v_err,
-                t_m=t_m, v_m=v_m, t_c=t_c, v_c=v_c, v_ct=v_ct)
+                t_m=t_m, v_m=v_m, t_c=t_c, v_c=v_c, v_ct=v_ct,
+                r_att=r_att[0])
 
 
 PHASE_CN = {'ATTACH': '接近并抓取载荷', 'LIFT': '抬升(有效质量阶跃)',
@@ -162,10 +169,18 @@ def build(d, payload, t_end, fps, width, height, out_path, lang='zh'):
     # 3) 偏心 c_y
     axes[2].set_ylabel('质心偏心 $c_y$ [cm]' if use_cn else 'CoM offset $c_y$ [cm]')
     if len(d['t_c']):
-        axes[2].plot(d['t_c'], 1e2 * d['v_ct'], color=C_TRUTH, lw=1.4, ls='--',
+        # ⚠️2026-08-21:MHE 日志里那个 `truth c=` **只有几何因子是真值**,质量因子在
+        # 节点没收到 grip_true_payload_mass 时会退回 m_est 反推的 m_p,于是"真值"会
+        # 跟着 m_est 一起抖(实测印出 m_p=0.263/0.218/0.256,真值明明是 0.300)。
+        # 这里改成用真实载荷质量 × attach 几何真值自己算,得到应有的常值。
+        v_ct = d['v_ct']
+        if d.get('r_att') is not None:
+            v_ct = np.full_like(d['t_c'],
+                                payload / (M_DRY + payload) * d['r_att'][1])
+        axes[2].plot(d['t_c'], 1e2 * v_ct, color=C_TRUTH, lw=1.4, ls='--',
                      label='真值' if use_cn else 'truth')
-        lo = np.nanmin(1e2 * np.concatenate([d['v_c'], d['v_ct']]))
-        hi = np.nanmax(1e2 * np.concatenate([d['v_c'], d['v_ct']]))
+        lo = np.nanmin(1e2 * np.concatenate([d['v_c'], v_ct]))
+        hi = np.nanmax(1e2 * np.concatenate([d['v_c'], v_ct]))
         pad = max(1.0, 0.2 * (hi - lo))
         axes[2].set_ylim(lo - pad, hi + pad)
 

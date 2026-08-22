@@ -53,6 +53,16 @@ DYN_RAMP="${GRIP_DYN_RAMP:-3.0}"
 # ⚠️ DROP_AT_TIP 丢在 a=3π/2 = 轨迹**最低点**,dz 一开 drop 高度就降 dz;drop
 # 相位本身不受 dz 影响(相位只由 w·tc 定),所以 DROP_AFTER 不用重算。
 DYN_DZ="${GRIP_DYN_DZ:-0.8}"
+# 悬停/8字高度与 LIFT 时长(2026-08-19 参数化,默认值不变)。
+# 抬高高度的用途:大尺度轨迹(r=10)那轮是**被地面终止**的——求解器失败后推力跌到
+# 18~21N(带载悬停需 23.2N),z 从 3.23 一路掉到 0.18 撞地,看不到失效的真实形态。
+# 把地面移远才能观察"掉多少就稳住/还是持续发散"。
+# ⚠️ 两者必须一起调:LIFT 是在 GRIP_LIFT_DUR 秒内从 grip_z_low(0.55) 抬到 Z_HIGH,
+#    默认 (2.5-0.55)/3.0 = 0.65 m/s;抬到 10m 还用 3.0s 就是 3.2 m/s 爬升率。
+#    保持 ~0.65 m/s 的话 LIFT_DUR ≈ (Z_HIGH-0.55)/0.65。
+# ⚠️ z 实际范围是 Z_HIGH ± GRIP_DYN_DZ(立体 8 字),留够离地余量。
+Z_HIGH="${GRIP_Z_HIGH:-2.5}"
+LIFT_DUR="${GRIP_LIFT_DUR:-3.0}"
 
 # drop 时机(2026-07-15 立、07-30 随 w 重算):grip_drop_after_sec 是"lift 完成后
 # 最早可丢"的门槛,真正丢的时刻由 acados_nmpc_node._grip_drop_phase 的
@@ -73,6 +83,7 @@ DYNAMIC="${GRIP_DYNAMIC:-true}"        # figure8 动态
 _f2d() { python3 -c "print(float('$1'))"; }
 DYN_R_D=$(_f2d "$DYN_R"); DYN_W_D=$(_f2d "$DYN_W"); DYN_RAMP_D=$(_f2d "$DYN_RAMP")
 DYN_DZ_D=$(_f2d "$DYN_DZ")
+Z_HIGH_D=$(_f2d "$Z_HIGH"); LIFT_DUR_D=$(_f2d "$LIFT_DUR")
 DROP_AFTER_D=$(_f2d "$DROP_AFTER")
 ECC_Y_D=$(_f2d "$ECC_Y"); PAYLOAD_KG_D=$(_f2d "$PAYLOAD_KG")
 GEOM_MP_PRIOR_D=$(_f2d "$GEOM_MP_PRIOR")
@@ -183,9 +194,9 @@ nohup bash -c "source /opt/ros/jazzy/setup.bash && source '$WS/install/setup.bas
   $ACADOS_ENV && export PYTHONUNBUFFERED=1 && \
   ros2 run offboard_test_acados acados_nmpc_node --ros-args \
     -p gripper_mode:=true -p grip_x:=1.0 -p grip_y:=$ECC_Y_D \
-    -p grip_z_low:=0.55 -p grip_z_high:=2.5 \
+    -p grip_z_low:=0.55 -p grip_z_high:=$Z_HIGH_D \
     -p grip_mass_step_sec:=0.0 -p grip_payload_mass:=$PAYLOAD_KG_D -p grip_arm_d:=0.47 \
-    -p grip_lift_after_sec:=1.5 -p grip_lift_dur:=3.0 -p use_mhe:=true \
+    -p grip_lift_after_sec:=1.5 -p grip_lift_dur:=$LIFT_DUR_D -p use_mhe:=true \
     -p geom_source:=online -p grip_payload_prior:=0.3 \
     -p grip_drop_after_sec:=$DROP_AFTER_D \
     -p grip_dynamic_after_lift:=$DYNAMIC \

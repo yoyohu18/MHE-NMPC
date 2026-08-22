@@ -38,6 +38,18 @@ class DroneTFBroadcaster(Node):
         t.transform.rotation = msg.pose.pose.orientation
         self.br.sendTransform(t)
 
+        # 2026-08-21:给 RViz 视角跟随用的"水平跟随帧"。把 Orbit 的 Target Frame
+        # 直接设成 base_link 也能跟住,但视图会跟着机体 roll/pitch 一起翻——4 m/s
+        # 机动时倾角十几度,地平线一直在歪。chase_link 只继承位置、姿态恒为单位
+        # 四元数,所以跟随平滑、地平线始终水平。纯可视化,不进任何控制/估计链路。
+        c = TransformStamped()
+        c.header.stamp = t.header.stamp
+        c.header.frame_id = 'map'
+        c.child_frame_id = 'chase_link'
+        c.transform.translation = t.transform.translation
+        c.transform.rotation.w = 1.0
+        self.br.sendTransform(c)
+
 
 def main():
     rclpy.init()
