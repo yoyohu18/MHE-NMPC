@@ -32,7 +32,7 @@ def build_ocp() -> AcadosOcp:
     ocp.model = model
     ocp.code_export_directory = str(codegen_dir())
 
-    ny_0 = mhe_p.nx + mhe_p.nw + mhe_p.nx_aug  # 测量(13) + 过程噪声(13) + 到达代价(14) = 40
+    ny_0 = mhe_p.nx + mhe_p.nw + mhe_p.nx_aug  # 测量(13)+过程噪声(13)+到达代价(14或16)
     ny   = mhe_p.nx + mhe_p.nw                 # 测量(13) + 过程噪声(13) = 26
 
     ocp.solver_options.N_horizon = mhe_p.N
@@ -60,9 +60,18 @@ def build_ocp() -> AcadosOcp:
     # 质量这一维加个宽松的物理边界,纯粹防止激励不足的窗口把质量推到离谱的值,
     # 不是真实约束——必须连 idxbx 一起设,漏了的话 acados 不报错但约束形同虚设
     # (跟 NMPC 那边漏 idxbu 是同一类坑)。
-    ocp.constraints.idxbx = np.array([mhe_p.nx])
-    ocp.constraints.lbx = np.array([mhe_p.m_min])
-    ocp.constraints.ubx = np.array([mhe_p.m_max])
+    # 质量维 + (可选)一阶质量矩维的箱约束。s 的界只是防优化器跑飞的安全带,
+    # 不是物理约束(|s|<=m_P_max*r_max 量级)。
+    _idx = [mhe_p.nx]
+    _lb = [mhe_p.m_min]
+    _ub = [mhe_p.m_max]
+    for k in range(mhe_p.ns):
+        _idx.append(mhe_p.nx + mhe_p.nm + k)
+        _lb.append(-mhe_p.s_abs_max)
+        _ub.append(mhe_p.s_abs_max)
+    ocp.constraints.idxbx = np.array(_idx)
+    ocp.constraints.lbx = np.array(_lb)
+    ocp.constraints.ubx = np.array(_ub)
 
     ocp.solver_options.integrator_type = 'ERK'
     ocp.solver_options.sim_method_num_stages = 4

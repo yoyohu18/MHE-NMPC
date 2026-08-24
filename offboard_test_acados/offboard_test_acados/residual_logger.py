@@ -38,8 +38,14 @@ _SCHEMA = {
     # omega_dot 的更好来源。两个源都采,离线对比后再决定用哪个,不在线预判。
     'imu':     ('t_header_ns,t_recv_ns,wx,wy,wz,ax,ay,az,qw,qx,qy,qz'),
     'command': 't_recv_ns,T_cmd,tau_x,tau_y,tau_z',
+    # 2026-08-24 追加真值对照列(**只在末尾追加**,消费者都用 genfromtxt(names=True)
+    # 按列名取,老脚本不受影响)。m_true/c_*_true/dJ_true/J*_true 全部只从
+    # eval_true_payload_mass 这个**评估专用**参数算,绝不进 MHE/NMPC 的任何模型
+    # 输入(见 mhe_node 里该参数的注释);没给真值时写 nan。
     'internal': ('t_recv_ns,m_est,payload_attached,'
-                 'att_off_x,att_off_y,att_off_z,thrust_phys'),
+                 'att_off_x,att_off_y,att_off_z,thrust_phys,'
+                 'm_true,cx_hat,cy_hat,cx_true,cy_true,'
+                 'dJ_hat,dJ_true,Jxx_hat,Jxx_true,Jyz_hat,Jyz_true'),
 }
 # 攒够多少行写一次 + 立刻 flush。
 # ⚠️2026-07-31 首次采集全军覆没的教训:原来用 open(buffering=1<<20) 给了 1MB 文件
@@ -132,14 +138,21 @@ class ResidualLogger:
         self._put('command', f'{time.monotonic_ns()},'
                              f'{u[0]:.6f},{u[1]:.8f},{u[2]:.8f},{u[3]:.8f}')
 
-    def log_internal(self, m_est, attached, att_off, thrust):
+    def log_internal(self, m_est, attached, att_off, thrust, truth=None):
+        """truth: 可选 dict,键见 _SCHEMA['internal'] 追加段的列名(不给就写 nan)。"""
         if not self.enabled:
             return
         a = att_off if att_off is not None else (float('nan'),) * 3
         t = thrust if thrust is not None else float('nan')
+        tr = truth or {}
+        cols = ('m_true', 'cx_hat', 'cy_hat', 'cx_true', 'cy_true',
+                'dJ_hat', 'dJ_true', 'Jxx_hat', 'Jxx_true',
+                'Jyz_hat', 'Jyz_true')
+        extra = ','.join(f'{float(tr.get(k, float("nan"))):.6f}' for k in cols)
         self._put('internal', f'{time.monotonic_ns()},{m_est:.6f},'
                               f'{int(bool(attached))},'
-                              f'{a[0]:.6f},{a[1]:.6f},{a[2]:.6f},{t:.6f}')
+                              f'{a[0]:.6f},{a[1]:.6f},{a[2]:.6f},{t:.6f},'
+                              f'{extra}')
 
     def close(self):
         if not self.enabled:

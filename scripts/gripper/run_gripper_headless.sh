@@ -74,6 +74,11 @@ GRIP_PAYLOAD_KG_D=$(_f2d "$GRIP_PAYLOAD_KG")
 GRIP_ECC_Y_D=$(_f2d "$GRIP_ECC_Y")
 PUBLISH_HZ_D=$(_f2d "${PUBLISH_HZ:-50.0}")
 GRIP_GEOM_MP_PRIOR_D=$(_f2d "${GRIP_GEOM_MP_PRIOR:-$GRIP_PAYLOAD_KG}")
+# 评估专用真值(2026-08-24):只喂给 mhe_node 的 eval_true_payload_mass,唯一用途是
+# 往日志/internal 流写 m_true/c_true/J_true 做 estimate-vs-truth 对比。它在节点里
+# **没有任何通往模型的路径**(与 grip_true_payload_mass 是两个不同参数,后者会把
+# 真值灌进几何,生产实验不要开)。默认就等于 box 的真实质量,因为它只进评估。
+EVAL_TRUE_PAYLOAD_D=$(_f2d "${EVAL_TRUE_PAYLOAD_MASS:-$GRIP_PAYLOAD_KG}")
 L1_A_GAIN_D=$(_f2d "${L1_A_GAIN:-10.0}")
 L1_OMEGA_C_D=$(_f2d "${L1_OMEGA_C:-0.5}")
 GRIP_DROP_AFTER_D=$(_f2d "${GRIP_DROP_AFTER:-0.0}")
@@ -191,6 +196,7 @@ nohup ros2 run offboard_test_acados acados_nmpc_node --ros-args \
     -p use_mhe:=$USE_MHE \
     -p decouple_publish:=${DECOUPLE_PUB:-true} -p publish_hz:=$PUBLISH_HZ_D \
     -p geom_source:=${NMPC_GEOM_SOURCE:-truth} \
+    -p geom_release_mode:=${NMPC_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-event}} \
     -p grip_payload_prior:=$GRIP_GEOM_MP_PRIOR_D \
     -p control_mode:=${NMPC_CONTROL_MODE:-mhe} \
     -p l1_a_gain:=$L1_A_GAIN_D \
@@ -232,6 +238,8 @@ nohup ros2 run offboard_test_acados mhe_node --ros-args \
     -p grip_true_payload_mass:=$GRIP_TRUE_PAYLOAD_MASS_D \
     -p grip_geom_mp_floor:=$GRIP_GEOM_MP_FLOOR_D \
     -p grip_geom_mp_prior:=$GRIP_GEOM_MP_PRIOR_D \
+    -p eval_true_payload_mass:=$EVAL_TRUE_PAYLOAD_D \
+    -p geom_release_mode:=${MHE_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-event}} \
     -p c_xy_est_enable:=${MHE_C_XY_EST:-false} \
     > "$MHE_LOG" 2>&1 &
 

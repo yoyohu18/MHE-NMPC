@@ -19,7 +19,9 @@ from offboard_test.nmpc_node import tracking_error_sym
 
 from .acados_params import p
 
-MODEL_NAME = 'offboard_test_acados_nmpc'
+# 耦合档必须换 codegen 目录名(见 acados_solver_builder),否则两档共用生成代码。
+MODEL_NAME = ('offboard_test_acados_nmpc_coupled' if p.geom_coupled
+              else 'offboard_test_acados_nmpc')
 
 
 def build_acados_model():
@@ -78,13 +80,33 @@ def build_acados_model():
     )
     quat_dot = 0.5 * cs.mtimes(Xi_q, om)
 
-    J_vec = cs.vertcat(p.Jxx + dJ_sym, p.Jyy + dJ_sym, p.Jzz)
-    Jom   = J_vec * om
-    # 推力作用在机体原点(桨盘中心)沿机体 z 轴,对复合质心(位于 r_c=[cx,cy,cz])
-    # 的力矩 = (-r_c)×[0,0,T] = [-cy*T, +cx*T, 0]。重力作用点就是质心,对质心
-    # 无力矩;cz(质心竖向下移)不跟沿 z 的推力叉出力矩,所以只需要 cx,cy 两维。
-    tau_thrust_com = cs.vertcat(-c_sym[1] * T_, c_sym[0] * T_, 0.0)
-    om_dot = (tau_ + tau_thrust_com - cs.cross(om, Jom)) / J_vec
+    if p.geom_coupled:
+        # 耦合档(2026-08-24):dJ_sym/c_sym 两个槛位改装载荷几何偏移 r_p=[rx,ry,rz]
+        # (第 15..17 维,维数不变),J 与 c 由质量槛位 m_sym 现算——与
+        # mhe_model.py 耦合档同一套代数,两边必须一致,否则 NMPC 的模型与 MHE 的
+        # 模型对同一个质量给出不同的姿态动力学。
+        r_p = cs.vertcat(dJ_sym, c_sym)          # [rx, ry, rz]
+        dm = m_sym - p.m_B
+        m_p = 0.5 * (dm + cs.sqrt(dm * dm + p.mp_pos_eps ** 2))
+        mu = p.m_B * m_p / m_sym
+        J_mat = cs.diag(cs.vertcat(p.Jxx, p.Jyy, p.Jzz)) \
+            + p.payload_ki * m_p * cs.MX.eye(3) \
+            + mu * (cs.dot(r_p, r_p) * cs.MX.eye(3) - cs.mtimes(r_p, r_p.T))
+        c_eff = (m_p / m_sym) * r_p[0:2]
+        Jom = cs.mtimes(J_mat, om)
+        tau_thrust_com = cs.vertcat(-c_eff[1] * T_, c_eff[0] * T_, 0.0)
+        om_dot = cs.mtimes(cs.inv(J_mat),
+                           tau_ + tau_thrust_com - cs.cross(om, Jom))
+    else:
+        # legacy(默认):表达式逐字保持原样,生成的 C 代码与历史批次一致。
+        c_eff = c_sym
+        J_vec = cs.vertcat(p.Jxx + dJ_sym, p.Jyy + dJ_sym, p.Jzz)
+        Jom   = J_vec * om
+        # 推力作用在机体原点(桨盘中心)沿机体 z 轴,对复合质心(位于 r_c=[cx,cy,cz])
+        # 的力矩 = (-r_c)×[0,0,T] = [-cy*T, +cx*T, 0]。重力作用点就是质心,对质心
+        # 无力矩;cz(质心竖向下移)不跟沿 z 的推力叉出力矩,所以只需要 cx,cy 两维。
+        tau_thrust_com = cs.vertcat(-c_sym[1] * T_, c_sym[0] * T_, 0.0)
+        om_dot = (tau_ + tau_thrust_com - cs.cross(om, Jom)) / J_vec
 
     xdot = cs.vertcat(vel, vel_dot, quat_dot, om_dot)
 
@@ -115,7 +137,7 @@ def build_acados_model():
     # 抵消,不进推力/力矩基准。truth/online 模式 d≡0,该式退化回 m·g 不变。
     T_hover = m_sym * (p.g - d_sym[2])
     u_hover_dyn = cs.vertcat(
-        T_hover, c_sym[1] * T_hover, -c_sym[0] * T_hover, 0.0)
+        T_hover, c_eff[1] * T_hover, -c_eff[0] * T_hover, 0.0)
     model.cost_y_expr = cs.vertcat(e_track, u_sym - u_hover_dyn)     # 16维
     model.cost_y_expr_e = e_track                                     # 12维
 

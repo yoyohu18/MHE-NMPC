@@ -210,6 +210,27 @@ class AcadosNMPCNode(Node):
         # 模式下不喂几何。Phase1 已验证 c_xy_est 追真值<5%。⚠️前提:m_est 须健康
         # (信号质量依赖健康飞行,见 memory b3-strong-closed-loop-dr Phase1 教训),
         # gripper 场景配 GRIP_GEOM_MP_FLOOR。
+        # 几何释放方式(2026-08-24,与 mhe_node 的同名参数同一语义):
+        # 'event' = drop 后把几何槽清零(控制器知道自己松了夹爪,历史行为);
+        # 'self'  = 几何槽保持最后一次 attach 的杆臂,载荷贡献由 c(m)/J(m) 里的
+        #           m_P=(m−m_B)⁺ 随 m_est 自行熄灭 —— 控制器模型也只通过质量
+        #           估计感知掉包,不用释放指令这条旁路。仅 NMPC_GEOM_COUPLED=1 有意义。
+        self.declare_parameter('geom_release_mode', 'event')
+        self.geom_release_mode = str(
+            self.get_parameter('geom_release_mode').value).lower()
+        if self.geom_release_mode not in ('event', 'self'):
+            self.geom_release_mode = 'event'
+        if self.geom_release_mode == 'self' and not p.geom_coupled:
+            self.get_logger().error(
+                "geom_release_mode='self' 需要 NMPC_GEOM_COUPLED=1,已退回 'event'")
+            self.geom_release_mode = 'event'
+        if self.geom_release_mode == 'self':
+            # 2026-08-24 实测:控制器侧用 'self' 必然坠机(见 mhe_node 同名参数注释
+            # 里的力矩量级)。这里只告警不强制——留给对照实验,但默认脚本不会开。
+            self.get_logger().warn(
+                "⚠️ NMPC geom_release_mode='self':drop 后控制器仍按幽灵偏心载荷"
+                "配平,实测 2/2 坠机。除非在做对照实验,否则请用 'event'。")
+
         self.declare_parameter('geom_source', 'truth')
         self.geom_source = str(self.get_parameter('geom_source').value).lower()
         if self.geom_source not in ('truth', 'online'):
@@ -867,10 +888,10 @@ class AcadosNMPCNode(Node):
 
         self.solver.set(0, 'lbx', x_cur)
         self.solver.set(0, 'ubx', x_cur)
+        geom_slot = self._geom_slot()
         for i in range(p.N + 1):
             self.solver.set(i, 'p', np.concatenate(
-                [Xref_win[:, i], [self.m_est], [self.dJ_est], self.c_est,
-                 self.d_lumped]))
+                [Xref_win[:, i], [self.m_est], geom_slot, self.d_lumped]))
 
         # t_start_ros:轨迹 t=0 对应的采样时刻(ROS clock),给高频回调算 τ 用。
         # t_start:墙钟,仅用于测 solve 耗时(solve_time),两者别混。
@@ -1231,6 +1252,24 @@ class AcadosNMPCNode(Node):
             f'{r_p[2]:+.3f}]m, hover roll tau≈{tau_hover_roll:.3f}Nm '
             f'of tau_max {p.tau_max}, '
             f'{"m from MHE (no truth inject)" if self.use_mhe else "MHE bypass"})')
+
+    def _geom_slot(self):
+        """model.p 里几何那 3 个槛位该装什么(见 acados_params.geom_coupled)。
+        legacy: [dJ_est, cx_est, cy_est](窗外算好的常量,与 m_est 无函数关系)。
+        coupled: [rx, ry, rz] 载荷几何偏移,J/c 由模型内部按 m_est 现算——这一档
+        NMPC 与 MHE 用**同一套**代数,两个求解器对同一质量给出同一姿态动力学。
+        载荷不在机上(未 attach / 已 drop)时装全零,退化回空机 J、c=0。"""
+        if not p.geom_coupled:
+            return np.concatenate([[self.dJ_est], self.c_est])
+        if not self.gripper_mode or not self.grip_mass_stepped:
+            return np.zeros(3)
+        # 'self' 释放模式:**不因 drop 清零**,让 c(m)/J(m) 随 m_est 自行熄灭
+        if self.grip_dropped and self.geom_release_mode != 'self':
+            return np.zeros(3)
+        if self.attach_offset is not None:
+            return np.asarray(self.attach_offset, dtype=float)
+        # 没收到 attach 几何:退回力臂参数 + 零偏心(与 legacy 兜底同一口径)
+        return np.array([0.0, 0.0, -self.grip_arm_d])
 
     def _payload_geometry(self, r_p):
         """由载荷相对机体的几何偏移 r_p=[rx,ry,rz](rz<0)算 (dJ, c_xy)。

@@ -25,7 +25,7 @@ from test_mhe_standalone import (  # noqa: E402
 np.random.seed(42)
 
 
-def _run_mhe(Y, U, m_init_guess, scheduler=None, event_frame=None):
+def _run_mhe(Y, U, m_init_guess, scheduler=None, event_frame=None, lam=1.0):
     """跟 test_mhe_standalone._run_mhe 相同的滑窗在线 MHE,唯一差别:
     scheduler 非 None 时,solve 前调 scheduler.apply()(事件触发降权)。
     每次调用都显式把全部 stage 恢复名义权重起步——两次运行共享同一个
@@ -35,9 +35,18 @@ def _run_mhe(Y, U, m_init_guess, scheduler=None, event_frame=None):
 
     # 显式复位名义权重(消除跨运行串扰)
     _reset = EventWeightScheduler()
-    solver.cost_set(0, 'W', _reset.W0_nom)
-    for j in range(1, N):
-        solver.cost_set(j, 'W', _reset.W_nom)
+    if lam < 1.0:
+        # 遗忘因子臂:逐 stage 按年龄打折 λ^(N-1-j),到达代价块不打折。
+        # **不用任何事件信号**——这正是要对比的点。
+        from scipy.linalg import block_diag as _bd
+        solver.cost_set(0, 'W', _bd(lam**(N-1)*mhe_p.R,
+                                    lam**(N-1)*mhe_p.Q, mhe_p.Q0))
+        for j in range(1, N):
+            solver.cost_set(j, 'W', (lam**(N-1-j)) * _reset.W_nom)
+    else:
+        solver.cost_set(0, 'W', _reset.W0_nom)
+        for j in range(1, N):
+            solver.cost_set(j, 'W', _reset.W_nom)
 
     if scheduler is not None and event_frame is not None:
         scheduler.notify_event(event_frame)
@@ -55,13 +64,18 @@ def _run_mhe(Y, U, m_init_guess, scheduler=None, event_frame=None):
 
         yref_0 = np.concatenate([y_win[0], np.zeros(nw), x0_bar])
         solver.set(0, 'yref', yref_0)
-        solver.set(0, 'p', u_win[0])
+        # model.p = [已知输入(4); 已知几何(3)](2026-07-07 加的 n_geom;
+        # 这两个测试当时漏改,一直报 'trying to set 4 parameters ... has 7'
+        # 直接退出——2026-08-24 修)。本测试是无载荷/居中场景,几何恒零:
+        # legacy 档 [dJ,cx,cy]=0,coupled 档 r_p=0,两档都退化回空机 J。
+        _GEOM0 = np.zeros(mhe_p.n_geom)
+        solver.set(0, 'p', np.concatenate([u_win[0], _GEOM0]))
         solver.set(0, 'x', x_guess[0])
 
         for j in range(1, N):
             yref = np.concatenate([y_win[j], np.zeros(nw)])
             solver.set(j, 'yref', yref)
-            solver.set(j, 'p', u_win[j])
+            solver.set(j, 'p', np.concatenate([u_win[j], _GEOM0]))
             solver.set(j, 'x', x_guess[j])
 
         solver.set(N, 'x', x_guess[N])
@@ -112,18 +126,27 @@ def _compare():
     m_fixed = _run_mhe(Y, U, m_init_guess=1.0)
     m_event = _run_mhe(Y, U, m_init_guess=1.0,
                        scheduler=EventWeightScheduler(), event_frame=event_frame)
+    # 遗忘因子臂(2026-08-24):**零外部信号**,靠逐 stage 年龄打折跟上突变。
+    lams = [float(x) for x in
+            os.environ.get('LAMBDAS', '0.95,0.9,0.8,0.7').split(',')]
+    m_lams = [(l, _run_mhe(Y, U, m_init_guess=1.0, lam=l)) for l in lams]
 
     t = np.arange(len(m_fixed)) * dt
-    return t, m_fixed, m_event, m_before, m_after, t_jump, duration
+    return (t, m_fixed, m_event, m_before, m_after, t_jump, duration, m_lams)
 
 
 def test_event_trigger_speeds_up_convergence():
-    t, m_fixed, m_event, m_before, m_after, t_jump, duration = _compare()
+    t, m_fixed, m_event, m_before, m_after, t_jump, duration, m_lams = _compare()
 
     ts_fixed = _settle_time(t, m_fixed, t_jump, m_after)
     ts_event = _settle_time(t, m_event, t_jump, m_after)
     print(f'固定权重  收敛时间 = {ts_fixed:.2f}s')
     print(f'事件触发  收敛时间 = {ts_event:.2f}s')
+    for _l, _m in m_lams:
+        _tl = _settle_time(t, _m, t_jump, m_after)
+        _sel = t > t_jump + 3.0
+        _err = float(np.nanmean(np.abs(_m[_sel] - m_after)))
+        print(f'遗忘 λ={_l:<5} 收敛时间 = {_tl:.2f}s  稳态误差 = {_err:.4f}kg  (零外部信号)')
 
     # 阶跃前精度不许劣化(事件触发在 t_jump 前根本不该动权重)
     pre = (t >= 3.0) & (t < t_jump - 0.5)
@@ -146,11 +169,16 @@ def test_event_trigger_speeds_up_convergence():
 
 
 if __name__ == '__main__':
-    t, m_fixed, m_event, m_before, m_after, t_jump, duration = _compare()
+    t, m_fixed, m_event, m_before, m_after, t_jump, duration, m_lams = _compare()
     ts_fixed = _settle_time(t, m_fixed, t_jump, m_after)
     ts_event = _settle_time(t, m_event, t_jump, m_after)
     print(f'固定权重  收敛时间 = {ts_fixed:.2f}s')
     print(f'事件触发  收敛时间 = {ts_event:.2f}s')
+    for _l, _m in m_lams:
+        _tl = _settle_time(t, _m, t_jump, m_after)
+        _sel = t > t_jump + 3.0
+        _err = float(np.nanmean(np.abs(_m[_sel] - m_after)))
+        print(f'遗忘 λ={_l:<5} 收敛时间 = {_tl:.2f}s  稳态误差 = {_err:.4f}kg  (零外部信号)')
 
     test_event_trigger_speeds_up_convergence()
     print('[PASS] test_event_trigger_speeds_up_convergence')

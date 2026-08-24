@@ -26,12 +26,52 @@ class MHEParams:
 
     # --- 状态维度 ---
     nx     = 13  # 飞行器物理状态: pos(3)+vel(3)+quat(4)+omega(3),跟 NMPC 的 x 完全一致
-    nm     = 1   # 待估参数: 质量 m
-    nx_aug = nx + nm  # MHE 自己优化的增广状态维度 = 14
-    nw     = nx  # 过程噪声维度,只加在 13 个物理状态上,质量这一维 m_dot=0(窗口内当常数)
+    nm     = 1   # 待估参数: 总质量 m_T
+    # 过程噪声维度。默认 = nx(只加在 13 个物理状态上,被估参数窗口内是刚性常数)。
+    # param_noise=True 时把被估参数(m、s)也纳入噪声驱动 → 随机游走,这是文献
+    # (NeuroMHE/DMHE)处理**突变参数**的标准做法:参数能在窗口内变化,突变不再
+    # 依赖"等旧数据滑出窗口"或外部事件降权。
+    # ⚠️ 2026-08-24 实测证明这不是可选项而是 2b 的**前提**:s 若 ṡ=0 刚性,drop
+    #    瞬间 s 还残留非零 → 模型预测幽灵配平力矩 (s/m)·T,而实测 ω≈0;优化器
+    #    消掉它的两条路是 s→0 或 **m→∞**(因为 c=s/m_T,质量在分母上),s 动不了
+    #    就只能 m 背锅——离线实测 m 单调爬到 3.17 不回头、s 在 0 附近逐帧变号。
+    param_noise = os.environ.get('MHE_PARAM_NOISE', '0') not in ('0', '', 'false', 'False')
+
+    # --- 遗忘因子 / 衰减记忆(2026-08-24)---
+    # 逐 stage 按"年龄"给测量+过程噪声权重打折:W_j = λ^(N-1-j)·blkdiag(R,Q),
+    # j=0 最老、j=N-1 最新。λ=1 逐位退回现状。
+    # 为什么是这个位置而不是"衰减到达代价":Q0 的质量项已经是 0.1(σ=3.16kg,
+    # 实质无先验),再弱化它没有意义;真正让质量刚性的是"ṁ=0 + 事件前老量测以
+    # 全权重把它往旧值拽"——所以要打折的是**老 stage 的 R/Q**。到达代价那一块
+    # 不打折(它锚的是物理状态,动它会伤状态估计)。
+    # 相对 param_noise(2a)的优势:**不增加状态、不新增噪声通道,Q 的标度一个字
+    # 没动** → 绕开 2026-08-24 实测那个"参数噪声权重 1e2 vs 物理 1e4~1e5、
+    # Hessian 病态 → 472 次求解失败"的坑。
+    # 有效记忆长度 ≈ 1/(1−λ) 个 stage:λ=0.9→10 帧(1.0s)、λ=0.8→5 帧(0.5s)。
+    # ⚠️ 顺带与既有证据一致:记忆 new-4ms-workpoint / mhe_params.N 注释记录过
+    #    "4 m/s 上 N=10 比 N=20 好 3.7 倍",衰减记忆是它的连续版(不硬截断、
+    #    QP 结构不变、到达代价仍在远端)。
+    forgetting_lambda = float(os.environ.get('MHE_LAMBDA', '1.0'))
+
     nu_known = 4  # 已知输入: 总推力 T + 力矩 tau_x,tau_y,tau_z(跟 NMPC 实际发出的指令一致,
                   # 通过 model.p 传入,不是被估计的量)
-    n_geom = 3    # 已知几何: 吊挂惯量增量 dJ(1)+ 复合质心水平偏移 c_xy(2)。
+    n_geom = 3    # 已知几何,**语义随 geom_coupled 切换**(维度都是 3,接口不变):
+                  #   geom_coupled=False(legacy):[dJ, cx, cy]——在窗外由
+                  #     mhe_node._payload_geometry 用某个 m_p_hat 先算好再喂进来,
+                  #     于是 ∂(dJ,c)/∂m ≡ 0,质量对 om_dot 没有任何导数通路。
+                  #   geom_coupled=True (2026-08-24):[rx, ry, rz]——**载荷相对
+                  #     机体原点的几何偏移**(attach 可测的量,不是被估的质量),
+                  #     模型内部按 m_P=m−m_B 现算 c(m)=(m_P/m)r_xy 与
+                  #     J(m)=J_B+μ(m)(|r|²I−rrᵀ),μ=m_B·m_P/m。这样质量同时出现在
+                  #     平动和转动两条通路里,MHE 的 Jacobian 才是一致的。
+                  # 数值依据(scratchpad/ident.py,N=20/dt=0.1 窗口的 Cramér-Rao 下界):
+                  #   ry=0.05 偏心悬停 σ_m: legacy 0.0109kg → coupled 0.0011kg(≈10×),
+                  #   且 coupled 下 94% 的质量信息来自转动通路;居中(r_xy=0)且不机动
+                  #   时两者相同(c≡0、ω̇≈0,转动通路本来就没信息)。
+                  # ⚠️ coupled 下 r_xy 的先验误差会**直接**变成质量偏差(转动通路辨识
+                  #   的其实是乘积 m_P·r_xy):实测 ry 给一半 → m 偏 +14.4%,ry 给 0 →
+                  #   +41.6%;而 rz 给错 ±33% → 质量偏差 0.00%(rz 只进 dJ,悬停 ω̇≈0
+                  #   时不携带信息)。所以 coupled 要求偏心量可测,rz 可以很糙。
                   # 跟 acados_model.py 的 dJ_sym/c_sym 同一套物理(平行轴定理+
                   # 推力对质心的力矩),照抄进 MHE 自己的 om_dot——2026-07-07
                   # 坏几何复测发现:MHE 内部动力学如果还用固定空机 J、不知道
@@ -94,6 +134,56 @@ class MHEParams:
     m_min = float(os.environ['MHE_M_MIN']) if os.environ.get('MHE_M_MIN') \
         else 0.95 * m_nominal   # ≈1.961 kg
     m_max = 5.0
+    # m_B 的显式别名:m_nominal 这个名字只说"名义",没说是**空机**质量。全仓
+    # 统一约定(2026-08-24):m_B=空机(已知常数)、m_P=载荷(未知)、m_T=m_B+m_P
+    # (MHE 估的就是它,即状态向量第 14 维和 self.m_est)。
+    m_B = m_nominal
+
+    # --- 几何-质量耦合开关(2026-08-24)---
+    # False(默认,与历史批次逐位一致):dJ/c_xy 由窗外算好当常参数喂进来。
+    # True:model.p 的几何槛位改装 r_p=[rx,ry,rz],J 与 c 在模型内部由被估质量
+    #   现算 → 质量进旋转动力学。见上面 n_geom 注释里的 CRLB 数字。
+    # 用环境变量而不是改默认值:①历史批次/论文数字必须能逐位复现;②切换会改
+    # model.f_expl_expr → acados 必须重新 codegen(codegen 目录名已带 -coupled
+    # 后缀,两档各自独立缓存,不会互相覆盖,可以并发)。
+    geom_coupled = os.environ.get('MHE_GEOM_COUPLED', '0') not in ('0', '', 'false', 'False')
+    # 载荷自身惯量的回转半径平方 k_I [m²]:J_P = k_I·m_P·I₃(点质量模型取 0)。
+    # gripper 场景 box 的 SDF 惯量是 0.00375·m_P·I₃(见 run_gripper_headless.sh),
+    # 相对 dJ≈0.058 只有 2%,默认按点质量忽略;要更严格就设 MHE_PAYLOAD_KI。
+    payload_ki = float(os.environ.get('MHE_PAYLOAD_KI', '0.0'))
+    # m_P=m−m_B 的平滑正部宽度 [kg]:m 的下界 m_min=0.95·m_B 允许 m<m_B(留标定
+    # 裕度),此时 m_P<0 会让 μ<0、进而 J_xx+dJ 变负 → 1/J 爆掉。用
+    # m_P⁺=½(Δ+√(Δ²+ε²)) 做光滑正部,既保证 J≻0 又处处可微(硬 max 会让
+    # Gauss-Newton 在 Δ=0 附近抖)。
+    mp_pos_eps = 0.02
+
+    # --- 一阶质量矩增广(2b,2026-08-24)---
+    # 动机(实测驱动,不是设计洁癖):geom_coupled + geom_release_mode='self' 实测
+    # 能让几何自行熄灭、不需要告知 drop,**但 drop 后 m_est 系统性偏低 −2.81%、
+    # 55 个采样里 14 个贴在 m_min 上**。机理:杆臂 r_p 还在模型里,要让幽灵偏心
+    # 消失,优化器唯一的办法是把 m_P⁺ 压到 0 → 把 m 压到 m_B 以下 → 一路探到下界。
+    # 也就是说"载荷在不在"这个信息被硬编码进了质量,两者纠缠。
+    #
+    # 修法:把**一阶质量矩** s=m_P·r_xy [kg·m] 直接增广成状态(2 维)。于是
+    #   c_xy = s/m_T                      ← 不再需要 r_xy,也不含 m_P 作除数
+    #   非对角惯量 = (m_B/m_T)·s·r_z      ← m_P 恰好约掉
+    #   μ·r_z² 项 = (m_B·m_P/m_T)·r_z²    ← 只需弱先验 r_z(实测 ±33% 对质量零影响)
+    #   O(r_xy²) 项 = (m_B/(m_T·(m_P+δ)))·s_i·s_j  ← 占 dJ 仅 2.2%,用 δ 正则化
+    # 好处有两条,都对得上已有实测:
+    #   ①drop 后 s 自己趋零(它有独立观测 τ_phys/T,B.3 验过 <2%),m 不再被逼向下界;
+    #   ②消掉"转动通路辨识的是乘积 m_P·r_xy、r_xy 先验错 20% → 质量偏 3.5%"这个风险
+    #     ——现在那个乘积本身就是被估量,不需要先验。
+    # s 的动力学 ṡ=0(窗口内常数,与 m 同待遇),不加过程噪声;要不要给它/给 m 加
+    # 随机游走(文献 NeuroMHE/DMHE 的做法)是**另一件事**(2a),不在这里做。
+    estimate_moment = os.environ.get('MHE_ESTIMATE_MOMENT', '0') not in ('0', '', 'false', 'False')
+    ns = 2 if estimate_moment else 0     # 一阶质量矩 s=[s_x,s_y]
+    # r_z 弱先验 [m](载荷挂在机体下方的深度)。只进 μ·r_z² 与非对角项,实测
+    # ±33% 误差对质量估计零影响,所以给个档位标称值就够,不需要测。
+    rz_prior = float(os.environ.get('MHE_RZ_PRIOR', '-0.47'))
+    # s 的箱约束:|s| <= m_P_max * r_max。给宽松值,只防优化器跑飞。
+    s_abs_max = float(os.environ.get('MHE_S_ABS_MAX', '1.5'))
+    # O(r_xy²) 项分母的正则化 [kg],防 m_P→0 时 0/0。
+    mp_div_eps = 0.02
 
     # --- 测量噪声标准差(用于标定 R 权重,也用于独立测试脚本生成合成噪声) ---
     # 数量级参照 PX4 EKF2 融合 VIO/GPS 后典型的状态估计精度,不是实测值。
@@ -142,6 +232,22 @@ class MHEParams:
         1e2, 1e2, 1e2,
         0.1,                   # 质量,软锚定
     ])
+    if estimate_moment:
+        # s 的到达代价:σ_s=0.1 kg·m → 权重 100。带载典型值 m_P·r_y≈0.3*0.14=0.042,
+        # 所以 0.1 已是"很弱的锚"(2.4 倍典型值),drop 后不拖累 s 归零。
+        Q0 = np.diag(np.concatenate([np.diag(Q0), [1/0.1**2, 1/0.1**2]]))
+
+    nx_aug = nx + nm + ns   # 14(仅估质量) 或 16(+一阶质量矩)
+    nw = nx + (nm + ns if param_noise else 0)
+    if param_noise:
+        # 参数随机游走的强度。1/σ² 形式:σ_m 是"每秒允许的质量漂移量"[kg/s],
+        # σ_s 同理 [kg·m/s]。取值理由:一次 attach/drop 是 0.3kg 的阶跃,要在
+        # ~0.3s 内跟上就需要 σ_m ≈ 1 kg/s;给 0.5 留一点余量不至于噪声期漂太狠。
+        # ⚠️ 这个值直接换掉"稳态方差 vs 突变跟踪速度"的工作点,是 2a 的主旋钮。
+        sigma_m_dot = float(os.environ.get('MHE_SIGMA_M_DOT', '0.5'))
+        sigma_s_dot = float(os.environ.get('MHE_SIGMA_S_DOT', '0.05'))
+        _qp = [1 / sigma_m_dot ** 2] * nm + [1 / sigma_s_dot ** 2] * ns
+        Q = np.diag(np.concatenate([np.diag(Q), _qp]))
 
 
 p = MHEParams()

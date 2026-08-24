@@ -103,14 +103,52 @@ if [ -n "$FOLLOW_TARGET" ] && command -v gz >/dev/null 2>&1; then
     sleep 2
   done
   if [ $FOLLOW_OK -eq 0 ]; then
-    gz service -s /gui/follow/offset --reqtype gz.msgs.Vector3d \
-       --reptype gz.msgs.Boolean --timeout 3000 \
-       --req "$FOLLOW_OFF" >/dev/null 2>&1 || true
-    echo ">>> Gazebo 相机已跟随 $FOLLOW_TARGET (offset: $FOLLOW_OFF)"
+    # ⚠️2026-08-23:offset 原来是"发一次 + || true",不校验返回。实测 /gui/follow
+    # 刚重试成功时 GUI 还没准备好接 offset,这一发静默丢掉 -> 相机用 gz 默认跟随
+    # 距离,成片里无人机只有几十个像素(跟"完全没跟随"肉眼几乎分不出,判据是
+    # 地平线会随机体转动)。和 follow 一样加重试 + 校验 data: true。
+    OFF_OK=1
+    for _try in 1 2 3 4 5; do
+      gz service -s /gui/follow/offset --reqtype gz.msgs.Vector3d \
+         --reptype gz.msgs.Boolean --timeout 3000 \
+         --req "$FOLLOW_OFF" 2>/dev/null | grep -q 'data: true' \
+        && { OFF_OK=0; break; }
+      sleep 2
+    done
+    if [ $OFF_OK -eq 0 ]; then
+      # ⚠️2026-08-23 take2:服务返回 data: true,画面却仍是远景(无人机约 20px,
+      # 按视场角反推距离 ~30m 而非 offset 说的 6m)——offset 像是被 follow 刚生效
+      # 那阵的状态吃掉了。等相机稳下来再补发一次,成本几乎为零。
+      sleep 3
+      gz service -s /gui/follow/offset --reqtype gz.msgs.Vector3d \
+         --reptype gz.msgs.Boolean --timeout 3000 \
+         --req "$FOLLOW_OFF" >/dev/null 2>&1 || true
+      echo ">>> Gazebo 相机已跟随 $FOLLOW_TARGET (offset: $FOLLOW_OFF, 已补发一次)"
+    else
+      echo "!!! 相机跟随已生效但 offset 设置失败 —— 成片里无人机会很小,建议重录"
+    fi
   else
     echo "!!! 相机跟随服务调用失败 —— 请手动在 Gazebo 里右键 $FOLLOW_TARGET"
     echo "    选 Follow,再用滚轮拉近。不然成片里无人机只有几个像素。"
   fi
+fi
+
+# 3c. 相机二次校正(2026-08-23 定案)。上面那次 offset **服务返回 data: true 却常常
+#     不生效** —— 08-23 take2/take3 连续两轮画面都是 30~40m 远景。同一条命令等仿真
+#     跑起来后手动发就必定生效(实测无人机从十几像素变成清晰可辨),所以这是**时机**
+#     问题不是参数问题:开录前 GUI 刚起来,follow 还没稳,offset 被丢掉。
+#     放到开录后 8s 再补一遍,那时画面已在录,但任务 t<0(k0 实测 21~26s),
+#     compose 会把这段 preroll 连同相机跳变一起切掉。
+if [ -n "$FOLLOW_TARGET" ] && command -v gz >/dev/null 2>&1; then
+  ( sleep 8
+    gz service -s /gui/follow --reqtype gz.msgs.StringMsg \
+       --reptype gz.msgs.Boolean --timeout 3000 \
+       --req "data: \"$FOLLOW_TARGET\"" >/dev/null 2>&1
+    sleep 2
+    gz service -s /gui/follow/offset --reqtype gz.msgs.Vector3d \
+       --reptype gz.msgs.Boolean --timeout 3000 \
+       --req "$FOLLOW_OFF" >/dev/null 2>&1
+  ) &
 fi
 
 # 4. 开录。rec_start 必须紧贴 ffmpeg 启动那一刻取,后面对齐全靠它

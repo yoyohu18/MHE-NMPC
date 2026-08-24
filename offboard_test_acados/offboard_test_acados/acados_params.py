@@ -4,6 +4,8 @@
 # Q/R/P/N/dt 是 NMPC 自己的代价函数和时域设置,故意跟 offboard_test 独立、各自能调,
 # 调一个控制器的参数不该悄悄影响另一个。
 
+import os
+
 import numpy as np
 from offboard_test.nmpc_node import Params as _BaseParams
 
@@ -38,6 +40,27 @@ class AcadosParams:
                              # 实测电机能输出的偏航力矩本来就比横滚/俯仰小
                              # Yaw torque limit (Nm), much smaller than tau_max (0.2 vs 0.5) —
                              # motors simply can't produce as much yaw torque as roll/pitch
+    # --- 质量符号约定(2026-08-24 全仓统一)---
+    # m_B = 空机质量(已知常数,就是上面的 m);m_P = 载荷质量(未知);m_T = m_B+m_P。
+    # NMPC 里 model.p 的质量槛位装的是 **m_T**(来自 MHE 的 self.m_est);p.m 只在
+    # "空机标定值/兜底初值/Tmax 基准"这三处出现,永远是 m_B。
+    m_B = _base.m
+
+    # --- 几何-质量耦合开关(2026-08-24,与 mhe_params.geom_coupled 同一套物理)---
+    # False(默认,历史批次逐位复现):model.p 的几何槛位 = [dJ, cx, cy],由
+    #   acados_nmpc_node 在窗外算好;J/c 与 model.p 里的质量无函数关系。
+    # True:几何槛位 = [rx, ry, rz](载荷相对机体原点的偏移),J(m)/c(m) 在模型
+    #   内部由质量槛位现算(完整 3x3 平行轴定理,含非对角项)。
+    # 控制器侧的取舍与估计器侧**不同**,别无脑一起开:MHE 打开耦合是纯收益
+    #   (它需要 dw_dot/dm 这条导数通路才能辨识质量);NMPC 打开耦合会把 c 重新绑回
+    #   m_est(c=(m_P/m)r_xy),而 B.3 的结论正好是"c 用 tau_phys 反算的在线观测比
+    #   用 m_est 推更鲁棒"(记忆 b3-strong-closed-loop-dr)。所以推荐组合是
+    #   MHE 耦合 + NMPC 几何仍走 online 观测;NMPC 耦合档留给"只有弱先验、拿不到
+    #   在线 c 观测"的场景,以及对照实验。
+    geom_coupled = os.environ.get('NMPC_GEOM_COUPLED', '0') not in ('0', '', 'false', 'False')
+    payload_ki = float(os.environ.get('NMPC_PAYLOAD_KI', '0.0'))
+    mp_pos_eps = 0.02
+
     nx = 13  # 状态维度: pos(3)+vel(3)+quat(4)+omega(3) = 13
               # State dimension: pos(3)+vel(3)+quat(4)+omega(3) = 13
     nu = 4   # 控制维度: 总推力 T(1) + 力矩 tau_x,tau_y,tau_z(3) = 4

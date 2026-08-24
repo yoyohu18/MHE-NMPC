@@ -11,7 +11,9 @@
 #
 # 用法:  [GRIP_PAYLOAD_KG=0.3 GRIP_ECC_Y=0.10 METHOD=thetastar GRIP_DYN_R=5.0 \
 #          GRIP_DYN_W=0.283 GRIP_DYN_DZ=0.8 GRIP_DROP_AFTER=55.0 \
-#          GRIP_DROP_AT_TIP=true GRIP_DYNAMIC=true] \
+#          GRIP_DROP_AT_TIP=true GRIP_DYNAMIC=true \
+#          GRIP_GEOM_MP_PRIOR=0.3 GRIP_PAYLOAD_PRIOR=0.3 \
+#          MHE_CONFIRM_PRIOR=0.3 MHE_CONFIRM_ALPHA=0.9875] \
 #          bash src/scripts/gripper/run_sitl_gripper_viz.sh
 #        GRIP_DYN_DZ=0 可退回原来的平面 8 字。
 # 收栈:关掉各 gnome-terminal 窗口即可;或 pkill -9 -f 'px4_sitl|gz sim|mhe_node|...'。
@@ -21,6 +23,12 @@ PAYLOAD_KG="${GRIP_PAYLOAD_KG:-0.3}"
 # 与 run_gripper_headless.sh 保持一致——2026-07-20 发现这个可视化脚本漏传该参数,
 # 会静默退回耦合路径(floor 兜底),导致"看到的行为"和"实验数据"跑的不是同一套架构。
 GEOM_MP_PRIOR="${GRIP_GEOM_MP_PRIOR:-$PAYLOAD_KG}"
+# NMPC 侧的同类操作先验:attach 瞬间用它一次性初始化 dJ 与 PX4 内环增益
+# (不等 MHE 收敛,见 acados_nmpc_node._grip_attach_phase 的 geom_source=online
+# 分支)。2026-08-22:原来这里硬编码 0.3,GRIP_PAYLOAD_KG 改档时不跟着走,
+# 和 run_gripper_headless.sh(grip_payload_prior:=$GRIP_GEOM_MP_PRIOR_D)不是
+# 同一套先验;现改为默认跟随 GEOM_MP_PRIOR,单独覆盖用 GRIP_PAYLOAD_PRIOR。
+PAYLOAD_PRIOR="${GRIP_PAYLOAD_PRIOR:-$GEOM_MP_PRIOR}"
 ECC_Y="${GRIP_ECC_Y:-0.10}"
 METHOD="${METHOD:-M0}"                 # M0 | thetastar
 # ⚠️2026-07-31:默认从 thetastar 改为 M0。M0 才是主线部署配置
@@ -87,15 +95,25 @@ Z_HIGH_D=$(_f2d "$Z_HIGH"); LIFT_DUR_D=$(_f2d "$LIFT_DUR")
 DROP_AFTER_D=$(_f2d "$DROP_AFTER")
 ECC_Y_D=$(_f2d "$ECC_Y"); PAYLOAD_KG_D=$(_f2d "$PAYLOAD_KG")
 GEOM_MP_PRIOR_D=$(_f2d "$GEOM_MP_PRIOR")
+PAYLOAD_PRIOR_D=$(_f2d "$PAYLOAD_PRIOR")
 ATTACH_WINDOW_SEC_D=$(_f2d "${ATTACH_WINDOW_SEC:-40.0}")
 BOX_I=$(python3 -c "print(f'{$PAYLOAD_KG * 0.00375:.6f}')")
 R_XY=$(python3 -c "print(f'{max(0.20, $ECC_Y + 0.08):.3f}')")
 
 if [ "$METHOD" = thetastar ]; then
-  THETA="[-4.8038,-1.2080,0.4930,-0.9602,0.9875]"; CALPHA="0.9875"; CPRIOR="$PAYLOAD_KG"
+  THETA="[-4.8038,-1.2080,0.4930,-0.9602,0.9875]"; CALPHA="0.9875"
+  CPRIOR="${MHE_CONFIRM_PRIOR:-$PAYLOAD_KG}"
 else
-  THETA="[-4.0,0.0,0.0,0.0]"; CALPHA="-1.0"; CPRIOR="0.3"
+  THETA="[-4.0,0.0,0.0,0.0]"; CALPHA="-1.0"
+  # CALPHA<0 → 阈值走固定 event_confirm_thresh_n,CPRIOR 此时不被消费。
+  CPRIOR="${MHE_CONFIRM_PRIOR:-0.3}"
 fi
+# α 与 θ 正交(ParametricWeightSchedule 只读 theta[0..3],α 走独立参数)——
+# run_gripper_headless.sh 早就是两个独立环境变量,viz 这边却把它们绑死在 METHOD
+# 分支里,导致"想让 confirm_payload_prior 生效"只能连带切到已被析因消融证伪的
+# θ*(见记忆 cem-benefit-refuted)。2026-08-22 解绑:MHE_CONFIRM_ALPHA 可单独
+# 覆盖,于是能跑 run_alpha_only_ablation.sh 里的 alphaonly 臂 = M0 节奏 + α 阈值。
+CALPHA="${MHE_CONFIRM_ALPHA:-$CALPHA}"
 
 WS="/home/clear/ros2_ws_HJH"
 PX4_DIR="/home/clear/PX4-Autopilot"
@@ -140,14 +158,26 @@ sed -e "s|<mass>[0-9.]*</mass>|<mass>$PAYLOAD_KG</mass>|" \
     "$WORLD_SRC" > "$PX4_WORLDS/gripper_test.sdf"
 echo "world -> box mass=$PAYLOAD_KG I=$BOX_I ; method=$METHOD ecc=$ECC_Y drop_after=$DROP_AFTER dynamic=$DYNAMIC"
 
+# 日志终端的窗口位置(2026-08-23):这 4 个 gnome-terminal 是**后起**的,z-order 必然
+# 压在先起的 Gazebo 之上。08-23 take2 就是这么废掉的——Gazebo 落到副屏,4 个终端
+# (+1944+27 / +1994+77 / +2039+144 / +2853+144)正好级联盖住它的 3D 视图核心区,
+# 整半屏没法用。而 Gazebo 落哪块屏又不受控(gui.config 的 position_x 时灵时不灵)。
+# DEMO_TERM_BOTTOM=1 把 4 个终端钉到两块屏的**底部窄条**,那里本来就是 Gazebo 的
+# 播放条 / RViz 的状态栏,裁剪时反正要切掉。默认空 = 保持原行为不变。
+TG0=(); TG1=(); TG2=(); TG3=()
+if [ "${DEMO_TERM_BOTTOM:-0}" = 1 ]; then
+  TG0=(--geometry=100x2+0+960);    TG1=(--geometry=100x2+900+960)
+  TG2=(--geometry=100x2+1920+960); TG3=(--geometry=100x2+2820+960)
+fi
+
 # 1. PX4 SITL + Gazebo(GUI 可见:HEADLESS 不设)
-gnome-terminal --title="Gazebo (gripper viz)" -- bash -c \
+gnome-terminal --title="Gazebo (gripper viz)" "${TG0[@]}" -- bash -c \
   "export GZ_SIM_SYSTEM_PLUGIN_PATH='$GZ_SIM_SYSTEM_PLUGIN_PATH' && \
    cd '$PX4_DIR' && PX4_GZ_WORLD=gripper_test PX4_GZ_NO_FOLLOW=1 make px4_sitl gz_x500; exec bash"
 
 # 2. QGC(解锁所需 GCS 心跳)
 pkill -9 -f QGround 2>/dev/null || true; sleep 1
-gnome-terminal --title="QGroundControl" -- bash -c "~/QGroundControl.AppImage; exec bash"
+gnome-terminal --title="QGroundControl" "${TG1[@]}" -- bash -c "~/QGroundControl.AppImage; exec bash"
 echo "booting PX4 + Gazebo GUI..."; sleep 18
 
 # 3. MAVROS
@@ -167,11 +197,11 @@ nohup bash -c "source /opt/ros/jazzy/setup.bash && source '$WS/install/setup.bas
 sleep 10
 
 # 5. RViz2(控制端:figure8 参考 vs 实际 + NMPC 预测 horizon + drone 模型)
-gnome-terminal --title="RViz2 (gripper trajectories)" -- bash -c \
+gnome-terminal --title="RViz2 (gripper trajectories)" "${TG2[@]}" -- bash -c \
   "source /opt/ros/jazzy/setup.bash && rviz2 -d '$RVIZ_CONFIG'; exec bash"
 
 # 6. drone 模型 TF + 旋翼动画(RViz 里的 RobotModel + 转动旋翼)
-gnome-terminal --title="Drone Model + Rotors" -- bash -c \
+gnome-terminal --title="Drone Model + Rotors" "${TG3[@]}" -- bash -c \
   "source /opt/ros/jazzy/setup.bash && source '$WS/install/setup.bash' && trap 'kill 0' EXIT; \
    ros2 run robot_state_publisher robot_state_publisher \
      --ros-args -p robot_description:=\"\$(cat '$URDF_FILE')\" & \
@@ -197,7 +227,8 @@ nohup bash -c "source /opt/ros/jazzy/setup.bash && source '$WS/install/setup.bas
     -p grip_z_low:=0.55 -p grip_z_high:=$Z_HIGH_D \
     -p grip_mass_step_sec:=0.0 -p grip_payload_mass:=$PAYLOAD_KG_D -p grip_arm_d:=0.47 \
     -p grip_lift_after_sec:=1.5 -p grip_lift_dur:=$LIFT_DUR_D -p use_mhe:=true \
-    -p geom_source:=online -p grip_payload_prior:=0.3 \
+    -p geom_source:=online -p grip_payload_prior:=$PAYLOAD_PRIOR_D \
+    -p geom_release_mode:=${NMPC_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-event}} \
     -p grip_drop_after_sec:=$DROP_AFTER_D \
     -p grip_dynamic_after_lift:=$DYNAMIC \
     -p grip_dyn_r:=$DYN_R_D -p grip_dyn_w:=$DYN_W_D -p grip_dyn_ramp:=$DYN_RAMP_D \
@@ -215,7 +246,10 @@ nohup bash -c "source /opt/ros/jazzy/setup.bash && source '$WS/install/setup.bas
     -p event_trigger_enable:=true -p schedule_theta:='$THETA' \
     -p confirm_thresh_alpha:=$CALPHA -p confirm_payload_prior:=$CPRIOR \
     -p grip_geom_mp_floor:=0.15 -p c_xy_est_enable:=true \
-    -p grip_geom_mp_prior:=$GEOM_MP_PRIOR_D" \
+    -p grip_geom_mp_prior:=$GEOM_MP_PRIOR_D \
+    -p eval_true_payload_mass:=$PAYLOAD_KG_D \
+    -p geom_release_mode:=${MHE_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-event}} \
+    -p event_signal_mode:=${MHE_SIGNAL_MODE:-external}" \
   > "$MHE_LOG" 2>&1 &
 
 echo "All components up. Gazebo GUI = 物理飞行; RViz = 控制端跟踪。"

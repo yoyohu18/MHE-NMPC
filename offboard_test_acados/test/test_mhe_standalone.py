@@ -115,13 +115,18 @@ def _run_mhe(Y, U, m_init_guess):
 
         yref_0 = np.concatenate([y_win[0], np.zeros(nw), x0_bar])
         solver.set(0, 'yref', yref_0)
-        solver.set(0, 'p', u_win[0])
+        # model.p = [已知输入(4); 已知几何(3)](2026-07-07 加的 n_geom;
+        # 这两个测试当时漏改,一直报 'trying to set 4 parameters ... has 7'
+        # 直接退出——2026-08-24 修)。本测试是无载荷/居中场景,几何恒零:
+        # legacy 档 [dJ,cx,cy]=0,coupled 档 r_p=0,两档都退化回空机 J。
+        _GEOM0 = np.zeros(mhe_p.n_geom)
+        solver.set(0, 'p', np.concatenate([u_win[0], _GEOM0]))
         solver.set(0, 'x', x_guess[0])
 
         for j in range(1, N):
             yref = np.concatenate([y_win[j], np.zeros(nw)])
             solver.set(j, 'yref', yref)
-            solver.set(j, 'p', u_win[j])
+            solver.set(j, 'p', np.concatenate([u_win[j], _GEOM0]))
             solver.set(j, 'x', x_guess[j])
 
         solver.set(N, 'x', x_guess[N])
