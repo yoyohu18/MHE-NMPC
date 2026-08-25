@@ -44,6 +44,14 @@ from .straight_reference import (
 from .acados_params import YAW_RATE_K, p, scaled_stage_terminal_W
 from .acados_solver_builder import ensure_acados_ocp_solver
 from .l1_adaptive import L1Augmentation
+
+# 转子标定常数。**必须与 mhe_node.py 顶部的同名常数保持一致**——两处各自硬编码
+# 是沿用既有风格(避免 nmpc_node import mhe_node 拖进整个节点类),改一处必须改另
+# 一处。用途:从电机转速反算实测推力 T_phys 与实测体力矩 tau_phys。
+MOTOR_CONSTANT = 8.54858e-06
+ROTOR_X = np.array([0.174, -0.174,  0.174, -0.174])   # motorNumber 0..3 机体 x
+ROTOR_Y = np.array([-0.174, 0.174,  0.174, -0.174])   # 同上 y
+TORQUE_SIGN = 1.0
 from .mhe_params import p as mhe_p
 
 
@@ -261,6 +269,39 @@ class AcadosNMPCNode(Node):
             omega_c=float(self.get_parameter('l1_omega_c').value))
         self._l1_last_stamp = None      # odom 时间戳(算实际 dt,防墙钟/仿真钟混用)
         self._l1_log_count = 0
+
+        # ---- 转动 lumped 扰动通道 xi(2026-08-25)----
+        # 补齐 Hanover RA-L 2021 的 matched uncertainty σ_m=[ς_z, ξ_x, ξ_y, ξ_z]:
+        # 07-23 只做了平动那一半(d_lumped),转动这三维一直缺着,om_dot 里的模型
+        # 误差(dJ 先验错、c_xy 先验错、未建模气动力矩)因此无处可去,只能靠先验准。
+        # **独立于 control_mode**:主线 mhe 模式下同样可开——这正是目的,让 NMPC
+        # 的 dJ 先验降级成"可以给错的值"。默认 False → model.p 的 xi 槽恒零,
+        # 逐位退回历史行为。
+        self.declare_parameter('tau_lumped_enable', False)
+        self.tau_lumped_enable = bool(
+            self.get_parameter('tau_lumped_enable').value)
+        # xi 限幅 [rad/s²]。**40 不是拍脑袋**:0.3kg@0.47m 的 dJ=0.0663 是空机
+        # Jxx=0.0142 的 4.7 倍,若 dJ 先验完全不给,补偿量 |xi| = τ·(1/J_true −
+        # 1/J_nom) 随力矩线性涨——test_tau_lumped_standalone.py 实测 τ=0.35Nm
+        # (70% tau_max)就要 20.3、τ=tau_max 要 29.0。首版设 20 会在大机动时
+        # **静默截断**(限幅了也不报错,只表现为补偿不足),故放到 40 留余量。
+        self.declare_parameter('xi_max', 40.0)
+        # 转动通道的补偿低通截止,**与平动的 l1_omega_c 分开**:平动那个 0.5 是
+        # C.1 扫参定的,机制是"omega_c 高 → 与外环位置带宽耦合 → z 振荡炸机";
+        # 转动 xi 进的是力矩通道、直接面对 PX4 速率内环(带宽高得多),约束不同源,
+        # 不该被平动的结论绑住。默认仍取 0.5 保守起步(实测收敛 5.06s);attach
+        # 瞬态若嫌慢就扫这个参数(1.0→2.77s、2.0→1.71s,见 standalone 测试)。
+        self.declare_parameter('xi_omega_c', 0.5)
+        self.xi_lumped = np.zeros(3)
+        # dim=2:只估 roll/pitch。dJ 只进 Jxx/Jyy(见 acados_model 的 J_vec),
+        # yaw 通道不受 dJ 先验影响;且 tau_phys 的 yaw 分量是 0 占位,若把 yaw
+        # 也交给 L1,真实 yaw 力矩会被整个当成扰动积到限幅。
+        self.l1_rot = L1Augmentation(
+            a_gain=float(self.get_parameter('l1_a_gain').value),
+            omega_c=float(self.get_parameter('xi_omega_c').value),
+            dim=2, d_max=float(self.get_parameter('xi_max').value))
+        self._l1_rot_last_stamp = None
+        self._l1_rot_log_count = 0
         # a_nom 的推力项用**电机转速反算的实际推力**,绝不用 last_u_opt(NMPC
         # 指令)——首版实测(2026-07-23,grip_nmpc_162421)用指令推力在 lift 段
         # 自激炸机:T 快变时 10Hz 零阶保持的指令与实际差一大截 → a_nom 错 →
@@ -268,9 +309,59 @@ class AcadosNMPCNode(Node):
         # 07-13 拍板"观测量用电机转速反算、不用 NMPC 指令"要避开的"估计↔模型"
         # 自举,在 L1 上重演了一次。口径与 mhe_node 完全同源:
         # T_phys = MOTOR_CONSTANT·Σω²(k 两侧抵消性质同样成立)。
-        if self.control_mode == 'l1':
+        # ---- ω_cmd 缩放:增益调度的等效实现(2026-08-25)----
+        # 发给 PX4 的是 body_rate setpoint 不是力矩(见 publish_attitude),PX4 速率环
+        # 产生 τ = K(ω_cmd − ω)。真实惯量 J_t 下角加速度 = K(ω_cmd−ω)/J_t,比期望
+        # 小 J_t/J_a 倍。把 **setpoint 误差**放大同样倍数:
+        #     ω_cmd' = ω + (Ĵ_t/J_a)·(ω_cmd − ω)
+        # 数学上等价于把速率环增益乘 Ĵ_t/J_a,但**完全在本进程内、每帧可变**,
+        # 不碰 PX4 参数 —— 绕开了 [drop-disturbance-fix] 证伪过的那条路的三个硬伤:
+        # ParamSetV2 异步往返延迟、参数在 PX4 侧阶跃生效、写入触发落盘 I/O。
+        # 同源做法见 FlyAware(RA-L 2026, arXiv:2601.22686)的 IAGS:
+        # K_k = J_a^{-1}·Ĵ_t 乘在 PID 之外,使开环传函与 J_t 无关。
+        #
+        # ⚠️ **与 scale_px4_rate_gains 互斥**:两者补的是同一件事,同时开 = 双重
+        #    补偿,循环增益翻倍。2026-08-25 的 xi 通道就是栽在双重补偿上(标称模型
+        #    用空机 J 而 NMPC 模型已含 dJ,当场坠机 70m)。这里直接在代码里互锁,
+        #    不靠使用者记得。
+        #
+        # ⚠️ **不是完全等价**:PX4 速率环的 D 项是对**测量**微分(不是误差微分,
+        #    避免 setpoint 跳变),所以放大 setpoint 误差只等效放大了 P 和 I,
+        #    D 不跟着涨 → 比例越大相对阻尼越低。5× 时这个差异不小,必要时把
+        #    MC_*RATE_D 一次性(不是连续)设到匹配值。
+        self.declare_parameter('omega_scale_enable', False)
+        # 缩放因子来源:'thrust' = T_phys/g 反推有效承重(用户要的"跟着承重连续爬",
+        # attach 渐进承重期间飞机近悬停,此时 T_phys/g ≈ 有效总质量);
+        # 'mest' = 用 MHE 的 m_est。两者都再经同一套几何代数换成惯量比。
+        self.declare_parameter('omega_scale_source', 'thrust')
+        # 一阶低通时间常数 [s]。T_phys 有噪声、机动时还含向心分量,直接喂会让
+        # setpoint 抖。0.5s 起步(远慢于速率环、快于 attach 承重过程)。
+        self.declare_parameter('omega_scale_tau', 0.5)
+        # 比例上限,与 _scale_px4_rate_gains 的 cap 同值同理由(防惯量估计异常时
+        # 把内环推成高频震荡)。
+        self.declare_parameter('omega_scale_cap', 5.0)
+        self.omega_scale_enable = bool(
+            self.get_parameter('omega_scale_enable').value)
+        self.omega_scale_source = str(
+            self.get_parameter('omega_scale_source').value).lower()
+        self.omega_scale_tau = float(self.get_parameter('omega_scale_tau').value)
+        self.omega_scale_cap = float(self.get_parameter('omega_scale_cap').value)
+        self.omega_scale = 1.0              # 当前(已低通)比例,1.0=不缩放
+        self._omega_scale_stamp = None
+        self._omega_scale_clip_warned = False
+        if self.omega_scale_enable:
+            self.get_logger().info(
+                f'OMEGA SCALE: on (source={self.omega_scale_source}, '
+                f'tau={self.omega_scale_tau:.2f}s, cap={self.omega_scale_cap:.1f}) '
+                '— 增益调度走 setpoint 侧,PX4 参数不动')
+
+        _need_motor = (self.control_mode == 'l1' or self.tau_lumped_enable
+                       or (self.omega_scale_enable
+                           and self.omega_scale_source == 'thrust'))
+        if _need_motor:
             from actuator_msgs.msg import Actuators
             self._l1_T_phys = None      # None=还没收到转速,L1 不推进(起飞前安全)
+            self._l1_tau_phys = None    # 同上,转动通道用
             self.declare_parameter('motor_speed_topic',
                                    '/x500_0/command/motor_speed')
             self.create_subscription(
@@ -280,6 +371,17 @@ class AcadosNMPCNode(Node):
             self.get_logger().info(
                 f'CONTROL MODE: l1 (a={self.l1.a:.1f}, omega_c={self.l1.omega_c:.1f}'
                 f') — m_est 固定 {p.m}kg,几何/增益缩放停用,平动扰动走 d_lumped')
+        if self.tau_lumped_enable and p.geom_coupled:
+            self.tau_lumped_enable = False
+            self.get_logger().warn(
+                'TAU LUMPED 与 geom_coupled 档不兼容(coupled 档的 J/c 由模型内部'
+                '按 m_est 现算,标称侧要复刻那套代数会引入第二份实现)——已自动关闭 xi。')
+        if self.tau_lumped_enable:
+            self.get_logger().info(
+                f'TAU LUMPED: on (a={self.l1_rot.a:.1f}, '
+                f'omega_c={self.l1_rot.omega_c:.1f}, xi_max='
+                f'{self.l1_rot.d_max:.1f}rad/s^2, roll/pitch only) — '
+                'om_dot 的模型误差交给 xi 吸收')
 
         # "投放包裹"场景,第三版实现(前两版分别撞上了"独立 dynamic 刚体致命
         # 飞不起来"和"DetachableJoint 在同模型内 self-reference 不生效"两个
@@ -365,13 +467,71 @@ class AcadosNMPCNode(Node):
         # (见 acados_model.py dJ_sym)。跟 attach 时的 dz(proximity 日志里)
         # 对齐:当前窗口 h_min/h_max=[0.35,0.60],短臂稳态 dz≈0.47m。
         self.declare_parameter('grip_arm_d', 0.47)
-        # 抓取载荷操作先验 [kg](B.3 Phase2 online 模式用):强闭环估计滞后于物理
-        # attach 事件(m_est/c_xy 要 1-2s 才收敛),这期间若内环增益不足 0.3kg 偏心
-        # 惯量就会崩(实测炸机)。故 attach 瞬间用这个**操作先验**(部署已知"包裹
-        # 大致多重",非测量 attach 几何真值)+ grip_arm_d 立刻初始化 dJ 与 rate 增益
-        # 给即时鲁棒性,随后 _update_online_geometry 用在线 m_est/c_xy 精修。默认
-        # 0.3=花名册标称;真机对应操作员设定的"预期最大载荷"。
+        # 抓取载荷操作先验 [kg](B.3 Phase2 online 模式用):attach 瞬间用它 +
+        # grip_arm_d 初始化**模型侧** dJ_est(model.p 的几何槽),随后
+        # _update_online_geometry 用在线 c_xy 精修。
+        #
+        # 【2026-08-25 一度改 0.0,当日回退 0.3 —— 见下】
+        # 这一路是模型对惯量的"信念",**可以给错**:几何解耦实验实测先验错 33%
+        # 时 m_est 仍准 0.3%,08-25 进一步实测 prior=0(模型 dJ=0)照飞且与基线
+        # 一样好 —— 那次拆开 grip_gain_prior 之后才看清,真正在起作用的是**执行器
+        # 侧**的内环增益整定,不是模型侧这个 dJ。所以模型侧先验可以直接去掉。
+        # ⚠️ 改这个默认值时**必须**同时把 grip_gain_prior 默认从 -1.0 钉到 0.3:
+        #    -1.0 的语义是"回落到 grip_payload_prior",本参数一旦归零,增益也会
+        #    跟着归零 → 内环带宽被载荷惯量压塌 → 实测炸机。两个默认值是一对,
+        #    不能单独改(08-24 那次 MHE 62 次失败就是这条链没拆开时踩的)。
+        # 【为什么又退回来:run_prior_ab_4ms.sh 首批 n=8 结果(20260825_144337)】
+        #   ② 主判据**非劣成立**:|bias| 配对差 d=+0.19pp,95%CI 上界 +0.52pp
+        #      < 等效边界 1.0pp(n=5 干净配对;含次干净轮的 n=6 口径 +0.43pp)。
+        #   ① 前置硬条件**不通过**:prior0.0 臂 rep5 DIVERGED,peak_pos_err 15.1m。
+        #      按跑前钉死的一票否决规则,主判据再好也不能采信 → 默认值退回 0.3。
+        #   那一轮的解剖(grip_nmpc_20260825_151110.log):MHE **完全正常**
+        #      (m_est 峰值 2.363 vs 真值 2.3643,误差 0.06%;MHE solve failed=0),
+        #      发散在 **LIFT 段末尾**(t≈16s,早于 t=19.8s 进 figure8),NMPC 侧
+        #      1277 次 solve failed。即:不是估计不准,是模型 dJ=0 时 NMPC 按空机
+        #      惯量规划角加速度、真实惯量 5 倍、力矩饱和后级联发散 —— 正是本文件
+        #      顶部 dJ_sym 注释预言的那个机制。1/7 vs 0/7 统计上不显著
+        #      (Fisher p≈1.0),但机理有据,不能当纯偶发。
+        # 下一步(若要再推):重跑一批**真单变量**的(首批其实同时动了 MHE 侧先验,
+        #   见 run_gripper_headless.sh 里 GRIP_NMPC_MP_PRIOR/GRIP_MHE_MP_PRIOR 的
+        #   拆分说明),n>=8,重点看 prior0 臂的 LIFT 段发散率而不只是 bias。
         self.declare_parameter('grip_payload_prior', 0.3)
+        # PX4 内环增益缩放**专用**的载荷质量先验(2026-08-25 从 grip_payload_prior
+        # 拆出)。负值 = 回落到 grip_payload_prior,**不设它时行为逐位不变**。
+        # 为什么必须拆:这两条路性质完全不同——
+        #   grip_payload_prior → dJ_est → model.p :模型对惯量的"信念",**可以给错**
+        #       (给错的那部分由转动 lumped 扰动 xi 在线补,见 tau_lumped_enable)
+        #   grip_gain_prior    → _scale_px4_rate_gains:执行器整定,**必须够大**,
+        #       否则内环带宽被载荷惯量压塌,物理上就是跟不上,xi 再准也没用
+        # 08-24 直接把 prior 调到 0.15 想测"dJ 给错",结果 MHE 62 次失败——根因是
+        # 增益只放大了 3.18× 而非需要的 6.68×,**根本没测到 dJ 那一维**。
+        # 【2026-08-25 一度钉到 0.3(配合模型侧归零),随 #1 回退一并退回 -1.0】
+        # ⚠️ 这两个默认值是**一对**:-1.0 的语义是"回落到 grip_payload_prior",
+        #    所以任何把 grip_payload_prior 改到 0 的尝试,都必须同时把这里钉成
+        #    一个正数,否则内环增益跟着归零 → 带宽被载荷惯量压塌 → 实测炸机
+        #    (08-24 那次 MHE 62 次失败就是这条链没拆开时踩的)。
+        # 这一路是**尚未**去掉的先验(任务信息),替代方案见 grip_gain_envelope。
+        self.declare_parameter('grip_gain_prior', -1.0)
+        # 载荷**包线上界** [kg](2026-08-25,"去先验"第 #2 项 / 方案 b)。>=0 时
+        # 取代 grip_gain_prior 驱动内环增益缩放;负值(默认)= 不启用,行为逐位不变。
+        #
+        # 与上面两个 prior 的性质区别 —— 这才是要点:
+        #   grip_payload_prior / grip_gain_prior 是**任务信息**("这次要抓的盒子
+        #       大概 0.3kg"),部署时要有人告诉系统,是我们想去掉的先验;
+        #   grip_gain_envelope 是**机架规格**("这架飞机最多吊得动多少"),写在
+        #       整定表里、与飞哪一趟无关 —— 拿它做增益整定不算"知道载荷质量"。
+        #
+        # 为什么这个替换在主线工作点上是**免费**的(2026-08-25 解析核算):
+        #   _scale_px4_rate_gains 的 ratio=(Jxx+dJ)/Jxx 有 cap 5.0,而
+        #   dJ(m_p)=[m_B·m_p/(m_B+m_p)]·d²,m_B=2.0643, d=0.47, Jxx=0.0142
+        #   → ratio 撞 cap 的临界载荷是 **m_p = 0.2937 kg**。
+        #   主线工况 m_p=0.3 已经在 cap 里(裸 ratio 5.075),任何 >=0.2937 的包线
+        #   上界都给出**逐位相同**的 MC_*RATE_K —— 也就是说,那个"先验"的数值
+        #   精度从一开始就没被用到,只有"够不够大"被用到,而"够大"正是包线的语义。
+        #   ⚠️ 但轻载格子(0.15/0.2kg)裸 ratio 只有 3.18/3.84,**不在 cap 里**:
+        #      换成包线会把它们的增益一路提到 5.0。那不是逐位不变,是真的改了
+        #      内环整定,必须实测过增益/高频振荡才能采信(见 run_gain_envelope_ab.sh)。
+        self.declare_parameter('grip_gain_envelope', -1.0)
         # box 正上方的安全接近高度:两段式接近的第一段目标高度。先在这个高度
         # 把水平位置对齐、悬停稳,再垂直下降到 grip_z_low——避免在 grip_z_low
         # 这种低空做水平平移时高度下冲、起落架把 box 顶出吸附窗口(attach 竞态)。
@@ -444,6 +604,10 @@ class AcadosNMPCNode(Node):
             self.grip_arm_d = float(self.get_parameter('grip_arm_d').value)
             self.grip_payload_prior = float(
                 self.get_parameter('grip_payload_prior').value)
+            self.grip_gain_envelope = float(
+                self.get_parameter('grip_gain_envelope').value)
+            self.grip_gain_prior = float(
+                self.get_parameter('grip_gain_prior').value)
             self.grip_approach_z = float(
                 self.get_parameter('grip_approach_z').value)
             self.grip_settle_sec = float(
@@ -475,6 +639,14 @@ class AcadosNMPCNode(Node):
             # PX4 内环增益同步(见 scale_px4_rate_gains 参数声明处的根因注释)
             self.scale_px4_rate_gains = bool(
                 self.get_parameter('scale_px4_rate_gains').value)
+            # ⚠️ 互锁必须在这里(而不是随参数一起提前):它依赖
+            # scale_px4_rate_gains,那个参数只在 gripper_mode 分支里读。
+            if self.omega_scale_enable and self.scale_px4_rate_gains:
+                # 互锁:两者补同一件事,同开=双重补偿(见参数声明处注释)。
+                self.scale_px4_rate_gains = False
+                self.get_logger().warn(
+                    'omega_scale_enable=true → 自动关闭 scale_px4_rate_gains'
+                    '(两者补同一件事,同时开是双重补偿)')
             self.px4_gains_scaled = False
             self.px4_base_req_sent = False
             self.px4_rate_k_base = {}
@@ -664,6 +836,8 @@ class AcadosNMPCNode(Node):
         self.x_cur = x
         if self.control_mode == 'l1':
             self._l1_update(msg, R_wb, vel_world)
+        if self.tau_lumped_enable:
+            self._l1_rot_update(msg, x[10:13])      # x[10:13]=机体角速度(FLU)
         self._append_actual_path(msg)
 
     def _l1_motor_cb(self, msg):
@@ -671,7 +845,15 @@ class AcadosNMPCNode(Node):
         if len(msg.velocity) >= 4:
             w = np.asarray(msg.velocity[:4], dtype=float)
             if np.all(np.isfinite(w)):
-                self._l1_T_phys = float(8.54858e-06 * np.sum(w * w))
+                w2 = w * w
+                self._l1_T_phys = float(MOTOR_CONSTANT * np.sum(w2))
+                # 体力矩反算,与 mhe_node 逐字同源(B.3 Phase0):F_i=k_f·ω_i²,
+                # τ_roll=Σy_i·F_i、τ_pitch=−Σx_i·F_i (FLU)。yaw 留 0 占位。
+                f = MOTOR_CONSTANT * w2
+                self._l1_tau_phys = np.array([
+                    TORQUE_SIGN * float(np.sum(ROTOR_Y * f)),
+                    TORQUE_SIGN * float(-np.sum(ROTOR_X * f)),
+                    0.0])
 
     def _l1_update(self, odom_msg, R_wb, vel_world):
         """L1 增广的高频更新(odom 频率,比 NMPC 求解频率快——估计要快、补偿被
@@ -711,6 +893,70 @@ class AcadosNMPCNode(Node):
             self.get_logger().info(
                 f'[l1] d_hat_f=[{d[0]:+.3f},{d[1]:+.3f},{d[2]:+.3f}]m/s^2 '
                 f'|equiv_dm={-d[2] * p.m / p.g:+.3f}kg')
+
+    def _l1_rot_update(self, odom_msg, om_body):
+        """转动 lumped 扰动 xi 的高频更新。与 _l1_update 同构,量纲是**角加速度**
+        [rad/s²] 而不是力矩——换算成力矩要乘 J,而"J 是多少"正是要消掉的先验;
+        输出角加速度,消费侧 om_dot += xi 不需要任何惯量假设。
+
+        两条纪律:
+        1) ω̇_nom 必须用 **NMPC 模型此刻真正在用的 J 和 c**(即 _geom_slot() 给
+           出的 dJ/c_xy),不是空机值。L1 的定义是"残差 = 实测 − **控制器所用
+           模型**的预测",标称模型与控制器不一致时 xi 会去补一个模型已经补过的
+           量 → 双重补偿。
+           ⚠️ 2026-08-25 首版就是写成空机 J 而**当场坠机**(grip_nmpc_003811,
+           pos_err 峰值 70m、1094 次 solve failed)。机制:先验给对时 NMPC 的
+           J_vec 已含 dJ=0.0663,xi 却按空机 J_nom=0.0142 去估 → xi ∝ tau·
+           (1/J_true − 1/J_nom),NMPC 为抵消 xi 加大力矩 → tau_phys 变大 → xi
+           更大,**循环增益 |J_model/J_nom − 1| = 4.7 >> 1 必然发散**。日志里
+           悬停段 xi≈0(tau≈0 时暴露不出来),一进机动 4 秒内就从 0.03 冲到 19.3、
+           tau_phys 打到 2.9Nm(tau_max 的 6 倍)。修正后循环增益变成
+           |J_model/J_true − 1|,先验给对≈0、给错 20% 才 0.2,稳定。
+        2) 力矩用电机转速反算的 tau_phys(实测),**不用 NMPC 指令力矩**。PX4 速率
+           内环夹在中间,指令≠实际;用指令会把内环传递误差烙进 xi——与 07-23
+           "用指令推力算 a_nom 自激炸机"是同一条教训。
+        """
+        if self._l1_tau_phys is None or self._l1_T_phys is None:
+            return                      # 还没收到转速:不推进(起飞前/话题未通)
+        # 地面门控:与平动通道同一条件同一理由(地面支持力会被"如实"估成扰动)。
+        if self._l1_T_phys < 0.4 * p.m * p.g:
+            if np.any(self.xi_lumped != 0.0):
+                self.get_logger().info('[xi] low-thrust gate: reset (on ground)')
+            self.l1_rot.reset()
+            self.xi_lumped = np.zeros(3)
+            self._l1_rot_last_stamp = None
+            return
+        t = odom_msg.header.stamp.sec + odom_msg.header.stamp.nanosec * 1e-9
+        if self._l1_rot_last_stamp is None:
+            self._l1_rot_last_stamp = t
+            return
+        dt = t - self._l1_rot_last_stamp
+        self._l1_rot_last_stamp = t
+        if not (0.0 < dt < 0.5):        # 时基跳变/暂停帧:不推进
+            return
+        # 与 NMPC 模型逐项对齐(见 acados_model.py 的 legacy 分支 om_dot):
+        # J_vec = [Jxx+dJ, Jyy+dJ, Jzz]、tau_thrust_com = [-cy*T, +cx*T, 0]。
+        geom = self._geom_slot()                # [dJ, cx, cy](或 coupled 档的 r_p)
+        if p.geom_coupled:
+            # coupled 档 geom 装的是 r_p 几何偏移,J/c 由模型内部按 m_est 现算;
+            # 这里不复刻那套代数(会引入第二份实现),该档暂不支持 xi。
+            return
+        dJ, cx, cy = float(geom[0]), float(geom[1]), float(geom[2])
+        J = np.array([p.Jxx + dJ, p.Jyy + dJ, p.Jzz])
+        tau_com = np.array([-cy * self._l1_T_phys, cx * self._l1_T_phys, 0.0])
+        om_dot_nom = ((self._l1_tau_phys + tau_com
+                       - np.cross(om_body, J * om_body)) / J)
+        xi2 = self.l1_rot.update(om_body[:2], om_dot_nom[:2], dt)
+        self.xi_lumped = np.array([xi2[0], xi2[1], 0.0])
+        self._l1_rot_log_count += 1
+        if self._l1_rot_log_count % 100 == 0:
+            x_ = self.xi_lumped
+            # equiv_dJ:把 xi 折算成"等效惯量误差"只在准静态、力矩主导时近似成立
+            # (xi ≈ −τ·dJ/(J·(J+dJ))),仅供读日志时有个量级感,不进任何控制路径。
+            self.get_logger().info(
+                f'[xi] xi_hat_f=[{x_[0]:+.3f},{x_[1]:+.3f}]rad/s^2 '
+                f'|tau_phys=[{self._l1_tau_phys[0]:+.3f},'
+                f'{self._l1_tau_phys[1]:+.3f}]Nm')
 
     def attach_offset_cb(self, msg):
         data = np.asarray(msg.data, dtype=float)
@@ -891,7 +1137,8 @@ class AcadosNMPCNode(Node):
         geom_slot = self._geom_slot()
         for i in range(p.N + 1):
             self.solver.set(i, 'p', np.concatenate(
-                [Xref_win[:, i], [self.m_est], geom_slot, self.d_lumped]))
+                [Xref_win[:, i], [self.m_est], geom_slot, self.d_lumped,
+                 self.xi_lumped]))
 
         # t_start_ros:轨迹 t=0 对应的采样时刻(ROS clock),给高频回调算 τ 用。
         # t_start:墙钟,仅用于测 solve 耗时(solve_time),两者别混。
@@ -989,6 +1236,48 @@ class AcadosNMPCNode(Node):
         solve_time = (time.time() - t_start) * 1000
         return u_opt, omega_cmd, solve_time
 
+    def _update_omega_scale(self):
+        """更新 ω_cmd 缩放比例 Ĵ_t/J_a(每帧,一阶低通)。
+
+        为什么低通:T_phys 本身有噪声,且**机动时 T_phys 含向心分量**(T_phys/g
+        只在近悬停时才等于有效质量)。attach 的渐进承重过程是秒级的,而速率环是
+        百 Hz 级——0.5s 的时间常数远慢于内环、又足够跟上承重,两边都不打架。
+        没有低通的话,这就退化成"高频抖动的增益",正是要避免的那件事。
+
+        只缩放 roll/pitch:dJ 只进 Jxx/Jyy(载荷挂在下方,绕 z 的惯量几乎不变),
+        与 _scale_px4_rate_gains 只改 MC_ROLLRATE_K/MC_PITCHRATE_K 同理。
+        """
+        if not self.omega_scale_enable:
+            return
+        if self.omega_scale_source == 'thrust':
+            if self._l1_T_phys is None:
+                return                      # 还没收到转速:保持 1.0
+            # 地面门控:与 L1 同一条件同一理由(地面支持力会让 T_phys 失去意义)
+            if self._l1_T_phys < 0.4 * p.m * p.g:
+                self.omega_scale = 1.0
+                self._omega_scale_stamp = None
+                return
+            m_eff = self._l1_T_phys / p.g
+        else:
+            m_eff = self.m_est
+        # 有效载荷 → 同一套几何代数 → 惯量比。空载时 m_p_eff=0 ⇒ target=1.0,
+        # 自然退化不影响空机(FlyAware 的 K_k≈I3 是同一个边界条件)。
+        m_p_eff = max(0.0, m_eff - p.m)
+        dJ_eff = self._dJ_from_prior(m_p_eff)
+        target = float(np.clip((p.Jxx + dJ_eff) / p.Jxx, 1.0, self.omega_scale_cap))
+
+        t = self.get_clock().now().nanoseconds * 1e-9   # ROS clock,不用墙钟
+        if self._omega_scale_stamp is None:
+            self._omega_scale_stamp = t
+            self.omega_scale = target       # 首帧直接对齐,不从 1.0 慢慢爬
+            return
+        dt = t - self._omega_scale_stamp
+        self._omega_scale_stamp = t
+        if not (0.0 < dt < 0.5):            # 时基跳变帧:不推进
+            return
+        alpha = 1.0 - np.exp(-dt / max(self.omega_scale_tau, 1e-3))
+        self.omega_scale += alpha * (target - self.omega_scale)
+
     def publish_attitude(self, u_opt, omega_cmd):
         T = u_opt[0]
         msg = AttitudeTarget()
@@ -1003,9 +1292,40 @@ class AcadosNMPCNode(Node):
             norm = 0.0
         msg.thrust = float(np.clip(norm, 0.05, 0.95))
         wmax = self.omega_cmd_max
-        msg.body_rate.x = float(np.clip(omega_cmd[0], -wmax, wmax))
-        msg.body_rate.y = float(np.clip(omega_cmd[1], -wmax, wmax))
-        msg.body_rate.z = float(np.clip(omega_cmd[2], -wmax, wmax))
+        w_cmd = np.asarray(omega_cmd, dtype=float).copy()
+        if self.omega_scale_enable:
+            self._update_omega_scale()
+            if self.omega_scale > 1.0 + 1e-6:
+                # ω_cmd' = ω + s·(ω_cmd − ω),只作用 roll/pitch
+                w_now = (self.x_cur[10:13] if self.x_cur is not None
+                         else np.zeros(3))
+                w_cmd[0:2] = (w_now[0:2]
+                              + self.omega_scale * (w_cmd[0:2] - w_now[0:2]))
+                # 撞限幅 = 补偿被静默截断(与 xi_max 同一类坑,08-25 踩过)。
+                # 只警告一次避免刷屏;真要用大比例得同步放宽 omega_cmd_max。
+                if ((np.abs(w_cmd[0:2]) > wmax).any()
+                        and not self._omega_scale_clip_warned):
+                    self._omega_scale_clip_warned = True
+                    self.get_logger().warn(
+                        f'[omega_scale] 缩放后 body_rate 撞限幅 ±{wmax:.1f}rad/s '
+                        f'(s={self.omega_scale:.2f}) — 补偿被截断,'
+                        '考虑放宽 omega_cmd_max')
+        # 诊断日志(2026-08-25):量 ω_cmd 的实际分布,给 omega_cmd_max 该放宽到
+        # 多少提供依据。同时补上 omega_scale 缺的 s 周期日志。只打印不改逻辑;
+        # 50Hz 下每 10 帧一行 ≈ 5Hz,飞 93s 约 465 行,grep 完能直接算分位数。
+        self._wlog_count = getattr(self, '_wlog_count', 0) + 1
+        if self._wlog_count % 10 == 0:
+            _wn = (self.x_cur[10:13] if self.x_cur is not None else np.zeros(3))
+            _raw = np.asarray(omega_cmd, dtype=float)
+            self.get_logger().info(
+                f'[wcmd] raw=[{_raw[0]:+.3f},{_raw[1]:+.3f},{_raw[2]:+.3f}] '
+                f'w=[{_wn[0]:+.3f},{_wn[1]:+.3f},{_wn[2]:+.3f}] '
+                f'err=[{_raw[0]-_wn[0]:+.3f},{_raw[1]-_wn[1]:+.3f}] '
+                f'scaled=[{w_cmd[0]:+.3f},{w_cmd[1]:+.3f}] '
+                f's={getattr(self, "omega_scale", 1.0):.2f}')
+        msg.body_rate.x = float(np.clip(w_cmd[0], -wmax, wmax))
+        msg.body_rate.y = float(np.clip(w_cmd[1], -wmax, wmax))
+        msg.body_rate.z = float(np.clip(w_cmd[2], -wmax, wmax))
         msg.orientation.w = 1.0
         msg.orientation.x = 0.0
         msg.orientation.y = 0.0
@@ -1198,14 +1518,12 @@ class AcadosNMPCNode(Node):
         # 更公平(否则是绑着 baseline 的手打,审稿必疑)。drop 复位走公共路径
         # (_reset_px4_rate_gains 已在 _grip_drop_phase)。
         if self.control_mode == 'l1':
-            mp0 = self.grip_payload_prior
-            mt0 = p.m + mp0
-            mu0 = p.m * mp0 / mt0 if mt0 > 0 else 0.0
-            dJ0 = float(mu0 * self.grip_arm_d ** 2)
+            mp0, src0 = self._gain_prior()  # l1 分支本来就只做增益、不做模型前馈
+            dJ0 = self._dJ_from_prior(mp0)
             self._scale_px4_rate_gains(dJ0)
             self.get_logger().info(
                 f't={nmpc_time:.1f}s | ATTACH (control_mode=l1): rate gains from '
-                f'prior m_p={mp0:.2f}kg (dJ={dJ0:.4f}); no model-side feedforward,'
+                f'{src0} m_p={mp0:.2f}kg (dJ={dJ0:.4f}); no model-side feedforward,'
                 f' translational payload handled by L1 d_lumped only')
             return
         m_p = self.grip_payload_mass
@@ -1224,15 +1542,15 @@ class AcadosNMPCNode(Node):
             # dJ 与 rate 增益(给内环即时鲁棒性,不等估计收敛——否则实测炸机);
             # c_est 先 0,随后 _update_online_geometry 用在线 m_est/c_xy 精修。
             mp0 = self.grip_payload_prior
-            mt0 = p.m + mp0
-            mu0 = p.m * mp0 / mt0 if mt0 > 0 else 0.0
-            self.dJ_est = float(mu0 * self.grip_arm_d ** 2)
+            self.dJ_est = self._dJ_from_prior(mp0)      # 模型侧:可以是 0/给错
             self.c_est = np.zeros(2)
-            self._scale_px4_rate_gains(self.dJ_est)
+            mp_gain, src_gain = self._gain_prior()      # 执行器侧:必须够大
+            self._scale_px4_rate_gains(self._dJ_from_prior(mp_gain))
             self.get_logger().info(
-                f't={nmpc_time:.1f}s | ATTACH (geom_source=online): dJ/gain init '
-                f'from prior m_p={mp0:.2f}kg arm={self.grip_arm_d:.2f}m '
-                f'(dJ={self.dJ_est:.4f}); c_xy+dJ refine online, attach truth eval-only')
+                f't={nmpc_time:.1f}s | ATTACH (geom_source=online): model dJ from '
+                f'prior m_p={mp0:.2f}kg arm={self.grip_arm_d:.2f}m '
+                f'(dJ={self.dJ_est:.4f}); rate gains from {src_gain} '
+                f'm_p={mp_gain:.2f}kg; c_xy refine online, attach truth eval-only')
             return
         if self.attach_offset is not None:
             r_p = self.attach_offset
@@ -1309,6 +1627,26 @@ class AcadosNMPCNode(Node):
         else:
             self.get_logger().warn(f'ParamGet {pid} unsuccessful, '
                                    f'will fall back to base 1.0')
+
+    def _dJ_from_prior(self, m_p):
+        """由载荷质量先验算吊挂惯量增量 dJ = μ·d²(μ=约化质量 m_b·m_p/m_t)。
+        原先这段代数在 _grip_mass_step 的两个分支里各抄了一遍,拆 prior 时提出来
+        —— 模型侧和增益侧现在要用**不同的** m_p 各算一次。"""
+        m_t = p.m + m_p
+        mu = p.m * m_p / m_t if m_t > 0 else 0.0
+        return float(mu * self.grip_arm_d ** 2)
+
+    def _gain_prior(self):
+        """PX4 内环增益缩放该用的载荷质量,三级优先(高→低):
+          ① grip_gain_envelope >=0 : 载荷**包线上界**(机架规格,非任务信息)
+          ② grip_gain_prior    >=0 : 载荷质量**点估计先验**(任务信息,想去掉的那个)
+          ③ 否则                   : 回落 grip_payload_prior(= 08-25 拆分前的行为)
+        返回 (m_p, 来源标签),标签只用于日志/论文溯源。"""
+        if self.grip_gain_envelope >= 0.0:
+            return self.grip_gain_envelope, 'envelope(rack spec)'
+        if self.grip_gain_prior >= 0.0:
+            return self.grip_gain_prior, 'prior(task info)'
+        return self.grip_payload_prior, 'prior(task info, legacy fallback)'
 
     def _scale_px4_rate_gains(self, dJ):
         """把 PX4 速率环总增益按惯量比 (J+dJ)/J 放大,恢复被载荷惯量压塌的
@@ -1447,6 +1785,12 @@ class AcadosNMPCNode(Node):
             # 零重新估计(若有残余未建模效应会自行爬回)。
             self.l1.reset()
             self.d_lumped = np.zeros(3)
+        if self.tau_lumped_enable:
+            # 同理:掉包后真实转动扰动阶跃回零,残留 xi 会持续给一个幽灵角加速度
+            # 偏置,NMPC 会拿姿态去抵消它。
+            self.l1_rot.reset()
+            self.xi_lumped = np.zeros(3)
+            self._l1_rot_last_stamp = None
         self.get_logger().info(
             f't={nmpc_time:.1f}s | DROP: released gripper (enable=false), '
             'payload detached; geometry -> empty, rate gains reset')

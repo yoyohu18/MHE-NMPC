@@ -7,7 +7,8 @@
 #
 # model.p = [xr(13维,参考状态); m(1维,当前质量估计); dJ(1维,吊挂惯量增量);
 #            c_xy(2维,复合质心在机体系的水平偏移); d_lumped(3维,平动 lumped
-#            扰动比力,C.1 L1 增广用)] = 20维。时变参考用 model.p
+#            扰动比力,C.1 L1 增广用); xi_lumped(3维,转动 lumped 扰动角加速度,
+#            2026-08-25 补齐 Hanover 的 ξ 通道)] = 23维。时变参考用 model.p
 # 而不是 yref 来传,是因为代价里的四元数误差项对参考值是非线性的(四元数乘法),
 # 没法写成简单的 "y - yref" 形式,必须让参考值进 CasADi 表达式本身——质量/
 # 惯量/质心参数顺路放在同一个 model.p 向量里。
@@ -51,6 +52,20 @@ def build_acados_model():
     # 正是两个流派的分歧点,见 l1_adaptive.py 量纲约定)。主方法(truth/online
     # 模式)恒零,行为与 17 维版逐位一致。
     d_sym = cs.MX.sym('d_lumped', 3)
+    # 转动 lumped 扰动角加速度 xi [rad/s²](2026-08-25)。d_sym 的转动对偶,补齐
+    # Hanover RA-L 2021 的 matched uncertainty σ_m=[ς_z, ξ_x, ξ_y, ξ_z] ——07-23
+    # 只实现了平动那一半(ς),转动这三维(ξ)一直缺着,于是 om_dot 里的模型误差
+    # (dJ 先验错、c_xy 先验错、未建模气动力矩)**无处可去**,只能靠 dJ/c 先验准。
+    # 量纲取**角加速度**而非力矩,与 d_sym 取比力同理:换算成力矩要乘 J,而"J 是
+    # 多少"正是要消掉的先验——输出角加速度,消费侧 om_dot += xi 不需要任何惯量假设。
+    # ⚠️ 为什么不去在线估 J(DCA-NMPC arXiv:2507.15261 的做法):J 在 om_dot 的
+    #    **分母**上且要向前滚 N 步,估歪会 1/J 爆掉;而 xi 是加性项,永远安全。
+    #    且 2026-08-24 实测 param_noise(2a) 已因 Hessian 病态 472 次失败,
+    #    再加 6 个 J 元素只会让尺度失配更糟(J~1e-2,比质量小两个数量级)。
+    # ⚠️ 第三维(yaw)当前恒 0:dJ 只进 Jxx/Jyy(见下面 J_vec),yaw 通道不受 dJ 先验
+    #    影响;且 tau_phys 的 yaw 分量本身是 0 占位(mhe_node.py:220)。留三维只为
+    #    接口整齐,消费侧不写 yaw。
+    xi_sym = cs.MX.sym('xi_lumped', 3)
 
     vel = x_sym[3:6]
     q_  = x_sym[6:10]
@@ -96,7 +111,7 @@ def build_acados_model():
         Jom = cs.mtimes(J_mat, om)
         tau_thrust_com = cs.vertcat(-c_eff[1] * T_, c_eff[0] * T_, 0.0)
         om_dot = cs.mtimes(cs.inv(J_mat),
-                           tau_ + tau_thrust_com - cs.cross(om, Jom))
+                           tau_ + tau_thrust_com - cs.cross(om, Jom)) + xi_sym
     else:
         # legacy(默认):表达式逐字保持原样,生成的 C 代码与历史批次一致。
         c_eff = c_sym
@@ -106,7 +121,7 @@ def build_acados_model():
         # 的力矩 = (-r_c)×[0,0,T] = [-cy*T, +cx*T, 0]。重力作用点就是质心,对质心
         # 无力矩;cz(质心竖向下移)不跟沿 z 的推力叉出力矩,所以只需要 cx,cy 两维。
         tau_thrust_com = cs.vertcat(-c_sym[1] * T_, c_sym[0] * T_, 0.0)
-        om_dot = (tau_ + tau_thrust_com - cs.cross(om, Jom)) / J_vec
+        om_dot = (tau_ + tau_thrust_com - cs.cross(om, Jom)) / J_vec + xi_sym
 
     xdot = cs.vertcat(vel, vel_dot, quat_dot, om_dot)
 
@@ -114,7 +129,7 @@ def build_acados_model():
     model.name = MODEL_NAME
     model.x = x_sym
     model.u = u_sym
-    model.p = cs.vertcat(xr_sym, m_sym, dJ_sym, c_sym, d_sym)
+    model.p = cs.vertcat(xr_sym, m_sym, dJ_sym, c_sym, d_sym, xi_sym)
     model.f_expl_expr = xdot
 
     e_track = tracking_error_sym(x_sym, xr_sym)        # 12维: [ep;ev;eq_vec;eomega]

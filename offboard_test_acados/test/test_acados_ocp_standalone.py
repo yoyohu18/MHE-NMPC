@@ -24,14 +24,16 @@ from offboard_test_acados.acados_solver_builder import (  # noqa: E402
 HOVER_X = np.array([0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
 
-def _set_reference(solver, xr, m=None, dJ=0.0, c=(0.0, 0.0), d=(0.0, 0.0, 0.0)):
-    """model.p 现在是 [xr(13); m(1); dJ(1); c_xy(2); d_lumped(3)] 20维(质量/
-    吊挂惯量增量/复合质心偏移/平动lumped扰动都是运行时参数,见 acados_model.py),
-    m 默认用标定常数 p.m、dJ/c/d 默认空机无扰 0,跟改动前的行为一致——既有测试
-    本来就是在验证"空机标定质量下"的求解器行为,不是在测自适应参数。"""
+def _set_reference(solver, xr, m=None, dJ=0.0, c=(0.0, 0.0), d=(0.0, 0.0, 0.0),
+                   xi=(0.0, 0.0, 0.0)):
+    """model.p 现在是 [xr(13); m(1); dJ(1); c_xy(2); d_lumped(3); xi_lumped(3)]
+    23维(质量/吊挂惯量增量/复合质心偏移/平动 lumped 扰动/转动 lumped 扰动都是
+    运行时参数,见 acados_model.py),m 默认用标定常数 p.m、dJ/c/d/xi 默认空机
+    无扰 0,跟改动前的行为一致——既有测试本来就是在验证"空机标定质量下"的求解器
+    行为,不是在测自适应参数。(2026-08-25:xi 三维随转动 lumped 通道加入。)"""
     if m is None:
         m = p.m
-    param = np.concatenate([xr, [m], [dJ], c, d])
+    param = np.concatenate([xr, [m], [dJ], c, d, xi])
     for i in range(p.N + 1):
         solver.set(i, 'p', param)
 

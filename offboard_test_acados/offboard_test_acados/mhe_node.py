@@ -623,6 +623,27 @@ class MHENode(Node):
             else np.zeros(2)
         return float(dJ), c
 
+    def _seed_mass_from_thrust(self, why: str):
+        """零先验的质量种子:悬停近似 m ≈ T_phys/g。
+
+        T_phys=k_f·Σω²(电机转速反算)与质量先验、与 MHE 自身状态都完全解耦
+        —— 这是整条链上唯一不含先验的质量观测量,理由见 mhe_params.seed_from_thrust。
+        拿不到电机数据或推力过低(没在飞)时回退 m_nominal 并 WARN:宁可退回先验,
+        也不用一个不成立的近似。
+
+        返回 (m_seed, from_thrust)。"""
+        if not mhe_p.seed_from_thrust:
+            return float(mhe_p.m_nominal), False
+        T = self.thrust_phys
+        if T is None or not math.isfinite(T) or T < mhe_p.seed_thrust_min:
+            self.get_logger().warn(
+                f'mass seed ({why}): thrust_phys unavailable or too low '
+                f'({"None" if T is None else f"{T:.2f}N"} < '
+                f'{mhe_p.seed_thrust_min:.2f}N), falling back to '
+                f'm_nominal={mhe_p.m_nominal:.3f} kg')
+            return float(mhe_p.m_nominal), False
+        return float(np.clip(T / mhe_p.g, mhe_p.m_min, mhe_p.m_max)), True
+
     @staticmethod
     def _aug(y13, m_seed):
         """把 13 维量测拼成 MHE 的增广状态初值(14 或 16 维)。s 一律从 0 起——
@@ -918,9 +939,15 @@ class MHENode(Node):
         u_win = self.u_buf
 
         if self.x0_bar is None:
-            self.x0_bar = self._aug(y_win[0], mhe_p.m_nominal)
-            self.x_guess = [self._aug(y_win[min(i, N)], mhe_p.m_nominal)
+            # 到达代价先验均值的质量维:用零先验的 T_phys/g,不用空机标称值。
+            m_seed, from_thrust = self._seed_mass_from_thrust('initial window')
+            self.x0_bar = self._aug(y_win[0], m_seed)
+            self.x_guess = [self._aug(y_win[min(i, N)], m_seed)
                              for i in range(N + 1)]
+            self.m_est = m_seed
+            self.get_logger().info(
+                f'arrival prior seeded: m={m_seed:.3f} kg '
+                f'({"T_phys/g, no prior" if from_thrust else "m_nominal prior"})')
 
         # 已知几何 [dJ, cx, cy]:用当前 m_est 和 attach 实测偏移算(见
         # _payload_geometry),窗口内所有 stage 共用同一个当前值——geometry 是
@@ -1014,11 +1041,12 @@ class MHENode(Node):
                 # 改用电机转速反算的 thrust_phys(独立于 MHE 自身状态,不会被
                 # 同一次错误污染)做悬停近似 m≈T/g 当种子,给 solver 一个物理
                 # 站得住脚的重新出发点,而不是延续可能已经错的旧估计。
-                if self.thrust_phys is not None:
-                    m_seed = float(np.clip(
-                        self.thrust_phys / mhe_p.g, mhe_p.m_min, mhe_p.m_max))
-                else:
-                    m_seed = self.m_est  # 没有电机数据时没有更好的退路
+                m_seed, from_thrust = self._seed_mass_from_thrust('re-anchor')
+                if not from_thrust:
+                    # 拿不到 thrust_phys 时,这里比初始化更保守:延续当前估计
+                    # 而不是跳回 m_nominal —— 连败往往发生在飞行中段,那时
+                    # m_est 即使可疑也比空机标称值离真值近。
+                    m_seed = self.m_est
                 # 重锚时 s 也归零:连败往往伴随几何/姿态失配,把上一次可能已错的
                 # 质量矩一起带过去只会延续错误(与 m 用 thrust_phys 重种同理)。
                 self.x0_bar = self._aug(y_win[0], m_seed)

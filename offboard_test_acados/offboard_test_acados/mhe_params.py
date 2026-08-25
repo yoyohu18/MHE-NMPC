@@ -139,6 +139,34 @@ class MHEParams:
     # (MHE 估的就是它,即状态向量第 14 维和 self.m_est)。
     m_B = m_nominal
 
+    # --- 质量种子源(2026-08-25,"去先验"下半程第 #4 项)---
+    # MHE 的到达代价先验均值 x0_bar 里质量那一维,第一次求解时用什么做种子。
+    # False(历史行为):用 m_nominal —— 但这是**空机标称质量**,即一个先验。
+    # True(默认):用电机转速反算的物理推力做悬停近似 m≈T_phys/g。
+    #   T_phys = k_f·Σω²(见 mhe_node.MOTOR_CONSTANT)与任何质量假设、与 MHE
+    #   自身状态都完全解耦,是这条链上唯一**零先验**的质量观测量。
+    #
+    # 为什么这个替换是安全的(三条,缺一不可):
+    #   ① 时机:timer_cb 在 u_known(NMPC 的 u_opt)到达前直接 return,而 NMPC 是在
+    #      grip_approach_z≈1.5m **空中准悬停**才接管的 → 第一次求解必定不在地面,
+    #      T_phys/g 的悬停近似成立(地面支持力那个坑在这里够不着)。
+    #   ② 权重:Q0 质量维只有 0.1,比物理状态软 4~5 个量级,种子偏一点也会被
+    #      窗口内的测量迅速拉走;它影响的是"从哪出发",不是"收敛到哪"。
+    #   ③ 兜底:拿不到电机数据(thrust_phys is None)或推力低于 seed_thrust_min
+    #      时回退 m_nominal 并打 WARN —— 宁可退回先验,也不用一个不成立的近似。
+    # 同一个种子逻辑此前**已经**在 5 连败重锚路径上用了(mhe_node 里那段"用
+    # thrust_phys 而不是可能已错的 m_est 重新出发"),这里只是把它从兜底提升为
+    # 常规路径,两处现已共用 _seed_mass_from_thrust()。
+    # 默认 **关**(2026-08-25):机制与单测都就绪(test_mass_seed_standalone.py,
+    # 7/7 通过),但还没有 SITL 的 A/B 证据。本仓惯例是"没有 n>=8 的实测就不动
+    # 默认值"——同日 #1 那次正是栽在"n=1 背书就改默认"上(prior0 臂 1/7 轮
+    # LIFT 段发散)。用 MHE_SEED_FROM_THRUST=1 开启,验过再改这里。
+    seed_from_thrust = os.environ.get(
+        'MHE_SEED_FROM_THRUST', '0') not in ('0', '', 'false', 'False')
+    # 低推力门控 [N]:低于此值认为"没在飞"(未起飞/异常),悬停近似不成立。
+    # 与 mhe_node._update_c_xy_est 里那个 T<1.0 的门控同口径。
+    seed_thrust_min = float(os.environ.get('MHE_SEED_THRUST_MIN', '1.0'))
+
     # --- 几何-质量耦合开关(2026-08-24)---
     # False(默认,与历史批次逐位一致):dJ/c_xy 由窗外算好当常参数喂进来。
     # True:model.p 的几何槛位改装 r_p=[rx,ry,rz],J 与 c 在模型内部由被估质量
