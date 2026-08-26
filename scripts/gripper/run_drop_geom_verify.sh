@@ -1,4 +1,9 @@
 #!/bin/bash
+# 【2026-08-26 去先验改造】本脚本原先顺带设置的载荷质量先验环境变量
+# (GRIP_GEOM_MP_PRIOR / GRIP_GEOM_MP_FLOOR / MHE_CONFIRM_PRIOR 等)已删除:
+# 对应的节点参数不复存在,留着只会静默失效并误导读者。载荷质量信息现在只有
+# grip_payload_envelope 一条(机架规格包线上界,run_gripper_headless.sh 默认 0.5)。
+# 本脚本自身的研究主题不受影响。
 # B.5 drop 几何释放修复验收批(2026-07-15):同配置跑 N 轮 attach→figure8(2.75圈)
 # →第三左端 drop→恢复,逐帧窗口覆盖全程,供 verify_drop_geom_release.py 出 7 项指标。
 # 通过标准:3/3 轮 drop 后几何立即归零、m_est 回到 2.064±0.03、原 5-8cm 持续
@@ -33,9 +38,9 @@ for rep in $(seq 1 "$REPS"); do
   echo "[verify] === rep=$rep ==="
   LAUNCH="$RUNDIR/drop_geom_launch_${STAMP}_${rep}.log"
   GRIP_PAYLOAD_KG=0.3 GRIP_ECC_Y=0.10 USE_MHE=true MHE_C_XY_EST=true \
-    GRIP_GEOM_MP_FLOOR=0.15 NMPC_GEOM_SOURCE=online \
+    NMPC_GEOM_SOURCE=online \
     MHE_SCHEDULE_THETA="${MHE_SCHEDULE_THETA:-[-4.0,0.0,0.0,0.0]}" \
-    MHE_CONFIRM_ALPHA="${MHE_CONFIRM_ALPHA:--1.0}" MHE_CONFIRM_PRIOR="${MHE_CONFIRM_PRIOR:-0.3}" \
+    MHE_CONFIRM_ALPHA="${MHE_CONFIRM_ALPHA:--1.0}" \
     GRIP_DYNAMIC=true GRIP_DROP_AT_TIP=true GRIP_DROP_AFTER=60.0 \
     ATTACH_WINDOW_SEC=130.0 \
     bash "$WS/src/scripts/gripper/run_gripper_headless.sh" > "$LAUNCH" 2>&1

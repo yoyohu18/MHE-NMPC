@@ -1,4 +1,9 @@
 #!/bin/bash
+# 【2026-08-26 去先验改造】本脚本原先顺带设置的载荷质量先验环境变量
+# (GRIP_GEOM_MP_PRIOR / GRIP_GEOM_MP_FLOOR / MHE_CONFIRM_PRIOR 等)已删除:
+# 对应的节点参数不复存在,留着只会静默失效并误导读者。载荷质量信息现在只有
+# grip_payload_envelope 一条(机架规格包线上界,run_gripper_headless.sh 默认 0.5)。
+# 本脚本自身的研究主题不受影响。
 # 遗忘因子 λ 的 SITL 扫描(2026-08-24)。四臂,唯一差异 = 权重调度方式:
 #   event   : 事件触发降权(M0),λ=1        —— 需要外部信号
 #   fixed   : 无事件、无遗忘,λ=1           —— 真正的"什么都不做"基线
@@ -60,7 +65,7 @@ run_one() {
   echo "[lam] === arm=$arm rep=$rep (event_trigger=$trig, lambda=$lam) ==="
   MHE_GEOM_COUPLED=1 MHE_LAMBDA=$lam MHE_EVENT_TRIGGER=$trig \
   GRIP_PAYLOAD_KG=$MASS GRIP_ECC_Y=$ECC USE_MHE=true MHE_C_XY_EST=true \
-    GRIP_GEOM_MP_PRIOR=$MASS NMPC_GEOM_SOURCE=online \
+    NMPC_GEOM_SOURCE=online \
     GRIP_DROP_AFTER=$DROP_AFTER RESID_LOG_DIR="$rdir" \
     EVAL_TRUE_PAYLOAD_MASS=$MASS \
     bash "$WS/src/scripts/gripper/run_gripper_headless.sh" > "$launch" 2>&1

@@ -169,10 +169,13 @@ def build(d, payload, t_end, fps, width, height, out_path, lang='zh'):
     # 3) 偏心 c_y
     axes[2].set_ylabel('质心偏心 $c_y$ [cm]' if use_cn else 'CoM offset $c_y$ [cm]')
     if len(d['t_c']):
-        # ⚠️2026-08-21:MHE 日志里那个 `truth c=` **只有几何因子是真值**,质量因子在
-        # 节点没收到 grip_true_payload_mass 时会退回 m_est 反推的 m_p,于是"真值"会
-        # 跟着 m_est 一起抖(实测印出 m_p=0.263/0.218/0.256,真值明明是 0.300)。
-        # 这里改成用真实载荷质量 × attach 几何真值自己算,得到应有的常值。
+        # ⚠️2026-08-21:**08-26 之前的** MHE 日志里那个 `truth c=` 只有几何因子是
+        # 真值,质量因子在节点没收到 grip_true_payload_mass 时会退回 m_est 反推的
+        # m_p,于是"真值"会跟着 m_est 一起抖(实测印出 m_p=0.263/0.218/0.256,真值
+        # 明明是 0.300)。08-26 去先验改造删掉了 grip_true_payload_mass,质量因子
+        # 改读 eval_true_payload_mass(纯评估真值),新日志里 `truth c=` 就是真值。
+        # 这里仍用真实载荷质量 × attach 几何真值自己算,对新日志是恒等变换,
+        # 对旧日志则是必要的修正。
         v_ct = d['v_ct']
         if d.get('r_att') is not None:
             v_ct = np.full_like(d['t_c'],

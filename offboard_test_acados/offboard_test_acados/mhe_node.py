@@ -68,6 +68,37 @@ ROTOR_X = np.array([0.174, -0.174,  0.174, -0.174])  # motorNumber 0..3 的机�
 ROTOR_Y = np.array([-0.174, 0.174,  0.174, -0.174])  # 同上 y
 TORQUE_SIGN = 1.0  # Phase 0 标定后固定的整体符号(默认+1,验证对表后确认/翻转)
 
+# --- yaw 反扭矩(2026-08-25,MHE↔NMPC 完全解耦的最后一块拼图)---
+# 背景:u_known 四个分量里,推力和 roll/pitch 已经能从电机转速反算
+# (与 NMPC 无关),唯独 **yaw 力矩一直沿用 NMPC 的意图值** —— 因为这里原本
+# 只填 0 占位(当时只需要 roll/pitch 算 c_xy)。补上它,MHE 就完全只吼
+# "rate control + allocation 之后真实发生了什么",不再知道控制器在想什么。
+#
+# 为什么这不是可有可无的潤色(2026-08-25 拿 20 批残差诊断 CSV 对过表):
+#   通道   相关    斜率(实际执行/NMPC 意图)
+#   roll  +0.933   1.083
+#   pitch +0.698   1.101
+#   yaw   +0.911   **0.320**   <-- 差 3 倍
+# roll/pitch 的意图值跟实际基本一致,唯独 yaw 严重脱节:四旋翼的 yaw 权限
+# 本来就比 roll/pitch 小一个量级(只能靠反扭矩),NMPC 要 0.2Nm、PX4 实际只
+# 给得出 0.065Nm。也就是说 MHE 一直把一个**比真实大 3 倍的假力矩**当"已知
+# 输入"喂进转动方程。这跟 geom_release_mode='self' 那次坠机是同一个病的
+# 两个症状——那次是"NMPC 幽灵配平力矩被 MHE 当已知真值收下→转动残差
+# 对任意 m 都自洽"。
+#
+# 物理:gz MulticopterMotorModel 给机体的反扭矩 tau_z_i = -dir_i*k_m*F_i
+# (螺旋桨 ccw 旋转 => 机体收到 cw 反作用)。x500 model.sdf:
+# momentConstant=0.016;motorNumber 0,1=ccw(dir=+1), 2,3=cw(dir=-1)。
+# 符号已实数据标定:-dir 那个候选 20/20 批与 NMPC 意图值正相关(中位
+# +0.911),+dir 候选全负相关 => 排除。标定脚本见仓库 test 目录。
+# ⚠️ 近似:这是**稳态反扭矩**,不含转子角加速度项 ΣJ_r·dω_i/dt。yaw 快速
+#    机动时转子加减速的贡献会漏掉;悬停/温和机动下可忽。
+# (真机迁移:k_m 由推力台测反扭矩→RPM 曲线给出,同 MOTOR_CONSTANT。)
+MOMENT_CONSTANT = 0.016
+ROTOR_DIR = np.array([+1.0, +1.0, -1.0, -1.0])   # ccw=+1, cw=-1 (motorNumber 0..3)
+YAW_DIR = -ROTOR_DIR                              # 机体收到的反扭矩方向(已标定)
+YAW_TORQUE_SIGN = 1.0  # 整体符号备用旋钮(同 TORQUE_SIGN;标定已确认 +1)
+
 
 class MHENode(Node):
     def __init__(self):
@@ -82,6 +113,16 @@ class MHENode(Node):
         self.u_known = None
         self.thrust_phys = None  # 电机转速反算的真实总推力(见 MOTOR_CONSTANT 注释)
         self.tau_phys = None     # 电机转速反算的真实体力矩 [roll,pitch,yaw](B.3 Phase0)
+        # --- 抗混叠累加器(2026-08-25)---
+        # motor_speed 实测 **250Hz**、MHE 才 10Hz —— 25:1 降采样。取“区间最后
+        # 一帧瞬时值”再当成 0.1s 内的常量喂给模型 = 典型混叠。这正是 2026-08-24
+        # 那条待验假说说的“不准但光滑(NMPC 20Hz 分段常值) 反而比 准但混叠
+        # (tau_phys 瞬时值) 好”的机制。零阶保持的正确离散化是**区间平均**,
+        # 不是端点采样 —— 所以这里按电机推力 F_i 累加,timer_cb 每拍 flush。
+        # 在 F_i 上平均而不是在 ω 上平均:推力≈k_fω² 是非线性的,先平方再平均
+        # 才是真实冲量;先平均再平方会系统性低估(Jensen)。
+        self._motor_f_acc = np.zeros(4)
+        self._motor_n = 0
         # attach 实测几何 [rx,ry,rz](box-drone,机体系,rz<0),来自
         # /gripper/attach_offset;喂 _payload_geometry 算 dJ/c_xy 给 MHE 自己的
         # om_dot 用(2026-07-07 坏几何复测发现的修复,见 mhe_params.py n_geom
@@ -92,9 +133,6 @@ class MHENode(Node):
         # 期间 solve 失败时 m_est 可能被暂时拖到低于 m_nominal,max(...,0.0) 会
         # 让修正瞬间归零——恰好在最需要修正姿态失配的时刻自己失效,形成新的
         # 自洽错误状态(2026-07-07 坏几何复测第二轮实测:pos_err 卡在 0.8m+,
-        # m_est 卡在 1.2-1.4kg,比修复前更差)。改成棘轮:只记录 attach 以来
-        # 见过的最高 m_p_hat,某次暂态读数偏低不会让已经建立的几何修正撤销。
-        self._m_p_hat_ratchet = 0.0
         # 载荷是否在机上(物理状态,2026-07-15 加)。**不靠 attach_offset is None
         # 判断**:最后一次 attach 几何要留给日志/下一轮规划,物理状态必须独立表达。
         # 背景:棘轮/地板本为 attach-only 场景设计(防 attach 暂态估计坍缩),
@@ -107,64 +145,39 @@ class MHENode(Node):
         # 连续跑、自行收敛回空机质量,才能证明"模型正确后估计器自己能回归"。
         self._payload_attached = False
 
-        # 诊断参数(2026-07-08,吊挂 CEM 首轮 0.15kg 结构性失败排查——两个明显
-        # 不同的 θ 都 4/4 失败,怀疑是"用 self.m_est 反推 m_p_hat 再算 dJ/c_xy,
-        # dJ/c_xy 又反过来影响 self.m_est"这个自举耦合在低质量(dJ/c_xy 信号
-        # 本就比 0.3kg 弱)下失稳)。默认 0.0 = 原行为(棘轮反推);>0 时
-        # _payload_geometry 直接拿这个真值算 dJ/c_xy,完全脱钩 self.m_est——
-        # 只留"估质量",摘掉"用质量反推几何缩放"这一环。若固定后 0.15kg 能
-        # 稳定收敛,坐实自举耦合是根因;若依旧失败,根因在别处(比如 T_phys
-        # 信噪比本身在轻载下就不够)。仅用于诊断,不是"已知几何"阶段的最终
-        # 设计——质量仍应由 MHE 估,不该整体从外部喂真值。
-        self.declare_parameter('grip_true_payload_mass', 0.0)
-        self.grip_true_payload_mass = float(
-            self.get_parameter('grip_true_payload_mass').value)
-
-        # --- 完全解耦(2026-07-19):载荷几何大小由**独立操作先验**决定 ---
-        # >0 时 m_p_hat 直接取该值,**完全不读 m_est**(绕过反推/棘轮/floor),
-        # 于是 dJ 和 c_xy 同时脱离自举耦合——两者都只由 m_p_hat 驱动,这是唯一瓶颈。
-        # 与 grip_true_payload_mass 机制相同但**语义不同**:那个是真值(诊断专用,
-        # 真机拿不到),这个是"包裹标称质量"这类真机可用的弱先验。
-        # 证据(实验见记忆 mhe-geom-mest-decoupling):先验故意错 -33%(0.2 对真实
-        # 0.3)、floor 关闭、n=8 → 下垂塌陷 0/8,m_est 仍收敛到 2.357(真值 2.364,
-        # 误差 0.3%)。即**几何只需量级大致对以避免模型结构性失配,精确质量由 MHE
-        # 独立负责**;合并统计几何解耦 15/15 vs 耦合 10/15,Fisher p=0.021。
-        # 默认 0.0=关闭(退回 floor 路径,保持既有默认行为);MHE 是通用节点、
-        # 不同场景载荷不同,不硬编码先验,由启动脚本按场景标称值传入。
-        self.declare_parameter('grip_geom_mp_prior', 0.0)
-        self.grip_geom_mp_prior = float(
-            self.get_parameter('grip_geom_mp_prior').value)
-
-        # 方案C 永久地板(2026-07-09,打破 m_est<->dJ/c_xy 自举耦合但**不喂
-        # 真值**):grip_true_payload_mass 诊断坐实根因是自举正反馈——0.15kg
-        # 陷入鸡生蛋(m_est 要收敛需 dJ/c_xy 够大,dJ/c_xy 够大需 m_est 先
-        # 上去,轻载信号弱冲不破)。修法:给反推的 m_p_hat 一个**永久下界地板**
-        # ——m_p_hat = max(棘轮自适应值, grip_geom_mp_floor)。物理正当:地板取
-        # "包裹质量操作下界"这个真机可用的弱先验(不是精确真值),对 <=下界 的
-        # 载荷几何恒按下界算(≈诊断的恒定正确几何),对 >下界 的载荷自适应爬过
-        # 地板用真实值。**关键:地板不衰减、不交回**——2026-07-09 实测衰减版
-        # (线性 w:0->1 撤除)在 ecc=0.10 脆:mp=0.3 过度补偿崩到 m_min,mp=0.15
-        # 撤太早趴空机;换永久地板后 ecc=0.05/0.10 均干净收敛到真值(<0.3%)。
-        # 2026-07-17 默认从 0.0(关闭)改为 0.15(开启)。原先关着是为了"保已验证
-        # 结果 + 留 A/B 对照",但 A/B 已经做完,而且证明**关着它有 25% 的任务失败
-        # 率**:gripper attach 0.3kg/ecc0.05 跑 n=16(on 8 + off 8),4 轮里 m_est
-        # 在 de-weight 后没能冲过 m_nominal(2.064)→ m_p_hat 恒为 0 → dJ/c_xy 永不
-        # 上线 → 锁死在 1.44~2.03kg 不自纠(T_phys=23.1N 明示 2.36kg 也没用),NMPC
-        # 消费错值后稳态下垂 0.24~0.61m、抬不到目标高度(不坠机,但任务失败)。
-        # 开 floor=0.15 后 n=8 全部精确收敛 2.360、塌陷 0/8(机制上死锁路径被物理
-        # 排除;统计上 0/8 vs 3/8 的 Fisher p=0.10 尚未达显著,要论文级需每组 n≈25)。
-        # 原以为这只是 0.15kg 轻载的鸡生蛋,实测 0.3kg 一样中,只是变成概率事件。
-        self.declare_parameter('grip_geom_mp_floor', 0.15)
-        self.grip_geom_mp_floor = float(
-            self.get_parameter('grip_geom_mp_floor').value)
+        # --- 载荷几何的质量标度 = **包线上界**(2026-08-26 去先验改造)---
+        # 本项目的前提是**不能知道载荷质量**,否则在线质量估计失去意义。原先
+        # 这里有三个通往 m_p_hat 的载荷质量入口,全部已删:
+        #   grip_true_payload_mass —— 真值直灌(诊断专用,真机拿不到);
+        #   grip_geom_mp_prior     —— "包裹标称质量"弱先验(**任务信息**);
+        #   grip_geom_mp_floor     —— 永久下界地板 0.15kg(也是任务信息:它断言
+        #                             "这次的载荷至少有 0.15kg")。
+        # 三者都要求部署时有人告诉系统这一趟吊的是多重的东西。
+        #
+        # 留下的这一个是**机架规格**("这架飞机最多吊得动多少"),写在整定表里、
+        # 与飞哪一趟无关 —— 拿它做几何标度不算"知道载荷质量"。
+        #
+        # ⚠️ 为什么不能直接删成"m_est 反推+棘轮":那正是 07-09 坐实的自举正反馈
+        #    根因 —— m_est 要收敛需 dJ/c_xy 够大,dJ/c_xy 够大需 m_est 先上去,
+        #    轻载信号弱冲不破(0.15kg 结构性失败)。常数包线**完全不读 m_est**,
+        #    一次切断 m_est→dJ 和 m_est→c_xy 两条自举链(共用 m_p_hat 瓶颈),
+        #    且不像 floor 那样只护低估方向,向上超调被棘轮永久锁死的对称风险也
+        #    一并消除(棘轮在这条路径上根本不参与)。
+        # ⚠️ 代价:几何按包线过估。07-19 实测先验故意错 -33%(0.2 对真实 0.3)、
+        #    floor 关闭、n=8 → 下垂塌陷 0/8,m_est 仍收敛到 2.357(真值 2.364,
+        #    误差 0.3%)。即**几何只需量级大致对以避免模型结构性失配,精确质量
+        #    由 MHE 独立负责** —— 这条实测结论正是本次改造敢用常数包线的依据。
+        self.declare_parameter('grip_payload_envelope', 0.5)
+        self.grip_payload_envelope = float(
+            self.get_parameter('grip_payload_envelope').value)
 
         # --- 评估专用真值(2026-08-24)---
         # 载荷真实质量,**只**用于往日志/internal 流里写 m_true / c_true / J_true
-        # 这几列做 estimate-vs-truth 对比。与 grip_true_payload_mass 的区别是**它
-        # 在代码里没有任何通往模型的路径**:不进 _payload_geometry、不进 geom、
-        # 不进 m_est、不进任何 solver.set。grip_true_payload_mass 那个是诊断用的
-        # "把真值灌进模型"开关(记忆 cxy-truth-label-defect 明确要求生产实验别开),
-        # 两者必须分开命名,否则将来很容易误用。0.0 = 没有真值,真值列写 nan。
+        # 这几列做 estimate-vs-truth 对比。关键性质:**它在代码里没有任何通往
+        # 模型的路径** —— 不进 _payload_geometry、不进 geom、不进 m_est、不进
+        # 任何 solver.set,纯评估。2026-08-26 去先验改造删掉了那个会把真值灌进
+        # 模型的 grip_true_payload_mass 诊断开关后,本参数是节点里**仅存**的真值
+        # 入口,且只写日志。0.0 = 没有真值,真值列写 nan。
         self.declare_parameter('eval_true_payload_mass', 0.0)
         self.eval_true_payload_mass = float(
             self.get_parameter('eval_true_payload_mass').value)
@@ -187,27 +200,25 @@ class MHENode(Node):
         #   自由漂高 → NMPC 推得更猛 → 重锚种子 T_phys/g 又"确认"更重 → 发散。
         #   这与 2026-07 在推力通道上识破的自洽盲区(见 MOTOR_CONSTANT 注释)是同一个
         #   病,只是长在力矩通道上,且只有在转动通路变成主力之后才暴露。
-        #   **前提:'self' 必须配合 tau_source='phys'**(把 u_known 的力矩也换成电机
+        #   **前提:'self' 必须配合 tau_source='phys'/'phys_full'**(把 u_known 的力矩也换成电机
         #   转速反算值),否则环断不掉。下面已强制该组合。
         # ⚠️ 只有 coupled 档才成立:legacy 档的几何幅值来自外部先验/棘轮,不随
         #   质量熄灭,'self' 会让 drop 后永远挂着幽灵载荷 → 直接拒绝该组合。
-        # 载荷质量先验的**生效状态**必须在日志里讲清楚:脚本里照样会传
-        # grip_geom_mp_prior/floor(为了 legacy 批次能复现),但 coupled 档下
-        # _payload_geometry 根本不被调用 → 它们是死代码。不打这条,后来人看到
-        # 启动参数里有 0.3 会误以为"方法需要预先知道载荷多重"。
+        # 载荷质量信息的**生效状态**必须在日志里讲清楚,否则后来人看到启动
+        # 参数里有个 0.5 会误以为"方法需要预先知道载荷多重"。
         if mhe_p.geom_coupled:
             self.get_logger().info(
-                '[prior] geom_coupled=True → 载荷质量先验全部**不生效**'
-                f'(grip_geom_mp_prior={self.grip_geom_mp_prior}, '
-                f'floor={self.grip_geom_mp_floor}, '
-                f'true={self.grip_true_payload_mass} 均为死代码);'
+                '[prior] geom_coupled=True → 载荷质量信息**完全不生效**'
+                f'(grip_payload_envelope={self.grip_payload_envelope} 是死代码:'
+                f'coupled 档下 _payload_geometry 根本不被调用);'
                 f'模型只吃可测杆臂 r_p + 被估质量,m 的先验仅有 Q0 质量维'
                 f'={float(mhe_p.Q0[mhe_p.nx, mhe_p.nx]):.3g} '
                 f'(σ={1.0/float(mhe_p.Q0[mhe_p.nx, mhe_p.nx])**0.5:.2f}kg,实质无先验)')
         else:
-            self.get_logger().warn(
-                '[prior] geom_coupled=False → 几何幅值来自**载荷质量先验**'
-                f'(prior={self.grip_geom_mp_prior}, floor={self.grip_geom_mp_floor})')
+            self.get_logger().info(
+                '[prior] geom_coupled=False → 几何幅值由**载荷包线上界**标度'
+                f'(envelope={self.grip_payload_envelope}kg,机架规格非任务信息);'
+                '任务信息型先验(true/prior/floor)已于 2026-08-26 全部删除')
 
         # --- MHE 已知力矩的来源(2026-08-24)---
         # 'command'(默认,历史行为):u_known[1:4] 用 NMPC 的意图力矩。legacy 档下
@@ -227,11 +238,83 @@ class MHENode(Node):
         # 待验假说:tau_phys 是 250Hz 的快变真实力矩,MHE 按 10Hz 采样并在 0.1s
         # 内当常数用 → 混叠;而 NMPC 意图力矩是 20Hz 分段常值、与射击区间匹配,
         # 于是"不准但光滑"反而比"准但混叠"好。判别法见离线 standalone 测试。
+        # mhe_tau_source: u_known 的力矩分量从哪来。
+        #   'command'  (默认,历史行为): roll/pitch/yaw 全用 NMPC 意图值
+        #   'phys'     : roll/pitch 换成电机转速反算,yaw 仍是 NMPC 意图值
+        #   'phys_full': **三轴全部**电机转速反算 —— MHE 与 NMPC 完全解耦,
+        #                只吃 rate control + allocation 之后真实发生的量。
+        # 'phys' 留着不动是为了让既有实验(geom_release_mode='self' 等)可复现;
+        # 新工作应该用 'phys_full',理由见 MOMENT_CONSTANT 处那张斜率对照表
+        # (yaw 意图值比实际大 3 倍)。
+        # 抗混叠开关:**默认关**。理论上区间平均才是 250Hz->10Hz 的正确离散化
+        # (见 _motor_f_acc 注释),但打开它会改掉**每一个**档位的 u[0](推力那
+        # 一维从 2026-07 起就取电机反算值,'command' 档也不例外)—— 那是全部
+        # 既有实验的输入,属于重大静默行为改变。本仓惯例:没有 n>=8 的实测
+        # 不改默认值(2026-08-25 dJ 先验去除刚栽在这条上)。先当显式 opt-in,
+        # 用来验 2026-08-24 那条"准但混叠"假说;验过再谈默认。
+        self.declare_parameter('motor_window_avg', False)
+        self.motor_window_avg = bool(
+            self.get_parameter('motor_window_avg').value)
         self.declare_parameter('mhe_tau_source', 'command')
         self.tau_source = str(
             self.get_parameter('mhe_tau_source').value).lower()
-        if self.tau_source not in ('command', 'phys'):
+        if self.tau_source not in ('command', 'phys', 'phys_full'):
             self.tau_source = 'command'
+
+        # --- pre-offboard 冷启动估计(2026-08-25,"去先验"下半程第 #5 项)---
+        # 目的:在 NMPC 接管**之前**(PX4 posctl 悬停段)就把质量估出来,收敛后
+        # 再喂给 NMPC —— 这样 NMPC 从接管第一帧起用的就是**估出来的**质量,
+        # 而不是硬编码的空机标称值 p.m。配合 MHE_NO_MASS_PRIOR=1 才是完整的
+        # "零先验":那个开关卸掉 Q0 软锚 + m_min 硬下界(见 mhe_params),这个
+        # 开关负责让估计有机会在接管前跑完。
+        #
+        # 为什么 pre-offboard 段跑得起来:timer_cb 原本卡在 u_known is None,
+        # 而 u_known 在 tau_source='phys' 下**四个分量里三个来自电机转速**
+        # (见 u_opt_cb),跟 NMPC 完全无关;motor_speed_cb 从 gz 桥一起来就在
+        # 跑。所以这里直接用电机反算值合成 u_known,yaw 力矩填 0(反扭没建模,
+        # posctl 悬停下实测 roll/pitch 才 ±0.002Nm,yaw 同量级)。
+        # ⚠️ 这条路上的 u_known **不含任何 NMPC 意图值**,环是断开的 ——
+        #    比常规 command 模式还干净,不会重演 geom_release_mode='self' 那个
+        #    "NMPC 幽灵配平力矩被 MHE 当已知真值收下"的自洽盲区。
+        self.declare_parameter('pre_offboard_estimate', False)
+        self.pre_offboard_estimate = bool(
+            self.get_parameter('pre_offboard_estimate').value)
+        # 起飞门控:地面支持力会让 T_phys 与 m·g 脱钩(全仓反复踩过的坑),
+        # 必须确认真的离地了才让这条路生效。
+        self.declare_parameter('pre_offboard_min_z', 0.5)
+        self.pre_offboard_min_z = float(
+            self.get_parameter('pre_offboard_min_z').value)
+        # 收敛判据:最近 conv_frames 帧 m_est 的样本标准差 < conv_std [kg]。
+        # 收敛**之前不发布** mass_pub —— 未收敛的冷启动值直接灌进 NMPC 的
+        # 动力学模型是危险的(m 偏小 => 悬停推力算低 => 掉高度)。
+        self.declare_parameter('pre_offboard_conv_std', 0.02)
+        self.declare_parameter('pre_offboard_conv_frames', 20)
+        self.declare_parameter('pre_offboard_timeout_sec', 30.0)
+        self.pre_off_conv_std = float(
+            self.get_parameter('pre_offboard_conv_std').value)
+        self.pre_off_conv_frames = max(
+            2, int(self.get_parameter('pre_offboard_conv_frames').value))
+        self.pre_off_timeout_frames = int(round(
+            float(self.get_parameter('pre_offboard_timeout_sec').value)
+            / mhe_p.dt))
+        self._u_from_nmpc = False      # u_known 是否已由 NMPC 的 u_opt 接手
+        self._pre_off_converged = False
+        self._pre_off_m_hist = []
+        self._pre_off_first_frame = None
+        if self.pre_offboard_estimate and self.tau_source not in ('phys', 'phys_full'):
+            # 不强制改:tau_source 是别的实验的自变量,这里只把后果讲明白。
+            self.get_logger().warn(
+                "pre_offboard_estimate=True 但 mhe_tau_source='command':"
+                "pre-offboard 段的力矩必然是电机反算值(NMPC 还没输出),接管"
+                "瞬间会切回 NMPC 意图值 —— u_known 的语义在那一帧跳变。"
+                "想避免请一并设 mhe_tau_source:=phys。")
+        if self.pre_offboard_estimate:
+            self.get_logger().info(
+                f'[cold-start] pre-offboard 估计已开启 (min_z='
+                f'{self.pre_offboard_min_z}m, 收敛判据: {self.pre_off_conv_frames}'
+                f'帧 std<{self.pre_off_conv_std}kg, 超时'
+                f'{self.pre_off_timeout_frames * mhe_p.dt:.0f}s)'
+                f' | no_mass_prior={mhe_p.no_mass_prior}')
 
         # 遗忘因子与事件触发互斥(见 _solve_window 注释)
         self._forget_active = mhe_p.forgetting_lambda < 1.0
@@ -324,14 +407,15 @@ class MHENode(Node):
         self.declare_parameter('resid_settle_tol_n', 0.8)
         # 无真值确认阈值(B.4 学习+强闭环合流,2026-07-15):CEM 学出的 θ 第 5 维
         # 是无量纲 α,实际确认阈值 = α·g·mass。训练/评估在外部用花名册**真值** mass
-        # 算好传 event_confirm_thresh_n;部署(无真值)必须换成**操作先验** mass。
-        # confirm_thresh_alpha>=0 时:confirm_thresh = α·g·confirm_payload_prior
-        # (与 nmpc_node grip_payload_prior 同类的操作先验,非测量真值);<0=禁用,
-        # 退回固定 event_confirm_thresh_n(现有行为)。⚠️先验≠实际质量时阈值会偏
-        # (先验偏大→小载荷 T_phys 达不到阈值→超时兜底退回事件帧,graceful),
-        # 单载荷部署 prior=预期载荷时无偏。
+        # 算好传 event_confirm_thresh_n;部署(无真值)必须换成一个不含任务信息的
+        # 质量标度。confirm_thresh_alpha>=0 时:confirm_thresh = α·g·
+        # grip_payload_envelope(**载荷包线上界,机架规格**);<0=禁用,退回固定
+        # event_confirm_thresh_n(现有行为)。
+        # 【2026-08-26 去先验改造】原先这里用的是 confirm_payload_prior=0.3,
+        # 即"这次要抓的盒子大概多重"的操作先验 —— 任务信息,已删。
+        # ⚠️ 包线上界 > 实际载荷时阈值偏高 → 小载荷 T_phys 达不到阈值 → 超时
+        #    兜底退回事件帧(graceful,不是硬失败),代价是确认延迟。
         self.declare_parameter('confirm_thresh_alpha', -1.0)
-        self.declare_parameter('confirm_payload_prior', 0.3)
         self.event_enabled = bool(
             self.get_parameter('event_trigger_enable').value)
         # 遗忘因子与事件触发互斥(见 _solve_window 注释)。必须放在 event_enabled
@@ -344,8 +428,8 @@ class MHENode(Node):
             self.event_enabled = False
         c_alpha = float(self.get_parameter('confirm_thresh_alpha').value)
         if c_alpha >= 0.0:
-            m_prior = float(self.get_parameter('confirm_payload_prior').value)
-            self.confirm_thresh = c_alpha * mhe_p.g * m_prior
+            self.confirm_thresh = (
+                c_alpha * mhe_p.g * self.grip_payload_envelope)
         else:
             self.confirm_thresh = float(
                 self.get_parameter('event_confirm_thresh_n').value)
@@ -370,6 +454,58 @@ class MHENode(Node):
             1, int(self.get_parameter('resid_warmup_frames').value))
         self.resid_settle_tol = float(
             self.get_parameter('resid_settle_tol_n').value)
+        # 自检测到"推力下降型"事件时,是否自行释放载荷几何(见 _residual_detect)。
+        # 默认 True:它只在 event_signal_mode='residual' 下才有机会执行,而那一档
+        # 的全部意义就是"不依赖外部信号",几何释放没有理由留个外部依赖的尾巴。
+        self.declare_parameter('resid_release_geom', True)
+        self.resid_release_geom = bool(
+            self.get_parameter('resid_release_geom').value)
+
+        # ---- 并行阶跃判据(2026-08-26,默认关)----
+        # 上面那条判据看的是"T_phys 偏离**慢基线**",需要一条可信基线,因此带一道
+        # 预热门控。这条并行判据换一个完全不同的量:**相邻两个短窗的均值差**,
+        # 不需要基线、因此没有预热这个失效面。两者取或,原判据一行不改 ——
+        # 悬停工况下已验证的行为(阶段 A.2)因此原样保留。
+        #
+        # 为什么窗口要**短**(离线回放实测,test_step_detector_replay.py):
+        #   半窗 0.3s → 机动段最大 |Δ|=0.766N,drop 处 2.99N,区分度 3.9×
+        #   半窗 0.5s → 2.3×
+        #   半窗 0.8s → 1.0×(完全不可分)
+        # 窗口越长,figure-8 的缓变在窗内积累越多,而阶跃幅度被稀释 —— 与"越长
+        # 越抗噪"的直觉相反。
+        #
+        # persist 不只是抗噪:drop 的推力阶跃是**永久**的(质量真的变了),而轨迹
+        # 切换引起的推力变化是**暂态**的,所以持续帧数本身带区分力。
+        # persist=2/thresh=1.0 实测:drop 延迟 0.30s、幅度 -2.37N(余量 2.4×)、
+        # 稳态段零误触发。
+        #
+        # ⚠️ 固有限制:"质量变了"与"要飞的轨迹变了"在推力通道上**不可分** ——
+        #    figure-8 切入那一下(实测 -1.16N / +1.25N)也会被检出。C.3 风扰消融
+        #    得过同类结论(持续垂直力与质量突变不可分)。所以**释放几何**用一条
+        #    单独的、更高的门槛 resid_step_release_thresh(默认 2.0N):
+        #    误触发降权只是慢一点,误释放几何却会让模型丢掉还挂着的载荷。
+        self.declare_parameter('resid_step_enable', False)
+        self.declare_parameter('resid_step_half', 3)          # 半窗帧数(0.3s@10Hz)
+        self.declare_parameter('resid_step_thresh', 1.0)      # 触发降权 [N]
+        self.declare_parameter('resid_step_persist', 2)
+        self.declare_parameter('resid_step_release_thresh', 2.0)  # 释放几何 [N]
+        self.resid_step_enable = bool(
+            self.get_parameter('resid_step_enable').value)
+        self.resid_step_half = max(1, int(self.get_parameter('resid_step_half').value))
+        self.resid_step_thresh = float(self.get_parameter('resid_step_thresh').value)
+        self.resid_step_persist = max(
+            1, int(self.get_parameter('resid_step_persist').value))
+        self.resid_step_release_thresh = float(
+            self.get_parameter('resid_step_release_thresh').value)
+        self._tphys_hist = []      # 最近 2*half 帧 T_phys(阶跃判据用)
+        self._step_pending = 0
+        if self.resid_step_enable:
+            self.get_logger().info(
+                f'[step-detect] 并行阶跃判据已开启: 半窗 '
+                f'{self.resid_step_half * mhe_p.dt:.1f}s, 阈值 '
+                f'{self.resid_step_thresh}N (释放几何门槛 '
+                f'{self.resid_step_release_thresh}N), persist='
+                f'{self.resid_step_persist}')
         self._resid_baseline = None   # T_phys 慢基线(残差自检测用)
         self._resid_pending = 0       # 已连续超阈值的帧数(持续确认计数)
         self._resid_cross_frame = None  # 首次越阈那一帧的全局序号
@@ -396,8 +532,78 @@ class MHENode(Node):
             self.get_parameter('c_xy_steady_omega').value)
         self.c_xy_steady_vel = float(
             self.get_parameter('c_xy_steady_vel').value)
+
+        # --- c_xy 由一阶质量矩 s 直接给出(2026-08-26)---
+        # 现状的问题(实测 gviz_20260826_194614):发给 NMPC 的 c_xy 走的是窗外
+        # EMA + **稳态门控**(|ω|>0.15 或 |v_xy|>0.2 就直接 return)。figure-8 的
+        # 线速度是 r·w=2.83 m/s,比门限大 14 倍 —— **机动中它一次都不更新**。
+        # 于是 drop 之后 c_xy 冻结在带载值(实测 cy=-0.0084 一直不动),NMPC 只能
+        # 靠外部 drop 事件把几何清零;一旦让 NMPC 也"自己看"(geom_release_mode
+        # ='self'),它就会拿着这个幽灵偏心配平:0.0084×20.25N=0.17N·m 作用在空机
+        # J_xx=0.0142 上 = 12 rad/s²,半秒滚到 370°/s —— 这正是 2026-08-24 那两轮
+        # NMPC 'self' 坠机的机制。
+        #
+        # 修法:estimate_moment 档下 s=m_P·r_xy 是**窗口内被估的状态**,有独立观测
+        # (τ_phys/T),不需要稳态门控;c_xy = s/m_T 直接由它给出。实测 s 在 drop 后
+        # 2s 内从 0.0187 降到 0.0027(-86%)、4s 到 0.0010(-95%),而带载段它估的
+        # 0.0187 与真值 m_P·r_y=0.2×0.093=0.0186 几乎重合。
+        # 这条路打通后 NMPC 才谈得上"自己发现载荷没了" —— 在此之前它手里的偏心
+        # 是个冻结的常数,谈不上估计。
+        # ⚠️ 只在 ns>0(MHE_ESTIMATE_MOMENT=1)时可用;默认关,保持既有行为。
+        self.declare_parameter('c_xy_from_moment', False)
+        self.c_xy_from_moment = bool(
+            self.get_parameter('c_xy_from_moment').value)
+        if self.c_xy_from_moment and not mhe_p.ns:
+            self.get_logger().error(
+                'c_xy_from_moment=True 需要 MHE_ESTIMATE_MOMENT=1(s 是那一档才有的'
+                '状态),已退回窗外 EMA + 稳态门控。')
+            self.c_xy_from_moment = False
+        elif self.c_xy_from_moment:
+            self.get_logger().info(
+                '[c_xy] 来源 = 一阶质量矩 s/m_T(窗口内估计,**无稳态门控**),'
+                '替代窗外 EMA —— 机动中也会更新')
         self.c_xy_est = np.zeros(2)   # [cx, cy] 估计
         self._c_xy_inited = False
+
+        # ---- 机动门控:降低机动期质量估计的权重(2026-08-25)----
+        # 动机:m_est 静态准(-0.17%)但**机动中系统性低估 8%**(记忆
+        # new-4ms-workpoint-validation / high-maneuver-ablation 实测)。机动期
+        # 的残差里混着未建模气动、转子角加速度、内环跟踪滞后,这些都被归因到
+        # 质量维;而质量本身在机动期并没有变。把这些帧的估计权重降下来,既减少
+        # 污染,也切细自举耦合(m_est→dJ/c→NMPC→飞行→残差→m_est)在机动期的增益
+        # —— 耦合最危险的正是这一段。
+        #
+        # 旋钮选 Q0 的质量维(到达代价锚),不是 R/Q:
+        #   Q0[m] 大 = 强锚定到上一窗口的估计 = "粘",当前窗口推不动它;
+        #   Q0[m] 小 = 自由跟随当前窗口数据。
+        # ⚠️ 这与 mhe_event_weights 里"不调 Q0"那条注释不矛盾:那里的瓶颈是
+        #    "窗口内跨阶跃的旧测量 + m_dot=0 刚性",Q0 确实不是瓶颈;这里要压的
+        #    恰恰是"当前窗口数据对质量的推动力",Q0 正是它的正确表达。
+        # ⚠️ 与事件过渡**互斥**:过渡期让位不干预(两套 stage-0 W 会互相覆盖,
+        #    而且同时上线会让归因说不清 —— 本仓一贯做法)。
+        # 门限沿用 c_xy_est 那套稳态判据的同一口径。默认关。
+        self.declare_parameter('maneuver_gate_enable', False)
+        self.declare_parameter('maneuver_omega_thresh', 0.15)   # rad/s
+        self.declare_parameter('maneuver_vel_thresh', 0.20)     # m/s
+        self.declare_parameter('maneuver_q0_cap', 1.0e4)        # 最大锚紧倍数
+        self.declare_parameter('maneuver_exponent', 2.0)
+        self.maneuver_gate_enable = bool(
+            self.get_parameter('maneuver_gate_enable').value)
+        self.maneuver_omega_thresh = float(
+            self.get_parameter('maneuver_omega_thresh').value)
+        self.maneuver_vel_thresh = float(
+            self.get_parameter('maneuver_vel_thresh').value)
+        self.maneuver_q0_cap = float(self.get_parameter('maneuver_q0_cap').value)
+        self.maneuver_exponent = float(
+            self.get_parameter('maneuver_exponent').value)
+        self._mg_gain_applied = None    # 上次实际写进 solver 的锚紧倍数
+        self._mg_frames_gated = 0       # 被降权的帧数(统计用)
+        self._mg_frames_total = 0
+        if self.maneuver_gate_enable:
+            self.get_logger().info(
+                f'[maneuver-gate] 已开启: |ω|>{self.maneuver_omega_thresh} rad/s '
+                f'或 |v|>{self.maneuver_vel_thresh} m/s 时按 lvl^'
+                f'{self.maneuver_exponent} 锚紧 Q0[m](cap {self.maneuver_q0_cap:.0e})')
 
         theta = np.array(self.get_parameter('schedule_theta').value,
                          dtype=float)
@@ -469,18 +675,24 @@ class MHENode(Node):
             'THRUST_CAL_GAIN': THRUST_CAL_GAIN,
             'ROTOR_X': list(ROTOR_X), 'ROTOR_Y': list(ROTOR_Y),
             'TORQUE_SIGN': TORQUE_SIGN,
+            'MOMENT_CONSTANT': MOMENT_CONSTANT,
+            'ROTOR_DIR': list(ROTOR_DIR), 'YAW_TORQUE_SIGN': YAW_TORQUE_SIGN,
+            'tau_source': self.tau_source,
+            'motor_window_avg': int(bool(self.motor_window_avg)),
             # 刚体常数:算 J·omega_dot + omega x J·omega 要用
             'Jxx': mhe_p.Jxx, 'Jyy': mhe_p.Jyy, 'Jzz': mhe_p.Jzz,
             'm_nominal': mhe_p.m_nominal, 'g': mhe_p.g,
             'mhe_N': mhe_p.N, 'mhe_dt': mhe_p.dt,
-            # 真值条件(诊断分桶/留出全靠它)
-            'grip_true_payload_mass': self.grip_true_payload_mass,
+            'grip_payload_envelope': self.grip_payload_envelope,
             'geom_coupled': int(bool(mhe_p.geom_coupled)),
             'eval_true_payload_mass': self.eval_true_payload_mass,
             'motor_speed_topic': motor_topic,
             # 语义声明:后处理不能靠猜
             'odom_frame': 'twist.linear/angular = body FLU (原始值,未转 world)',
-            'tau_phys_def': 'tau=TORQUE_SIGN*sum(ROTOR_{Y,-X}*k_f*w^2), 执行器输出力矩,不含 J*omega_dot',
+            'tau_phys_def': ('tau_xy=TORQUE_SIGN*sum(ROTOR_{Y,-X}*k_f*w^2); '
+                             'tau_z=YAW_TORQUE_SIGN*k_m*sum(YAW_DIR*k_f*w^2) '
+                             '(2026-08-25 起不再是 0 占位). '
+                             '执行器输出力矩,不含 J*omega_dot,也不含转子角加速度项'),
             'command_semantics': 'u_opt=NMPC理想输出[T,tx,ty,tz],非执行器输入(下游转 body-rate setpoint 给PX4)',
             'command_has_header': 'False (Float64MultiArray 无时间戳,只有接收时刻)',
             'clock_note': 'use_sim_time 未设;motor 经 ros_gz_bridge(Gazebo), odom 经 mavros(PX4) — 时钟域须用数据验证',
@@ -499,8 +711,10 @@ class MHENode(Node):
         self.timer = self.create_timer(mhe_p.dt, self.timer_cb)
         self.get_logger().info(
             f'MHE node initialized! tau_source={self.tau_source} '
-            f'(roll/pitch {"电机转速反算" if self.tau_source == "phys" else "NMPC意图值"}, '
-            f'yaw 恒为 NMPC 意图值), geom_release_mode={self.geom_release_mode}. '
+            f'(roll/pitch {"电机转速反算" if self.tau_source in ("phys", "phys_full") else "NMPC意图值"}'
+            f', yaw {"电机转速反算(完全解耦)" if self.tau_source == "phys_full" else "NMPC意图值"})'
+            f', motor_window_avg={self.motor_window_avg}'
+            f', geom_release_mode={self.geom_release_mode}. '
             'Waiting for odometry + control data...')
 
     def odom_cb(self, msg):
@@ -538,11 +752,23 @@ class MHENode(Node):
                 # τ_roll=Σy_i·F_i, τ_pitch=-Σx_i·F_i(FLU)。yaw 反扭这里不需要
                 # (c_xy 只靠 roll/pitch),留 0 占位保持三维接口。
                 f = THRUST_CAL_GAIN * MOTOR_CONSTANT * w2
+                self._motor_f_acc += f
+                self._motor_n += 1
                 tau_roll = TORQUE_SIGN * float(np.sum(ROTOR_Y * f))
                 tau_pitch = TORQUE_SIGN * float(-np.sum(ROTOR_X * f))
-                self.tau_phys = np.array([tau_roll, tau_pitch, 0.0])
+                # yaw 反扭矩(见 MOMENT_CONSTANT 注释):不再是 0 占位。
+                tau_yaw = YAW_TORQUE_SIGN * MOMENT_CONSTANT * float(
+                    np.sum(YAW_DIR * f))
+                self.tau_phys = np.array([tau_roll, tau_pitch, tau_yaw])
                 self.resid_log.log_motor(msg, w, self.tau_phys,
                                          self.thrust_phys)
+                # pre-offboard 冷启动:NMPC 还没接管时,用纯电机反算值合成
+                # u_known,让 timer_cb 的 `u_known is None` 那道门放行。
+                # 一旦 u_opt 到达(_u_from_nmpc=True)就永久让位给 u_opt_cb。
+                if (self.pre_offboard_estimate and not self._u_from_nmpc
+                        and self._pre_offboard_gate_ok()):
+                    self.u_known = np.array(
+                        [self.thrust_phys, tau_roll, tau_pitch, tau_yaw])
 
     def mass_event_cb(self, msg):
         """质量突变事件 = **卸载**(wrench drop / gripper drop——nmpc_node 释放
@@ -552,7 +778,6 @@ class MHENode(Node):
         自己从当前值连续收敛回空机,这样才验证得了"模型正确后估计器能回归"。
         wrench 场景本来就没几何(attach_offset 恒 None),这里是无害的 no-op。"""
         self._payload_attached = False
-        self._m_p_hat_ratchet = 0.0
         self.attach_offset = None
         self._on_mass_event('drop')
 
@@ -561,35 +786,21 @@ class MHENode(Node):
         if data.shape[0] == 3 and np.all(np.isfinite(data)):
             self.attach_offset = data
             self._r_p_last = data.copy()   # 'self' 释放模式下模型只认它
-            self._m_p_hat_ratchet = 0.0  # 新 attach:棘轮重新从 0 起(见 __init__ 注释)
             self._payload_attached = True   # 载荷上机,开放几何修正
         self._on_mass_event('attach (gripper)')
 
     def _payload_geometry(self, r_p):
         """由载荷相对机体的几何偏移 r_p=[rx,ry,rz](rz<0)算 (dJ, c_xy)。跟
         acados_nmpc_node.py 的同名方法完全一致(平行轴定理+复合质心),区别
-        是这里没有 m_p/m_t 真值。m_p_hat 有三条来源,优先级从高到低:
-          ①grip_true_payload_mass>0:真值(诊断专用,真机拿不到)
-          ②grip_geom_mp_prior>0:**独立操作先验,完全不读 m_est(推荐的生产路径,
-            2026-07-19 完全解耦改造)**
-          ③否则:m_est 反推+棘轮+floor(旧的耦合路径,floor 只护低估方向)
-        ③之所以危险:它构成了"self.m_est 反推 m_p_hat 再算 dJ/c_xy、dJ/c_xy 又反过来影响 self.m_est"
-        直接拿瞬时 self.m_est,棘轮(只增不减)的理由见 __init__ 里
-        _m_p_hat_ratchet 的注释:瞬时值在 LIFT 暂态失败期间可能跌破
-        m_nominal,把修正读成 0,恰好在最需要它的时候自己失效。
+        是这里没有 m_p/m_t 真值。2026-08-26 去先验改造后 m_p_hat 只有**一条**
+        来源:grip_payload_envelope(载荷包线上界,机架规格)。原先的三条来源
+        (真值直灌 / 操作先验 / m_est 反推+棘轮+floor)全部删除——前两条是任务
+        信息(要求部署时知道这趟吊多重),第三条是 07-09 坐实的自举正反馈根因
+        ("m_est 反推 m_p_hat 再算 dJ/c_xy、dJ/c_xy 又反过来影响 m_est")。
 
-        ⚠️ 已知局限(2026-07-07 讨论,未实测但架构上成立的对称风险):棘轮
-        只解决"低估坍缩到 0"这一个方向,治不了对称的另一个方向——如果某次
-        暂态 m_est 向上超调,棘轮会把这个虚高值永久锁住,之后 dJ/c_xy 就按
-        虚高质量算,长期偏大。6 次 ry=0.05 实测只出现过低估,从未出现过超调,
-        所以暂不上更重的架构(低通/迟滞/attach 时锁定几何配置独立于 m_est)
-        ——证据不对称,不该为没观测到的故障方向预先做重设计。这里只加一个
-        廉价兜底:棘轮上限钳在 m_max-m_nominal(物理上"载荷不可能比这更重"
-        的边界),防止极端超调把 dJ/c_xy 锁到离谱的值,不改变已验证的行为。
-
-        诊断分支(grip_true_payload_mass>0):跳过棘轮,直接用真值——彻底摘掉
-        "self.m_est 反推 m_p_hat 再算 dJ/c_xy、dJ/c_xy 又反过来影响 self.m_est"
-        这个自举耦合,只诊断用,见 __init__ 里该参数的注释。
+        (历史:棘轮 + 永久地板曾是打破自举耦合的过渡方案,只护住"低估坍缩到
+        0"一个方向,对称的"暂态向上超调被永久锁死"治不了;常数包线两个方向
+        一起消除,棘轮已随之删除。)
 
         ⚠️ 物理状态门控(2026-07-15):载荷不在机上就直接返回零几何,**不看棘轮
         也不看 attach_offset**——棘轮只增不减、attach_offset 保留最后一次几何,
@@ -598,30 +809,80 @@ class MHENode(Node):
         """
         if not self._payload_attached:
             return 0.0, np.zeros(2)
-        if self.grip_true_payload_mass > 0.0:
-            m_p_hat = self.grip_true_payload_mass
-        elif self.grip_geom_mp_prior > 0.0:
-            # 完全解耦路径:几何大小 = 独立操作先验,**不读 m_est**。
-            # 这一支同时切断 m_est→dJ 和 m_est→c_xy 两条自举链(共用 m_p_hat 瓶颈),
-            # 且不像 floor 那样只护住低估方向——向上超调被棘轮永久锁死的对称风险
-            # 也一并消除(棘轮在这条路径上根本不参与)。见 __init__ 里该参数注释。
-            m_p_hat = self.grip_geom_mp_prior
-        else:
-            m_p_hat = max(self.m_est - mhe_p.m_nominal, 0.0)
-            self._m_p_hat_ratchet = max(self._m_p_hat_ratchet, m_p_hat)
-            self._m_p_hat_ratchet = min(
-                self._m_p_hat_ratchet, mhe_p.m_max - mhe_p.m_nominal)
-            m_p_hat = self._m_p_hat_ratchet
-            # 方案C:永久下界地板(见 __init__ 注释),打破 m_est<->dJ/c_xy
-            # 自举鸡生蛋。不衰减、不交回。
-            if self.grip_geom_mp_floor > 0.0:
-                m_p_hat = max(m_p_hat, self.grip_geom_mp_floor)
+        # 几何标度 = 载荷包线上界(机架规格)。常数、**完全不读 m_est**,
+        # 自举耦合在结构上不存在。见 __init__ 里该参数注释。
+        m_p_hat = self.grip_payload_envelope
         m_t = mhe_p.m_nominal + m_p_hat
         mu = mhe_p.m_nominal * m_p_hat / m_t if m_t > 0.0 else 0.0
         dJ = mu * (r_p[2] ** 2 + 0.5 * (r_p[0] ** 2 + r_p[1] ** 2))
         c = (m_p_hat / m_t) * np.asarray(r_p[0:2], dtype=float) if m_t > 0.0 \
             else np.zeros(2)
         return float(dJ), c
+
+    def _pre_offboard_gate_ok(self):
+        """pre-offboard 段是否允许合成 u_known(起飞门控)。
+
+        两条都必须过:①推力高于 seed_thrust_min(没在飞就免谈);②真实高度
+        高于 pre_offboard_min_z。第二条是关键 —— **pre-offboard 段真的会在
+        地上**,这跟 offboard 之后不一样(NMPC 在 1.5m 空中才接管,那个坑够
+        不着)。地面支持力会让 T_phys 与 m·g 脱钩,此时估出来的质量没有意义。
+        """
+        if self.thrust_phys is None or not math.isfinite(self.thrust_phys) \
+                or self.thrust_phys < mhe_p.seed_thrust_min:
+            return False
+        if self.x_meas is None or self.x_meas[2] < self.pre_offboard_min_z:
+            return False
+        return True
+
+    def _update_pre_offboard_convergence(self):
+        """冷启动收敛判定:最近 N 帧 m_est 的样本标准差落到阈值以下就算收敛。
+
+        只在 pre-offboard 段(NMPC 未接管)跑;一旦判定收敛就锁存 True,不再
+        因为后续抖动翻回未收敛 —— 收敛是个一次性的"闸门打开"事件,不是需要
+        逐帧维持的状态(否则 NMPC 会收到断续的质量更新)。
+        """
+        if not self.pre_offboard_estimate or self._u_from_nmpc \
+                or self._pre_off_converged:
+            return
+        if self._pre_off_first_frame is None:
+            self._pre_off_first_frame = self.frames
+        self._pre_off_m_hist.append(self.m_est)
+        if len(self._pre_off_m_hist) > self.pre_off_conv_frames:
+            self._pre_off_m_hist.pop(0)
+        if len(self._pre_off_m_hist) < self.pre_off_conv_frames:
+            return
+        sd = float(np.std(self._pre_off_m_hist, ddof=1))
+        if sd < self.pre_off_conv_std:
+            self._pre_off_converged = True
+            self.get_logger().info(
+                f'[cold-start] 收敛! m_est={self.m_est:.4f} kg '
+                f'(最近 {self.pre_off_conv_frames} 帧 std={sd:.4f} < '
+                f'{self.pre_off_conv_std}), 用时 '
+                f'{(self.frames - self._pre_off_first_frame) * mhe_p.dt:.1f}s '
+                f'| 开始向 NMPC 发布')
+
+    def _mass_publish_allowed(self):
+        """是否允许把 m_est 发给 NMPC。
+
+        pre_offboard_estimate 关闭时恒为 True(历史行为逐字节不变)。开启时,
+        pre-offboard 段必须等收敛才放行 —— 未收敛的冷启动值灌进 NMPC 的动力
+        学模型是危险的(m 偏小 => 悬停推力算低 => 掉高度)。超时兜底:等太久
+        还不收敛就放行并 WARN,避免退化成"NMPC 永远收不到估计"(那等于悄悄
+        变成 use_mhe=False,比发个粗糙值更糟,而且不容易在日志里看出来)。
+        """
+        if not self.pre_offboard_estimate or self._u_from_nmpc \
+                or self._pre_off_converged:
+            return True
+        if self._pre_off_first_frame is not None and (
+                self.frames - self._pre_off_first_frame
+                > self.pre_off_timeout_frames):
+            self._pre_off_converged = True   # 锁存,避免每帧刷 WARN
+            self.get_logger().warn(
+                f'[cold-start] 超时未收敛 ('
+                f'{self.pre_off_timeout_frames * mhe_p.dt:.0f}s), 放行当前 '
+                f'm_est={self.m_est:.4f} kg 给 NMPC')
+            return True
+        return False
 
     def _seed_mass_from_thrust(self, why: str):
         """零先验的质量种子:悬停近似 m ≈ T_phys/g。
@@ -632,16 +893,32 @@ class MHENode(Node):
         也不用一个不成立的近似。
 
         返回 (m_seed, from_thrust)。"""
-        if not mhe_p.seed_from_thrust:
-            return float(mhe_p.m_nominal), False
+        # no_mass_prior(冷启动)档下**绝不回退 m_nominal** —— 那恰恰是要去掉的
+        # 那个先验。兜底改用箱约束中点(不含任何 m_B 信息),并且忽略
+        # seed_from_thrust 开关:冷启动档下 T_phys/g 是唯一可用的零先验起点,
+        # 而 T_phys 是**测量**不是先验。
+        # ⚠️ 语义:这一档里种子只进 x_guess(SQP 起点)和 x0_bar,而 x0_bar 的
+        #    质量维权重已降到 1e-6 —— 它不进代价函数,**不影响最优解**,只影响
+        #    收敛迭代数。initial guess ≠ prior,论文措辞必须分清这两个词。
+        if mhe_p.no_mass_prior:
+            fallback = 0.5 * (mhe_p.m_min + mhe_p.m_max)
+            fallback_why = f'箱约束中点 {fallback:.3f}'
+            use_thrust = True
+        else:
+            fallback = float(mhe_p.m_nominal)
+            fallback_why = f'm_nominal={fallback:.3f}'
+            use_thrust = mhe_p.seed_from_thrust
+
+        if not use_thrust:
+            return fallback, False
         T = self.thrust_phys
         if T is None or not math.isfinite(T) or T < mhe_p.seed_thrust_min:
             self.get_logger().warn(
                 f'mass seed ({why}): thrust_phys unavailable or too low '
                 f'({"None" if T is None else f"{T:.2f}N"} < '
                 f'{mhe_p.seed_thrust_min:.2f}N), falling back to '
-                f'm_nominal={mhe_p.m_nominal:.3f} kg')
-            return float(mhe_p.m_nominal), False
+                f'{fallback_why} kg')
+            return fallback, False
         return float(np.clip(T / mhe_p.g, mhe_p.m_min, mhe_p.m_max)), True
 
     @staticmethod
@@ -815,7 +1092,62 @@ class MHENode(Node):
             self._resid_pending = 0
             self._resid_settled = False
             self._resid_stable = 0
+            # 阶跃判据同样复位:跨事件比较两个短窗没有意义,而且过渡期的 T_phys
+            # 本来就在阶跃中间,留着会在过渡结束那一帧诈出一个假事件。
+            self._step_pending = 0
+            self._tphys_hist.clear()
             return
+
+        # ===== 并行阶跃判据(见 __init__ 里 resid_step_enable 注释)=====
+        # 放在慢基线判据**之前**:后者在未预热时会直接 return,阶跃判据必须先跑,
+        # 否则一旦预热受阻就永远轮不到它 —— 而"预热受阻时仍能检出"正是它的用途。
+        self._tphys_hist.append(T)
+        _n2 = 2 * self.resid_step_half
+        if len(self._tphys_hist) > _n2:
+            self._tphys_hist.pop(0)
+        if self.resid_step_enable and len(self._tphys_hist) == _n2:
+            h = self.resid_step_half
+            _pre = sum(self._tphys_hist[:h]) / h
+            _post = sum(self._tphys_hist[h:]) / h
+            _d = _post - _pre
+            if abs(_d) > self.resid_step_thresh:
+                self._step_pending += 1
+                if self._step_pending >= self.resid_step_persist:
+                    # 事件帧取两窗交界(阶跃真正发生的位置),而不是当前帧
+                    _f = self.frames - 1 - h
+                    self.scheduler.notify_event(_f)
+                    _dropped = _d < 0.0
+                    self.get_logger().info(
+                        f'[step-detect] 阶跃自检测 at frame {_f}: '
+                        f'Δ={_d:+.2f}N over {2*h*mhe_p.dt:.1f}s '
+                        f'(阈值 {self.resid_step_thresh}N, persist='
+                        f'{self.resid_step_persist}), direction='
+                        f'{"DROP" if _dropped else "ATTACH"}; de-weighting')
+                    # 释放几何用**更高**的门槛:轨迹切换与质量突变在推力通道上
+                    # 不可分,误降权只是慢一点,误释放几何会让模型丢掉还挂着的载荷。
+                    if (_dropped and self.resid_release_geom
+                            and self._payload_attached
+                            and -_d >= self.resid_step_release_thresh):
+                        # 只释放几何状态。棘轮 _m_p_hat_ratchet 已随 2026-08-26
+                        # 去先验改造移除(几何标度改用常数包线,不再读 m_est,
+                        # 棘轮在这条路径上根本不参与),故此处不再有它要清。
+                        self._payload_attached = False
+                        self.attach_offset = None
+                        self.get_logger().info(
+                            f'[step-detect] → 自主释放载荷几何 '
+                            f'(|Δ|={-_d:.2f}N ≥ '
+                            f'{self.resid_step_release_thresh}N)')
+                    elif _dropped:
+                        self.get_logger().info(
+                            f'[step-detect] 下降型事件但 |Δ|={-_d:.2f}N < '
+                            f'{self.resid_step_release_thresh}N,只降权不释放几何'
+                            '(可能是轨迹切换而非卸载)')
+                    self._step_pending = 0
+                    self._tphys_hist.clear()
+                    return
+            else:
+                self._step_pending = 0
+
         if self._resid_baseline is None:
             self._resid_baseline = T
             self._resid_stable = 0
@@ -843,12 +1175,34 @@ class MHENode(Node):
             self._resid_pending += 1
             if self._resid_pending >= self.resid_persist:
                 self.scheduler.notify_event(self._resid_cross_frame)
+                # 事件方向:T_phys 掉下去 = 载荷没了(drop);涨上来 = 上货(attach)。
+                # dev 本身是 abs(),方向要单独取。
+                dropped = (T < self._resid_baseline)
                 self.get_logger().info(
                     '[no-signal] mass mutation self-detected at frame '
                     f'{self._resid_cross_frame}: T_phys={T:.2f}N vs baseline '
                     f'{self._resid_baseline:.2f}N (dev {dev:.2f}N > '
                     f'{self.confirm_thresh:.1f}N over {self.resid_persist} '
-                    'frames); de-weighting pre-event stages')
+                    f'frames, direction={"DROP" if dropped else "ATTACH"}); '
+                    'de-weighting pre-event stages')
+                # --- 自主释放几何(2026-08-25)---
+                # 原本只有 mass_event_cb(外部信号)会释放"幽灵几何";残差自检测
+                # 这条路只降权、不释放,于是一旦把 drop 事件关掉,MHE 就会永远
+                # 挂着已经不存在的载荷几何,继续用它给 om_dot 算 dJ/c_xy。
+                # ⚠️ geom_release_mode='self'(靠 m_est 让几何自行熄灭)在 legacy
+                #    档是被明确拒绝的(几何幅值来自先验/棘轮,不随质量熄灭),所以
+                #    legacy 档下要去掉外部 drop 信号,**只能**走这条"自检测到
+                #    推力下降 → 自己释放几何"的路。
+                # 这三件事与 mass_event_cb 完全一致(释放几何 / 清棘轮 / 丢弃
+                # attach 几何),差别只在触发源:那边是别人告诉它,这边是自己看出来的。
+                # **不动 m_est** —— 同 mass_event_cb 的理由:让估计器自己连续
+                # 收敛回空机,才验证得了"模型正确后它能回归"。
+                if (dropped and self.resid_release_geom
+                        and self._payload_attached):
+                    self._payload_attached = False
+                    self.attach_offset = None
+                    self.get_logger().info(
+                        '[no-signal] → 自主释放载荷几何(无外部 drop 信号)')
                 self._resid_pending = 0
             return
         # 未越阈(或阵风脉冲已回落):清持续计数,慢基线继续低通跟踪长期缓漂
@@ -858,6 +1212,15 @@ class MHENode(Node):
     def u_opt_cb(self, msg):
         u = np.array(msg.data)
         if u.shape[0] == mhe_p.nu_known and np.all(np.isfinite(u)):
+            if not self._u_from_nmpc:
+                self._u_from_nmpc = True
+                if self.pre_offboard_estimate:
+                    # 接管时刻:把冷启动估计的成绩单打出来,便于事后对齐
+                    # "NMPC 拿到的初始质量"与"它自己硬编码的 p.m"。
+                    self.get_logger().info(
+                        f'[cold-start] NMPC 接管 (u_opt 首帧): '
+                        f'm_est={self.m_est:.4f} kg, '
+                        f'converged={self._pre_off_converged}')
             # 记 NMPC **原始**理想输出:必须在下面把 u[0] 换成 thrust_phys 之前,
             # 否则 command 流的推力列会变成 motor 流的量,两流不再独立。
             self.resid_log.log_command(u)
@@ -869,12 +1232,37 @@ class MHENode(Node):
             if self.thrust_phys is not None:
                 u = u.copy()
                 u[0] = self.thrust_phys
-            if self.tau_source == 'phys' and self.tau_phys is not None:
+            if self.tau_source in ('phys', 'phys_full') \
+                    and self.tau_phys is not None:
                 u = u.copy()
                 u[1] = float(self.tau_phys[0])   # roll
                 u[2] = float(self.tau_phys[1])   # pitch
-                # u[3](yaw)保持 NMPC 意图值:tau_phys 的 yaw 是 0 占位,不是实测
+                if self.tau_source == 'phys_full':
+                    # 完全解耦:yaw 也用电机反算的真实反扭矩。至此 u_known 四个
+                    # 分量**没有一个**来自 NMPC —— MHE 只吃 allocation 的输出。
+                    u[3] = float(self.tau_phys[2])
+                # 'phys' 档:u[3] 仍是 NMPC 意图值(legacy,实测比真实大 3 倍)
             self.u_known = u
+
+    def _drain_motor_avg(self):
+        """取出上一个 MHE 采样区间内电机推力的**平均**,并清空累加器。
+
+        返回 (T_avg, tau_avg) 或 (None, None)(区间内没收到电机数据)。
+        见 _motor_f_acc 处注释:250Hz -> 10Hz 必须用区间平均而非端点采样,
+        否则就是 2026-08-24 记下的那个"准但混叠"。
+        """
+        if self._motor_n == 0:
+            return None, None
+        f = self._motor_f_acc / self._motor_n
+        self._motor_f_acc = np.zeros(4)
+        self._motor_n = 0
+        T = float(np.sum(f))
+        tau = np.array([
+            TORQUE_SIGN * float(np.sum(ROTOR_Y * f)),
+            TORQUE_SIGN * float(-np.sum(ROTOR_X * f)),
+            YAW_TORQUE_SIGN * MOMENT_CONSTANT * float(np.sum(YAW_DIR * f)),
+        ])
+        return T, tau
 
     def timer_cb(self):
         # NMPC 接管姿态控制之前(还在用位置 setpoint 飞向起点)没有 u_opt,
@@ -886,10 +1274,23 @@ class MHENode(Node):
                                     self.attach_offset, self.thrust_phys,
                                     truth=self._truth_row())
 
+        # 抗混叠:把这一拍要入缓冲的 u_known 里"来自电机"的分量换成上一个
+        # MHE 区间的平均值(而不是回调里最后一帧的瞬时值)。只动本来就取自
+        # 电机的分量 —— NMPC 意图值那些原样保留,不改既有档位的语义。
+        T_avg, tau_avg = self._drain_motor_avg()
+        u_row = self.u_known.copy()
+        if self.motor_window_avg and T_avg is not None:
+            u_row[0] = T_avg                      # u[0] 恒为物理推力
+            if self.tau_source in ('phys', 'phys_full'):
+                u_row[1] = float(tau_avg[0])
+                u_row[2] = float(tau_avg[1])
+            if self.tau_source == 'phys_full':
+                u_row[3] = float(tau_avg[2])
+
         self.y_buf.append(self.x_meas.copy())
         if len(self.y_buf) > mhe_p.N + 1:
             self.y_buf.pop(0)
-        self.u_buf.append(self.u_known.copy())
+        self.u_buf.append(u_row)
         if len(self.u_buf) > mhe_p.N:
             self.u_buf.pop(0)
         self.frames += 1
@@ -910,6 +1311,16 @@ class MHENode(Node):
         """强闭环 c_xy 在线估计(B.3 Phase1,只记录不闭环)。稳态悬停时从电机
         转速反算的体力矩直接反解复合质心水平偏移,慢 EMA 滤噪。见 __init__ 里
         c_xy_est 的注释。c_xy=[cx,cy]=[-τ_pitch/T, τ_roll/T]。"""
+        # --- 一阶质量矩驱动(见 __init__ 里 c_xy_from_moment 注释)---
+        # 放在最前:这条路不依赖 tau_phys/稳态,s 本身就是窗口解算出来的。
+        if self.c_xy_from_moment and mhe_p.ns:
+            m_t = max(float(self.m_est), mhe_p.m_min)
+            self.c_xy_est = np.asarray(self.s_est, dtype=float) / m_t
+            self._c_xy_inited = True
+            self.c_xy_est_pub.publish(
+                Float64MultiArray(data=[float(self.c_xy_est[0]),
+                                        float(self.c_xy_est[1])]))
+            return
         if self.tau_phys is None or self.thrust_phys is None \
                 or self.x_meas is None:
             return
@@ -933,6 +1344,49 @@ class MHENode(Node):
             Float64MultiArray(data=[float(self.c_xy_est[0]),
                                     float(self.c_xy_est[1])]))
 
+    def _maneuver_level(self):
+        """当前机动度:角速度与水平速度各自相对阈值的倍数,取大者。
+        <=1 = 悬停/准静态;>1 = 机动中。口径与 _update_c_xy_est 的稳态门控一致。"""
+        if self.x_meas is None:
+            return 0.0
+        om = float(np.linalg.norm(self.x_meas[10:13]))
+        v = float(np.linalg.norm(self.x_meas[3:6]))
+        return max(om / max(self.maneuver_omega_thresh, 1e-6),
+                   v / max(self.maneuver_vel_thresh, 1e-6))
+
+    def _apply_maneuver_gate(self, in_transition: bool):
+        """机动期把 Q0 的质量维锚紧,悬停期恢复名义。
+
+        gain = clip(lvl^exponent, 1, cap):悬停(lvl<=1)时恒为 1(名义权重,
+        行为与关闭开关时逐位相同);机动越猛锚得越紧,封顶 cap。用连续函数而不是
+        二值开关 —— 二值会在阈值附近抖动时反复切换权重,把一个数值问题变成一个
+        控制问题。写入前量化到 1.25 倍的对数格,避免每帧都 cost_set。
+        """
+        self._mg_frames_total += 1
+        if in_transition:
+            return          # 事件过渡期让位(见 __init__ 注释)
+        lvl = self._maneuver_level()
+        gain = 1.0 if lvl <= 1.0 else min(lvl ** self.maneuver_exponent,
+                                          self.maneuver_q0_cap)
+        if gain > 1.0:
+            self._mg_frames_gated += 1
+        # 量化:落到 1.25^k 的格子上,减少无谓的 cost_set
+        q = 1.0 if gain <= 1.0 else 1.25 ** round(math.log(gain, 1.25))
+        if self._mg_gain_applied is not None and abs(q - self._mg_gain_applied) < 1e-9:
+            return
+        W0 = block_diag(mhe_p.R, mhe_p.Q, mhe_p.Q0).copy()
+        idx = mhe_p.nx + mhe_p.nw + mhe_p.nx        # Q0 块里质量那一维的全局下标
+        W0[idx, idx] *= q
+        self.solver.cost_set(0, 'W', W0)
+        self._mg_gain_applied = q
+        # 每次实际改档都留一行:没有这行就完全无法事后判断门控到底有没有起作用
+        # (2026-08-25 首轮 SITL 就栽在这:统计变量加了却没打印,两轮飞完拿不出
+        # 任何门控生效的证据)。改档次数被量化压得很少,不会刷屏。
+        self.get_logger().info(
+            f'[maneuver-gate] lvl={lvl:.2f} → Q0[m] ×{q:.3g} '
+            f'(gated {self._mg_frames_gated}/{self._mg_frames_total} 帧, '
+            f'{100.0 * self._mg_frames_gated / max(self._mg_frames_total, 1):.0f}%)')
+
     def _solve_window(self):
         N, nx, nw = mhe_p.N, mhe_p.nx, mhe_p.nw
         y_win = self.y_buf
@@ -945,9 +1399,18 @@ class MHENode(Node):
             self.x_guess = [self._aug(y_win[min(i, N)], m_seed)
                              for i in range(N + 1)]
             self.m_est = m_seed
-            self.get_logger().info(
-                f'arrival prior seeded: m={m_seed:.3f} kg '
-                f'({"T_phys/g, no prior" if from_thrust else "m_nominal prior"})')
+            if mhe_p.no_mass_prior:
+                # 冷启动档:这不是 "prior",Q0 质量维已经是 1e-6。
+                self.get_logger().info(
+                    f'[cold-start] initial guess (NOT a prior): '
+                    f'm={m_seed:.3f} kg '
+                    f'({"T_phys/g (measurement)" if from_thrust else "box midpoint"})'
+                    f' | Q0_m={mhe_p.Q0[mhe_p.nx, mhe_p.nx]:.1e}, '
+                    f'lbx=[{mhe_p.m_min:.3f}, {mhe_p.m_max:.3f}]')
+            else:
+                self.get_logger().info(
+                    f'arrival prior seeded: m={m_seed:.3f} kg '
+                    f'({"T_phys/g, no prior" if from_thrust else "m_nominal prior"})')
 
         # 已知几何 [dJ, cx, cy]:用当前 m_est 和 attach 实测偏移算(见
         # _payload_geometry),窗口内所有 stage 共用同一个当前值——geometry 是
@@ -958,9 +1421,9 @@ class MHENode(Node):
         if mhe_p.geom_coupled:
             # 耦合档:geom 槛位装**载荷几何偏移 r_p**,dJ/c 由模型内部按被估质量
             # 现算(见 mhe_model.py)。这里不再需要任何 m_p_hat ——
-            # grip_geom_mp_prior / grip_geom_mp_floor / 棘轮 / grip_true_payload_mass
-            # 在这一档**全部不参与**(它们本来就是"缺了 ∂(J,c)/∂m 这条导数通路"
-            # 的补丁:先验、地板、棘轮都是为了稳住那条外层不动点迭代)。
+            # grip_payload_envelope 在这一档**不参与**(历史上的先验/地板/棘轮
+            # 本来就是"缺了 ∂(J,c)/∂m 这条导数通路"的补丁,用来稳住那条外层
+            # 不动点迭代;它们已于 2026-08-26 全部删除)。
             geom = self._model_r_p()
             # ⚠️ 仅供日志/诊断,**不是模型用的值**:模型内部按每次求解的被估质量
             # 现算 J(m)/c(m);这里是拿"上一次的 m_est"代入同一套代数,好让日志有个
@@ -1019,6 +1482,10 @@ class MHENode(Node):
                     'started: pre-event stages de-weighted'
                     if in_transition else 'ended: nominal weights restored'))
             self._in_transition = in_transition
+
+        # 机动门控(见 __init__ 注释):事件过渡期让位,避免两套 stage-0 W 互相覆盖
+        if self.maneuver_gate_enable:
+            self._apply_maneuver_gate(in_transition)
 
         # 实时性仪表:只测 solver.solve() 本身的墙钟耗时,用于论文 timing 表。
         # 与 acados_nmpc_node 里的 solve_time 同口径(墙钟、单位 ms),便于对表。
@@ -1086,7 +1553,9 @@ class MHENode(Node):
         self.x0_bar = x_sol[1].copy()
         self.x_guess = [x_sol[min(i + 1, N)].copy() for i in range(N + 1)]
 
-        self.mass_pub.publish(Float64(data=self.m_est))
+        self._update_pre_offboard_convergence()
+        if self._mass_publish_allowed():
+            self.mass_pub.publish(Float64(data=self.m_est))
         if self.tau_phys is not None:
             self.tau_phys_pub.publish(
                 Float64MultiArray(data=[float(v) for v in self.tau_phys]))
@@ -1130,13 +1599,16 @@ class MHENode(Node):
                             f'(m_p={m_p:.3f} r=[{rx:+.3f},{ry:+.3f}])')
                 self.get_logger().info(
                     f'[tau_phys] roll={tr:+.3f} pitch={tp:+.3f} Nm{pred}')
-            # B.3 Phase1 验证行:在线 c_xy 估计 vs attach 真值反推的 c_xy。真值
-            # 用 grip_true_payload_mass(诊断真值)优先,否则退回 m_est 反推 m_p。
+            # B.3 Phase1 验证行:在线 c_xy 估计 vs attach 真值反推的 c_xy。质量
+            # 因子用 eval_true_payload_mass(**纯评估**真值,不通往模型),否则退回
+            # m_est 反推 —— 后者只是个标签近似,不是真值(见记忆 cxy-truth-label-defect:
+            # 论文图 4 与演示视频都已按真值重算)。2026-08-26 前这里优先读的是
+            # grip_true_payload_mass,那个开关会把真值灌进模型,已随去先验改造删除。
             if self.c_xy_est_enable and self._c_xy_inited:
                 ref = ''
                 if self.attach_offset is not None:
-                    m_p = (self.grip_true_payload_mass
-                           if self.grip_true_payload_mass > 0.0
+                    m_p = (self.eval_true_payload_mass
+                           if self.eval_true_payload_mass > 0.0
                            else max(self.m_est - mhe_p.m_nominal, 0.0))
                     m_t = mhe_p.m_nominal + m_p
                     if m_t > 0.0:

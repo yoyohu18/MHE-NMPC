@@ -12,23 +12,12 @@
 # 用法:  [GRIP_PAYLOAD_KG=0.3 GRIP_ECC_Y=0.10 METHOD=thetastar GRIP_DYN_R=5.0 \
 #          GRIP_DYN_W=0.283 GRIP_DYN_DZ=0.8 GRIP_DROP_AFTER=55.0 \
 #          GRIP_DROP_AT_TIP=true GRIP_DYNAMIC=true \
-#          GRIP_GEOM_MP_PRIOR=0.3 GRIP_PAYLOAD_PRIOR=0.3 \
-#          MHE_CONFIRM_PRIOR=0.3 MHE_CONFIRM_ALPHA=0.9875] \
+#          GRIP_PAYLOAD_ENVELOPE=0.5 MHE_CONFIRM_ALPHA=0.9875] \
 #          bash src/scripts/gripper/run_sitl_gripper_viz.sh
 #        GRIP_DYN_DZ=0 可退回原来的平面 8 字。
 # 收栈:关掉各 gnome-terminal 窗口即可;或 pkill -9 -f 'px4_sitl|gz sim|mhe_node|...'。
 
 PAYLOAD_KG="${GRIP_PAYLOAD_KG:-0.3}"
-# 载荷几何的独立操作先验(完全解耦路径,几何不读 m_est)。默认取本场景标称载荷,
-# 与 run_gripper_headless.sh 保持一致——2026-07-20 发现这个可视化脚本漏传该参数,
-# 会静默退回耦合路径(floor 兜底),导致"看到的行为"和"实验数据"跑的不是同一套架构。
-GEOM_MP_PRIOR="${GRIP_GEOM_MP_PRIOR:-$PAYLOAD_KG}"
-# NMPC 侧的同类操作先验:attach 瞬间用它一次性初始化 dJ 与 PX4 内环增益
-# (不等 MHE 收敛,见 acados_nmpc_node._grip_attach_phase 的 geom_source=online
-# 分支)。2026-08-22:原来这里硬编码 0.3,GRIP_PAYLOAD_KG 改档时不跟着走,
-# 和 run_gripper_headless.sh(grip_payload_prior:=$GRIP_GEOM_MP_PRIOR_D)不是
-# 同一套先验;现改为默认跟随 GEOM_MP_PRIOR,单独覆盖用 GRIP_PAYLOAD_PRIOR。
-PAYLOAD_PRIOR="${GRIP_PAYLOAD_PRIOR:-$GEOM_MP_PRIOR}"
 ECC_Y="${GRIP_ECC_Y:-0.10}"
 METHOD="${METHOD:-M0}"                 # M0 | thetastar
 # ⚠️2026-07-31:默认从 thetastar 改为 M0。M0 才是主线部署配置
@@ -69,6 +58,42 @@ DYN_DZ="${GRIP_DYN_DZ:-0.8}"
 #    默认 (2.5-0.55)/3.0 = 0.65 m/s;抬到 10m 还用 3.0s 就是 3.2 m/s 爬升率。
 #    保持 ~0.65 m/s 的话 LIFT_DUR ≈ (Z_HIGH-0.55)/0.65。
 # ⚠️ z 实际范围是 Z_HIGH ± GRIP_DYN_DZ(立体 8 字),留够离地余量。
+# ⚠️ ROS2 的 bool 也是强类型:`-p foo:=1` 会被当 INTEGER,声明为 BOOL 的参数直接
+# 抛 InvalidParameterTypeException —— **节点启动即崩**,崩在自己的 nohup 日志里,
+# 脚本照样往下走,整轮静默没有该节点(2026-08-25 headless 侧实测踩过)。
+_b() { case "$(echo "${1:-}" | tr 'A-Z' 'a-z')" in
+         1|true|yes|on|y) echo true ;; *) echo false ;; esac; }
+_f2dv() { python3 -c "print(float('$1'))"; }
+# LIFT 中途 hold + dJ 跟随 m_est + 机动门控(2026-08-25,默认全关)。
+# 动机与语义见 acados_nmpc_node.py 的 grip_lift_hold_enable / dj_track_mest 注释,
+# 以及 mhe_node.py 的 maneuver_gate_enable 注释。
+LIFT_HOLD=$(_b "${GRIP_LIFT_HOLD:-false}")
+LIFT_HOLD_DZ_D=$(_f2dv "${GRIP_LIFT_HOLD_DZ:-0.35}")
+LIFT_HOLD_SEC_D=$(_f2dv "${GRIP_LIFT_HOLD_SEC:-3.0}")
+DJ_TRACK=$(_b "${DJ_TRACK_MEST:-false}")
+# drop 时是否把 mass_event 发给 MHE。false = 让 MHE 自己从 T_phys 残差看出来
+# (须配 MHE_SIGNAL_MODE=residual)。默认 true = 历史行为。
+DROP_PUB_EVENT=$(_b "${DROP_PUBLISH_MASS_EVENT:-true}")
+MP_CAP_D=$(_f2dv "${GRIP_MP_CAP:-0.6}")
+MANEUVER_GATE=$(_b "${MHE_MANEUVER_GATE:-false}")
+RESID_RELEASE_GEOM=$(_b "${MHE_RESID_RELEASE_GEOM:-true}")
+# 并行阶跃判据(2026-08-26,默认关):短窗前后均值差,不需慢基线因而没有预热失效面。
+# 离线回放验证见 test/test_step_detector_replay.py(drop 延迟 0.30s、余量 2.4×、
+# 稳态零误触发)。⚠️ 轨迹切换与质量突变在推力通道上不可分,所以释放几何用一条
+# 单独的更高门槛 RESID_STEP_REL(默认 2.0N)。
+RESID_STEP=$(_b "${MHE_RESID_STEP:-false}")
+# c_xy 来源:1 = 用一阶质量矩 s/m_T(窗口内估计,无稳态门控,机动中也更新);
+# 0 = 窗外 EMA + 稳态门控(现状,figure-8 中一次都不更新)。需 MHE_ESTIMATE_MOMENT=1。
+C_XY_FROM_MOMENT=$(_b "${MHE_C_XY_FROM_MOMENT:-false}")
+RESID_STEP_HALF="${MHE_RESID_STEP_HALF:-3}"
+RESID_STEP_PERSIST="${MHE_RESID_STEP_PERSIST:-2}"
+RESID_STEP_TH_D=$(_f2dv "${MHE_RESID_STEP_TH:-1.0}")
+RESID_STEP_REL_D=$(_f2dv "${MHE_RESID_STEP_REL:-2.0}")
+MG_OMEGA_D=$(_f2dv "${MHE_MG_OMEGA:-0.15}")
+MG_VEL_D=$(_f2dv "${MHE_MG_VEL:-0.20}")
+MG_CAP_D=$(_f2dv "${MHE_MG_CAP:-10000.0}")
+MG_EXP_D=$(_f2dv "${MHE_MG_EXP:-2.0}")
+
 Z_HIGH="${GRIP_Z_HIGH:-2.5}"
 LIFT_DUR="${GRIP_LIFT_DUR:-3.0}"
 
@@ -94,23 +119,31 @@ DYN_DZ_D=$(_f2d "$DYN_DZ")
 Z_HIGH_D=$(_f2d "$Z_HIGH"); LIFT_DUR_D=$(_f2d "$LIFT_DUR")
 DROP_AFTER_D=$(_f2d "$DROP_AFTER")
 ECC_Y_D=$(_f2d "$ECC_Y"); PAYLOAD_KG_D=$(_f2d "$PAYLOAD_KG")
-GEOM_MP_PRIOR_D=$(_f2d "$GEOM_MP_PRIOR")
-PAYLOAD_PRIOR_D=$(_f2d "$PAYLOAD_PRIOR")
+# 载荷质量信息的**唯一**入口(2026-08-26 去先验改造,与 run_gripper_headless.sh 对齐)。
+#   GRIP_PAYLOAD_ENVELOPE = 机架**能挂的最大载荷**,是平台规格不是"这个包裹多重",
+#   所以它**不违反"不能知道包裹质量"的原则**。同时驱动 NMPC 模型侧 dJ 初值、
+#   PX4 内环增益整定、MHE 几何标度、事件确认阈值 —— 原先这四条路各有一个任务
+#   信息型先验(grip_payload_prior/grip_gain_prior/grip_geom_mp_prior+floor/
+#   confirm_payload_prior),已全部从节点里删除。
+#   0.3kg 工况下任何 >=0.2937 的包线值都给出逐位相同的 MC_*RATE_K(ratio 撞
+#   cap 5.0),数值精度从未被使用。
+#   ⚠️ 轻载(0.15/0.2kg)裸 ratio 只有 3.18/3.84 不在 cap 里,换包线是**真的**改
+#      整定,必须实测过增益/高频振荡才能采信。
+PAYLOAD_ENVELOPE_D=$(_f2d "${GRIP_PAYLOAD_ENVELOPE:-0.5}")
 ATTACH_WINDOW_SEC_D=$(_f2d "${ATTACH_WINDOW_SEC:-40.0}")
 BOX_I=$(python3 -c "print(f'{$PAYLOAD_KG * 0.00375:.6f}')")
 R_XY=$(python3 -c "print(f'{max(0.20, $ECC_Y + 0.08):.3f}')")
 
 if [ "$METHOD" = thetastar ]; then
   THETA="[-4.8038,-1.2080,0.4930,-0.9602,0.9875]"; CALPHA="0.9875"
-  CPRIOR="${MHE_CONFIRM_PRIOR:-$PAYLOAD_KG}"
 else
   THETA="[-4.0,0.0,0.0,0.0]"; CALPHA="-1.0"
-  # CALPHA<0 → 阈值走固定 event_confirm_thresh_n,CPRIOR 此时不被消费。
-  CPRIOR="${MHE_CONFIRM_PRIOR:-0.3}"
 fi
+# 确认阈值 = α·g·grip_payload_envelope(CALPHA<0 时走固定 event_confirm_thresh_n)。
+# 2026-08-26 前这里是 MHE_CONFIRM_PRIOR(默认回落到 $PAYLOAD_KG = box 真值)。
 # α 与 θ 正交(ParametricWeightSchedule 只读 theta[0..3],α 走独立参数)——
 # run_gripper_headless.sh 早就是两个独立环境变量,viz 这边却把它们绑死在 METHOD
-# 分支里,导致"想让 confirm_payload_prior 生效"只能连带切到已被析因消融证伪的
+# 分支里,导致"想让 α 阈值生效"只能连带切到已被析因消融证伪的
 # θ*(见记忆 cem-benefit-refuted)。2026-08-22 解绑:MHE_CONFIRM_ALPHA 可单独
 # 覆盖,于是能跑 run_alpha_only_ablation.sh 里的 alphaonly 臂 = M0 节奏 + α 阈值。
 CALPHA="${MHE_CONFIRM_ALPHA:-$CALPHA}"
@@ -227,7 +260,11 @@ nohup bash -c "source /opt/ros/jazzy/setup.bash && source '$WS/install/setup.bas
     -p grip_z_low:=0.55 -p grip_z_high:=$Z_HIGH_D \
     -p grip_mass_step_sec:=0.0 -p grip_payload_mass:=$PAYLOAD_KG_D -p grip_arm_d:=0.47 \
     -p grip_lift_after_sec:=1.5 -p grip_lift_dur:=$LIFT_DUR_D -p use_mhe:=true \
-    -p geom_source:=online -p grip_payload_prior:=$PAYLOAD_PRIOR_D \
+    -p grip_lift_hold_enable:=$LIFT_HOLD \
+    -p grip_lift_hold_dz:=$LIFT_HOLD_DZ_D -p grip_lift_hold_sec:=$LIFT_HOLD_SEC_D \
+    -p dj_track_mest:=$DJ_TRACK -p grip_mp_cap:=$MP_CAP_D \
+    -p drop_publish_mass_event:=$DROP_PUB_EVENT \
+    -p geom_source:=online -p grip_payload_envelope:=$PAYLOAD_ENVELOPE_D \
     -p geom_release_mode:=${NMPC_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-event}} \
     -p grip_drop_after_sec:=$DROP_AFTER_D \
     -p grip_dynamic_after_lift:=$DYNAMIC \
@@ -242,11 +279,19 @@ MHE_LOG="$LOGDIR/gviz_mhe_$TS.log"; echo "MHE log: $MHE_LOG"
 nohup bash -c "source /opt/ros/jazzy/setup.bash && source '$WS/install/setup.bash' && \
   $ACADOS_ENV && export PYTHONUNBUFFERED=1 && \
   ros2 run offboard_test_acados mhe_node --ros-args \
+    -p maneuver_gate_enable:=$MANEUVER_GATE \
+    -p resid_release_geom:=$RESID_RELEASE_GEOM \
+    -p resid_step_enable:=$RESID_STEP \
+    -p resid_step_half:=$RESID_STEP_HALF -p resid_step_thresh:=$RESID_STEP_TH_D \
+    -p resid_step_persist:=$RESID_STEP_PERSIST \
+    -p resid_step_release_thresh:=$RESID_STEP_REL_D \
+    -p maneuver_omega_thresh:=$MG_OMEGA_D -p maneuver_vel_thresh:=$MG_VEL_D \
+    -p maneuver_q0_cap:=$MG_CAP_D -p maneuver_exponent:=$MG_EXP_D \
     -p motor_speed_topic:=/x500_0/command/motor_speed \
     -p event_trigger_enable:=true -p schedule_theta:='$THETA' \
-    -p confirm_thresh_alpha:=$CALPHA -p confirm_payload_prior:=$CPRIOR \
-    -p grip_geom_mp_floor:=0.15 -p c_xy_est_enable:=true \
-    -p grip_geom_mp_prior:=$GEOM_MP_PRIOR_D \
+    -p confirm_thresh_alpha:=$CALPHA \
+    -p grip_payload_envelope:=$PAYLOAD_ENVELOPE_D -p c_xy_est_enable:=true \
+    -p c_xy_from_moment:=$C_XY_FROM_MOMENT \
     -p eval_true_payload_mass:=$PAYLOAD_KG_D \
     -p geom_release_mode:=${MHE_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-event}} \
     -p event_signal_mode:=${MHE_SIGNAL_MODE:-external}" \

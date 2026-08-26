@@ -424,6 +424,49 @@ class AcadosNMPCNode(Node):
         self.declare_parameter('grip_z_high', 2.0)  # 抬升后悬停高度
         self.declare_parameter('grip_lift_after_sec', 12.0)
         self.declare_parameter('grip_lift_dur', 5.0)
+
+        # ===== LIFT 中途 hold + dJ 跟随 m_est(2026-08-25,默认全关)=====
+        # 动机(gviz_20260825_201344 逐帧实测):
+        #   t=7.70 attach,box 仍在地上 → T_phys 恒为 20.1N(=空机重量,载荷重量
+        #     由地面承担)→ m_est 不但不涨,反而 2.064→2.023 一路下漂。
+        #     **所以"延长 attach 到离地的窗口给 MHE 时间"是无效的**:那段时间
+        #     MHE 没有任何载荷信息可估,拉长只会让它漂得更低。
+        #   t=10.70 box 离地 → T 跳到 24.4N,m_est 开始爬;
+        #   t=11.30(离地后仅 0.6s)m_est=2.319,真值 2.364,误差 -1.9% → **信息这时
+        #     就齐了**;
+        #   t=13.19 发散。中间 1.9s 白白浪费,因为 dJ_est 在 attach 瞬间按
+        #     grip_payload_envelope 定死后**再也不更新**(见 _update_online_geometry)。
+        # 结论:要给 MHE 的时间应该加在**离地之后**,而不是 attach 之后;并且
+        # 估出来的质量必须真的送到 dJ 和内环增益上,否则给再多时间也没用。
+        #
+        # (a) LIFT 中途 hold:抬升到 grip_lift_hold_dz 时把斜坡**冻结**
+        #     grip_lift_hold_sec 秒。此时 box 已离地、载荷全额加载,MHE 有信号
+        #     且飞机还没进入大机动,是估计的最佳窗口。
+        self.declare_parameter('grip_lift_hold_enable', False)
+        self.declare_parameter('grip_lift_hold_dz', 0.35)   # 相对 grip_z_low
+        self.declare_parameter('grip_lift_hold_sec', 3.0)
+        # (b) dJ 跟随 m_est(棘轮 + 上界):把 m_est 的增长送进模型 dJ 和内环增益。
+        # ⚠️ 这条路 2026-07-28 撤销过一次,撤销理由必须原样搬到这里:
+        #    旧实现**每帧双向重推** dJ,两个方向都不安全 ——
+        #      · m_est 高估时 dJ 无界跟涨(实测 m_est=3.734 → dJ=0.204,真值 0.058
+        #        的 3.5 倍),NMPC 这一侧没有 MHE 的棘轮/地板/m_min 保护;
+        #      · m_est 低于空机时 m_p<=1e-3 的门把几何整个冻住(LIFT 段常态,
+        #        上面那张表里 t=8.9~10.1 就是)。
+        #    本实现用**棘轮 + 硬上界**同时堵住这两个方向:只增不减(治第二条,
+        #    LIFT 段的下漂再也冻不住它),且封顶 grip_mp_cap(治第一条,高估时
+        #    dJ 不会无界跟涨)。这与 MHE 侧 grip_geom_mp_floor + m_max 是同一套
+        #    哲学的镜像。棘轮语义正是"不断增加的质量估计"。
+        # drop 时是否给 MHE 发 mass_event(见 _grip_drop_phase 里的详细注释)。
+        # 默认 True 保持历史行为;设 False 时**必须**同时给 mhe_node 配
+        # event_signal_mode:=residual,否则 MHE 既收不到信号也不会自检测。
+        self.declare_parameter('drop_publish_mass_event', True)
+        self.declare_parameter('dj_track_mest', False)
+        self.declare_parameter('grip_mp_cap', 0.6)       # 载荷质量操作包线上界 kg
+        # 增益重缩放的滞回:棘轮相对上次缩放至少涨 dmp[kg],或涨够 (ratio-1)
+        # 的相对量,取两者较大。⚠️ 纯比例滞回不行 —— 从 m_p≈0 起步时基数太小,
+        # 0→0.3kg 会触发十几次(单测实测 14 次);绝对增量才是这里的主约束。
+        self.declare_parameter('dj_gain_rescale_dmp', 0.05)
+        self.declare_parameter('dj_gain_rescale_ratio', 1.25)
         # gripper drop 全流程(B.3,2026-07-14):lift 完成后悬停 grip_drop_after_sec
         # 秒再释放磁吸夹爪(发 /gripper/enable=false,proximity 节点收到即 detach),
         # 让 box 掉落,m_est 回空机、c_xy 归零——验证强闭环走完 attach→稳飞→drop。
@@ -467,71 +510,35 @@ class AcadosNMPCNode(Node):
         # (见 acados_model.py dJ_sym)。跟 attach 时的 dz(proximity 日志里)
         # 对齐:当前窗口 h_min/h_max=[0.35,0.60],短臂稳态 dz≈0.47m。
         self.declare_parameter('grip_arm_d', 0.47)
-        # 抓取载荷操作先验 [kg](B.3 Phase2 online 模式用):attach 瞬间用它 +
-        # grip_arm_d 初始化**模型侧** dJ_est(model.p 的几何槽),随后
-        # _update_online_geometry 用在线 c_xy 精修。
+        # 载荷**包线上界** [kg] —— 本节点唯一的载荷质量信息来源。
         #
-        # 【2026-08-25 一度改 0.0,当日回退 0.3 —— 见下】
-        # 这一路是模型对惯量的"信念",**可以给错**:几何解耦实验实测先验错 33%
-        # 时 m_est 仍准 0.3%,08-25 进一步实测 prior=0(模型 dJ=0)照飞且与基线
-        # 一样好 —— 那次拆开 grip_gain_prior 之后才看清,真正在起作用的是**执行器
-        # 侧**的内环增益整定,不是模型侧这个 dJ。所以模型侧先验可以直接去掉。
-        # ⚠️ 改这个默认值时**必须**同时把 grip_gain_prior 默认从 -1.0 钉到 0.3:
-        #    -1.0 的语义是"回落到 grip_payload_prior",本参数一旦归零,增益也会
-        #    跟着归零 → 内环带宽被载荷惯量压塌 → 实测炸机。两个默认值是一对,
-        #    不能单独改(08-24 那次 MHE 62 次失败就是这条链没拆开时踩的)。
-        # 【为什么又退回来:run_prior_ab_4ms.sh 首批 n=8 结果(20260825_144337)】
-        #   ② 主判据**非劣成立**:|bias| 配对差 d=+0.19pp,95%CI 上界 +0.52pp
-        #      < 等效边界 1.0pp(n=5 干净配对;含次干净轮的 n=6 口径 +0.43pp)。
-        #   ① 前置硬条件**不通过**:prior0.0 臂 rep5 DIVERGED,peak_pos_err 15.1m。
-        #      按跑前钉死的一票否决规则,主判据再好也不能采信 → 默认值退回 0.3。
-        #   那一轮的解剖(grip_nmpc_20260825_151110.log):MHE **完全正常**
-        #      (m_est 峰值 2.363 vs 真值 2.3643,误差 0.06%;MHE solve failed=0),
-        #      发散在 **LIFT 段末尾**(t≈16s,早于 t=19.8s 进 figure8),NMPC 侧
-        #      1277 次 solve failed。即:不是估计不准,是模型 dJ=0 时 NMPC 按空机
-        #      惯量规划角加速度、真实惯量 5 倍、力矩饱和后级联发散 —— 正是本文件
-        #      顶部 dJ_sym 注释预言的那个机制。1/7 vs 0/7 统计上不显著
-        #      (Fisher p≈1.0),但机理有据,不能当纯偶发。
-        # 下一步(若要再推):重跑一批**真单变量**的(首批其实同时动了 MHE 侧先验,
-        #   见 run_gripper_headless.sh 里 GRIP_NMPC_MP_PRIOR/GRIP_MHE_MP_PRIOR 的
-        #   拆分说明),n>=8,重点看 prior0 臂的 LIFT 段发散率而不只是 bias。
-        self.declare_parameter('grip_payload_prior', 0.3)
-        # PX4 内环增益缩放**专用**的载荷质量先验(2026-08-25 从 grip_payload_prior
-        # 拆出)。负值 = 回落到 grip_payload_prior,**不设它时行为逐位不变**。
-        # 为什么必须拆:这两条路性质完全不同——
-        #   grip_payload_prior → dJ_est → model.p :模型对惯量的"信念",**可以给错**
-        #       (给错的那部分由转动 lumped 扰动 xi 在线补,见 tau_lumped_enable)
-        #   grip_gain_prior    → _scale_px4_rate_gains:执行器整定,**必须够大**,
-        #       否则内环带宽被载荷惯量压塌,物理上就是跟不上,xi 再准也没用
-        # 08-24 直接把 prior 调到 0.15 想测"dJ 给错",结果 MHE 62 次失败——根因是
-        # 增益只放大了 3.18× 而非需要的 6.68×,**根本没测到 dJ 那一维**。
-        # 【2026-08-25 一度钉到 0.3(配合模型侧归零),随 #1 回退一并退回 -1.0】
-        # ⚠️ 这两个默认值是**一对**:-1.0 的语义是"回落到 grip_payload_prior",
-        #    所以任何把 grip_payload_prior 改到 0 的尝试,都必须同时把这里钉成
-        #    一个正数,否则内环增益跟着归零 → 带宽被载荷惯量压塌 → 实测炸机
-        #    (08-24 那次 MHE 62 次失败就是这条链没拆开时踩的)。
-        # 这一路是**尚未**去掉的先验(任务信息),替代方案见 grip_gain_envelope。
-        self.declare_parameter('grip_gain_prior', -1.0)
-        # 载荷**包线上界** [kg](2026-08-25,"去先验"第 #2 项 / 方案 b)。>=0 时
-        # 取代 grip_gain_prior 驱动内环增益缩放;负值(默认)= 不启用,行为逐位不变。
+        # 【2026-08-26 去先验改造】原先这里有三个参数:grip_payload_prior(模型侧
+        # dJ 初值)、grip_gain_prior(内环增益整定)、grip_gain_envelope(包线)。
+        # 前两个是**任务信息**("这次要抓的盒子大概 0.3kg"),部署时得有人告诉
+        # 系统 —— 本项目的前提是**不能知道载荷质量**,否则在线质量估计失去意义,
+        # 所以两者已删除。留下的这一个是**机架规格**("这架飞机最多吊得动多少"),
+        # 写在整定表里、与飞哪一趟无关,拿它做整定不算"知道载荷质量"。
         #
-        # 与上面两个 prior 的性质区别 —— 这才是要点:
-        #   grip_payload_prior / grip_gain_prior 是**任务信息**("这次要抓的盒子
-        #       大概 0.3kg"),部署时要有人告诉系统,是我们想去掉的先验;
-        #   grip_gain_envelope 是**机架规格**("这架飞机最多吊得动多少"),写在
-        #       整定表里、与飞哪一趟无关 —— 拿它做增益整定不算"知道载荷质量"。
+        # 为什么不是直接删成 0(两条实测记录):
+        #   ① 模型侧 dJ=0 → NMPC 按空机惯量规划角加速度、真实惯量 5 倍,力矩
+        #      饱和后级联发散。08-25 run_prior_ab_4ms 首批 rep5 实测 LIFT 段末尾
+        #      DIVERGED(peak_pos_err 15.1m,NMPC solve failed 1277 次,而 MHE 完全
+        #      正常 m_est 误差 0.06%)—— 不是估计不准,是模型惯量为零。
+        #   ② 增益侧归零 → 内环带宽被载荷惯量压塌,08-24 实测 MHE 62 次失败。
+        # 包线上界同时治这两条:量级够大,且不含任务信息。
         #
-        # 为什么这个替换在主线工作点上是**免费**的(2026-08-25 解析核算):
-        #   _scale_px4_rate_gains 的 ratio=(Jxx+dJ)/Jxx 有 cap 5.0,而
-        #   dJ(m_p)=[m_B·m_p/(m_B+m_p)]·d²,m_B=2.0643, d=0.47, Jxx=0.0142
-        #   → ratio 撞 cap 的临界载荷是 **m_p = 0.2937 kg**。
-        #   主线工况 m_p=0.3 已经在 cap 里(裸 ratio 5.075),任何 >=0.2937 的包线
-        #   上界都给出**逐位相同**的 MC_*RATE_K —— 也就是说,那个"先验"的数值
-        #   精度从一开始就没被用到,只有"够不够大"被用到,而"够大"正是包线的语义。
-        #   ⚠️ 但轻载格子(0.15/0.2kg)裸 ratio 只有 3.18/3.84,**不在 cap 里**:
-        #      换成包线会把它们的增益一路提到 5.0。那不是逐位不变,是真的改了
-        #      内环整定,必须实测过增益/高频振荡才能采信(见 run_gain_envelope_ab.sh)。
-        self.declare_parameter('grip_gain_envelope', -1.0)
+        # 为什么在主线工作点上是**免费**的(08-25 解析核算):_scale_px4_rate_gains
+        # 的 ratio=(Jxx+dJ)/Jxx 有 cap 5.0,而 dJ(m_p)=[m_B·m_p/(m_B+m_p)]·d²,
+        # m_B=2.0643, d=0.47, Jxx=0.0142 → 撞 cap 的临界载荷是 m_p=0.2937kg。
+        # 主线工况 0.3kg 已在 cap 里(裸 ratio 5.075),任何 >=0.2937 的包线给出
+        # **逐位相同**的 MC_*RATE_K —— 那个"先验"的数值精度从来没被用到,只有
+        # "够不够大"被用到,而"够大"正是包线的语义。
+        # ⚠️ 轻载格子(0.15/0.2kg)裸 ratio 只有 3.18/3.84,**不在 cap 里**:换成
+        #    包线会把增益一路提到 5.0,那是真的改了内环整定,需实测复核。
+        # ⚠️ 模型侧 dJ 初值由包线算出会**过估**(0.5 包线 vs 0.3 真值 → dJ 高
+        #    1.54×)。过估比低估安全(规划更保守,不会力矩饱和),且 dj_track_mest
+        #    打开时 _update_online_geometry 会用在线 m_est 棘轮精修。
+        self.declare_parameter('grip_payload_envelope', 0.5)
         # box 正上方的安全接近高度:两段式接近的第一段目标高度。先在这个高度
         # 把水平位置对齐、悬停稳,再垂直下降到 grip_z_low——避免在 grip_z_low
         # 这种低空做水平平移时高度下冲、起落架把 box 顶出吸附窗口(attach 竞态)。
@@ -595,6 +602,27 @@ class AcadosNMPCNode(Node):
             self.grip_dyn_dz = float(self.get_parameter('grip_dyn_dz').value)
             self.grip_dyn_settle_sec = float(
                 self.get_parameter('grip_dyn_settle_sec').value)
+            self.grip_lift_hold_enable = bool(
+                self.get_parameter('grip_lift_hold_enable').value)
+            self.grip_lift_hold_dz = float(
+                self.get_parameter('grip_lift_hold_dz').value)
+            self.grip_lift_hold_sec = float(
+                self.get_parameter('grip_lift_hold_sec').value)
+            self.dj_track_mest = bool(self.get_parameter('dj_track_mest').value)
+            self.drop_publish_mass_event = bool(
+                self.get_parameter('drop_publish_mass_event').value)
+            self.grip_mp_cap = float(self.get_parameter('grip_mp_cap').value)
+            self.dj_gain_rescale_dmp = float(
+                self.get_parameter('dj_gain_rescale_dmp').value)
+            self.dj_gain_rescale_ratio = float(
+                self.get_parameter('dj_gain_rescale_ratio').value)
+            # LIFT hold 状态
+            self._lift_hold_start = None   # 进入 hold 的时刻(None=还没进)
+            self._lift_frozen_sec = 0.0    # 已冻结的总时长(从斜坡时间里扣掉)
+            self._lift_hold_done = False
+            # dJ 棘轮状态
+            self._mp_ratchet = 0.0         # 见过的最大载荷质量(只增不减)
+            self._mp_gain_applied = 0.0    # 上次用来缩增益的 m_p(滞回基准)
             self.grip_drop_at_fig8_tip = bool(
                 self.get_parameter('grip_drop_at_fig8_tip').value)
             self.grip_payload_mass = float(
@@ -602,12 +630,8 @@ class AcadosNMPCNode(Node):
             self.grip_mass_step_sec = float(
                 self.get_parameter('grip_mass_step_sec').value)
             self.grip_arm_d = float(self.get_parameter('grip_arm_d').value)
-            self.grip_payload_prior = float(
-                self.get_parameter('grip_payload_prior').value)
-            self.grip_gain_envelope = float(
-                self.get_parameter('grip_gain_envelope').value)
-            self.grip_gain_prior = float(
-                self.get_parameter('grip_gain_prior').value)
+            self.grip_payload_envelope = float(
+                self.get_parameter('grip_payload_envelope').value)
             self.grip_approach_z = float(
                 self.get_parameter('grip_approach_z').value)
             self.grip_settle_sec = float(
@@ -985,7 +1009,7 @@ class AcadosNMPCNode(Node):
     def _update_online_geometry(self):
         """B.3 Phase2:online 模式下 c_est 吃 mhe_node 发的在线 c_xy(τ_phys 反算,
         与 m_est 无关);**dJ 不在这里更新**——它在 attach 瞬间由操作先验
-        (grip_payload_prior + grip_arm_d)一次算定,之后保持不变。每次 solve 前调。
+        (grip_payload_envelope + grip_arm_d)一次算定,之后保持不变。每次 solve 前调。
 
         2026-07-28 改:原实现每帧用 m_p=m_est-p.m 重推 dJ,等于把 07-19 在 MHE 侧
         切断的 m_est→dJ 链在 NMPC 侧接了回来。两个方向都不安全:m_est 高估时 dJ
@@ -1002,8 +1026,26 @@ class AcadosNMPCNode(Node):
             # box 已释放(drop),载荷没了:几何归零(不再随残噪更新)
             self.dJ_est = 0.0
             self.c_est = np.zeros(2)
+            self._mp_ratchet = 0.0        # 棘轮随载荷一起卸掉
+            self._mp_gain_applied = 0.0
             return
         self.c_est = self.c_xy_online.copy()
+        # dJ 跟随 m_est:棘轮(只增不减)+ 硬上界。两个方向的保护都不能少,
+        # 理由见 dj_track_mest 参数声明处搬过来的 07-28 撤销记录。
+        if self.dj_track_mest and self.grip_mass_stepped:
+            m_p_now = max(float(self.m_est) - p.m, 0.0)
+            m_p_now = min(m_p_now, self.grip_mp_cap)        # 治"高估无界跟涨"
+            if m_p_now > self._mp_ratchet:                  # 治"LIFT 段冻住"
+                self._mp_ratchet = m_p_now
+                self.dJ_est = self._dJ_from_mp(self._mp_ratchet)
+                # 内环增益跟进,但要滞回:估计每涨一点就重设一次 PX4 参数既没
+                # 意义又会刷服务调用(而且 PX4 会把它当真机参数落盘,见 headless
+                # 脚本的持久化护栏)。只在棘轮相对上次缩放涨够 ratio 才动。
+                _need = max(self.dj_gain_rescale_dmp,
+                            self._mp_gain_applied * (self.dj_gain_rescale_ratio - 1.0))
+                if self._mp_ratchet - self._mp_gain_applied >= _need:
+                    self._mp_gain_applied = self._mp_ratchet
+                    self._scale_px4_rate_gains(self.dJ_est, allow_rescale=True)
 
     def mhe_mass_cb(self, msg):
         # use_mhe=False 时:MHE 只当诊断,不把估计喂回 NMPC(m_est 保持固定)。
@@ -1263,7 +1305,7 @@ class AcadosNMPCNode(Node):
         # 有效载荷 → 同一套几何代数 → 惯量比。空载时 m_p_eff=0 ⇒ target=1.0,
         # 自然退化不影响空机(FlyAware 的 K_k≈I3 是同一个边界条件)。
         m_p_eff = max(0.0, m_eff - p.m)
-        dJ_eff = self._dJ_from_prior(m_p_eff)
+        dJ_eff = self._dJ_from_mp(m_p_eff)
         target = float(np.clip((p.Jxx + dJ_eff) / p.Jxx, 1.0, self.omega_scale_cap))
 
         t = self.get_clock().now().nanoseconds * 1e-9   # ROS clock,不用墙钟
@@ -1514,12 +1556,12 @@ class AcadosNMPCNode(Node):
         # **D2(b) 拍板(2026-07-23,用户)**:允许用**档位操作先验**缩内环增益
         # ——纯平动版实测 0.3kg/ecc0.10 姿态失稳(x/y d̂ 大幅乱跳=07-02 内环
         # 带宽问题裸奔,grip_nmpc_163705);增益缩放用与主方法 online 模式同款
-        # 的 grip_payload_prior(非测量真值),不破坏"不知精确质量"设定,对照
+        # 的载荷包线上界(机架规格,非测量真值),不破坏"不知精确质量"设定,对照
         # 更公平(否则是绑着 baseline 的手打,审稿必疑)。drop 复位走公共路径
         # (_reset_px4_rate_gains 已在 _grip_drop_phase)。
         if self.control_mode == 'l1':
-            mp0, src0 = self._gain_prior()  # l1 分支本来就只做增益、不做模型前馈
-            dJ0 = self._dJ_from_prior(mp0)
+            mp0, src0 = self._envelope_mp()  # l1 分支本来就只做增益、不做模型前馈
+            dJ0 = self._dJ_from_mp(mp0)
             self._scale_px4_rate_gains(dJ0)
             self.get_logger().info(
                 f't={nmpc_time:.1f}s | ATTACH (control_mode=l1): rate gains from '
@@ -1538,17 +1580,17 @@ class AcadosNMPCNode(Node):
         # 仅留作评估。dJ/c_est/gain 都在那里随 m_est 收敛起来。
         if self.geom_source == 'online':
             self.geom_online_active = True
-            # attach 瞬间用操作先验(grip_payload_prior + grip_arm_d)立刻初始化
-            # dJ 与 rate 增益(给内环即时鲁棒性,不等估计收敛——否则实测炸机);
-            # c_est 先 0,随后 _update_online_geometry 用在线 m_est/c_xy 精修。
-            mp0 = self.grip_payload_prior
-            self.dJ_est = self._dJ_from_prior(mp0)      # 模型侧:可以是 0/给错
+            # attach 瞬间用**包线上界**(grip_payload_envelope + grip_arm_d)立刻
+            # 初始化 dJ 与 rate 增益(给内环即时鲁棒性,不等估计收敛——否则实测
+            # 炸机);c_est 先 0,随后 _update_online_geometry 用在线 m_est/c_xy 精修。
+            mp0, _ = self._envelope_mp()
+            self.dJ_est = self._dJ_from_mp(mp0)      # 模型侧:可以是 0/给错
             self.c_est = np.zeros(2)
-            mp_gain, src_gain = self._gain_prior()      # 执行器侧:必须够大
-            self._scale_px4_rate_gains(self._dJ_from_prior(mp_gain))
+            mp_gain, src_gain = self._envelope_mp()      # 执行器侧:必须够大
+            self._scale_px4_rate_gains(self._dJ_from_mp(mp_gain))
             self.get_logger().info(
                 f't={nmpc_time:.1f}s | ATTACH (geom_source=online): model dJ from '
-                f'prior m_p={mp0:.2f}kg arm={self.grip_arm_d:.2f}m '
+                f'envelope m_p={mp0:.2f}kg arm={self.grip_arm_d:.2f}m '
                 f'(dJ={self.dJ_est:.4f}); rate gains from {src_gain} '
                 f'm_p={mp_gain:.2f}kg; c_xy refine online, attach truth eval-only')
             return
@@ -1628,7 +1670,7 @@ class AcadosNMPCNode(Node):
             self.get_logger().warn(f'ParamGet {pid} unsuccessful, '
                                    f'will fall back to base 1.0')
 
-    def _dJ_from_prior(self, m_p):
+    def _dJ_from_mp(self, m_p):
         """由载荷质量先验算吊挂惯量增量 dJ = μ·d²(μ=约化质量 m_b·m_p/m_t)。
         原先这段代数在 _grip_mass_step 的两个分支里各抄了一遍,拆 prior 时提出来
         —— 模型侧和增益侧现在要用**不同的** m_p 各算一次。"""
@@ -1636,23 +1678,22 @@ class AcadosNMPCNode(Node):
         mu = p.m * m_p / m_t if m_t > 0 else 0.0
         return float(mu * self.grip_arm_d ** 2)
 
-    def _gain_prior(self):
-        """PX4 内环增益缩放该用的载荷质量,三级优先(高→低):
-          ① grip_gain_envelope >=0 : 载荷**包线上界**(机架规格,非任务信息)
-          ② grip_gain_prior    >=0 : 载荷质量**点估计先验**(任务信息,想去掉的那个)
-          ③ 否则                   : 回落 grip_payload_prior(= 08-25 拆分前的行为)
+    def _envelope_mp(self):
+        """内环增益缩放 / 模型侧 dJ 初值该用的载荷质量 = **包线上界**(机架规格)。
+        2026-08-26 去先验改造后这是唯一来源:原先的三级优先(gain_envelope →
+        gain_prior → payload_prior)里后两级都是任务信息,已删。
         返回 (m_p, 来源标签),标签只用于日志/论文溯源。"""
-        if self.grip_gain_envelope >= 0.0:
-            return self.grip_gain_envelope, 'envelope(rack spec)'
-        if self.grip_gain_prior >= 0.0:
-            return self.grip_gain_prior, 'prior(task info)'
-        return self.grip_payload_prior, 'prior(task info, legacy fallback)'
+        return self.grip_payload_envelope, 'envelope(rack spec)'
 
-    def _scale_px4_rate_gains(self, dJ):
+    def _scale_px4_rate_gains(self, dJ, allow_rescale=False):
         """把 PX4 速率环总增益按惯量比 (J+dJ)/J 放大,恢复被载荷惯量压塌的
         内环带宽(根因见 scale_px4_rate_gains 参数声明处注释)。只做一次;
         ratio 上限 5 防止 dJ 异常大时把内环推成高频震荡。"""
-        if self.px4_gains_scaled or not self.scale_px4_rate_gains:
+        if not self.scale_px4_rate_gains:
+            return
+        # allow_rescale=True 是 dj_track_mest 那条路专用:棘轮涨上去时要能把
+        # 增益跟着调大。默认 False 保持"只做一次"的历史行为。
+        if self.px4_gains_scaled and not allow_rescale:
             return
         self.px4_gains_scaled = True
         for pid, J0 in (('MC_ROLLRATE_K', p.Jxx), ('MC_PITCHRATE_K', p.Jyy)):
@@ -1736,8 +1777,37 @@ class AcadosNMPCNode(Node):
         if (not self.gripper_mode or self.attach_time is None
                 or nmpc_time < self.attach_time + self.grip_lift_after_sec):
             return
-        s = min(max((nmpc_time - self.attach_time - self.grip_lift_after_sec) /
-                    self.grip_lift_dur, 0.0), 1.0)
+        # LIFT 中途 hold(见 grip_lift_hold_enable 注释):抬到 hold_dz 就把斜坡
+        # 时间冻结 hold_sec 秒。冻结用"从经过时间里扣掉已冻结时长"实现,而不是
+        # 记住 s 再恢复 —— 后者在 hold 结束时会让 smoothstep 的导数跳变。
+        t_eff = (nmpc_time - self.attach_time - self.grip_lift_after_sec
+                 - self._lift_frozen_sec)
+        if self.grip_lift_hold_enable and not self._lift_hold_done:
+            if self._lift_hold_start is not None:
+                # 冻结中:把新流逝的时间全部记进 frozen,t_eff 原地不动
+                held = nmpc_time - self._lift_hold_start
+                if held >= self.grip_lift_hold_sec:
+                    self._lift_hold_done = True
+                    self._lift_frozen_sec += held
+                    self.get_logger().info(
+                        f't={nmpc_time:.1f}s | LIFT hold done ({held:.1f}s), '
+                        f'resuming climb | m_est={self.m_est:.3f} '
+                        f'dJ={self.dJ_est:.4f} mp_ratchet={self._mp_ratchet:.3f}')
+                else:
+                    t_eff = (self._lift_hold_start - self.attach_time
+                             - self.grip_lift_after_sec - self._lift_frozen_sec)
+            else:
+                s_now = min(max(t_eff / self.grip_lift_dur, 0.0), 1.0)
+                sm_now = 10*s_now**3 - 15*s_now**4 + 6*s_now**5
+                dz_now = (self.grip_z_high - self.grip_z_low) * sm_now
+                if dz_now >= self.grip_lift_hold_dz:
+                    self._lift_hold_start = nmpc_time
+                    self.get_logger().info(
+                        f't={nmpc_time:.1f}s | LIFT hold START at '
+                        f'dz={dz_now:.3f}m (z={self.z_hover:.2f}m) for '
+                        f'{self.grip_lift_hold_sec:.1f}s — payload is airborne, '
+                        f'letting MHE converge | m_est={self.m_est:.3f}')
+        s = min(max(t_eff / self.grip_lift_dur, 0.0), 1.0)
         smooth = 10*s**3 - 15*s**4 + 6*s**5
         self.z_hover = self.grip_z_low + \
             (self.grip_z_high - self.grip_z_low) * smooth
@@ -1777,7 +1847,24 @@ class AcadosNMPCNode(Node):
         self.grip_drop_done = True
         self.grip_dropped = True
         self.enable_pub.publish(Bool(data=False))  # 拉低 → proximity 释放 box
-        self.mass_event_pub.publish(Empty())       # 通知 mhe_node 质量突变
+        # --- 是否把 drop 告诉 MHE(2026-08-25)---
+        # False = **不发**:MHE 必须自己从 T_phys 残差看出载荷没了。drop 是外部
+        # 事件信号,与 MHE 先验/几何先验同属"不该给估计器的信息",去掉它才和
+        # 全仓"传感最小化"的主线一致(阶段 A.2 已证明事件收益不依赖外部信号)。
+        # ⚠️ 关掉它必须同时满足两个前提,否则 MHE 会永远挂着幽灵载荷几何:
+        #    ① mhe_node 的 event_signal_mode='residual'(自检测代替外部信号);
+        #    ② mhe_node 的 resid_release_geom=True(自检测到"推力下降型"事件时
+        #       自行释放几何)—— 2026-08-25 新增,在那之前残差这条路只降权、
+        #       不释放几何,关掉信号就会留下幽灵载荷。
+        # ⚠️ 注意 NMPC **自己**清几何/复位增益是合法的:夹爪是它松开的,它当然
+        #    知道货没了。不合法的是把这个消息塞给估计器。两者别混为一谈。
+        # 默认 True = 历史行为逐字节不变。
+        if self.drop_publish_mass_event:
+            self.mass_event_pub.publish(Empty())   # 通知 mhe_node 质量突变
+        else:
+            self.get_logger().info(
+                't={:.1f}s | DROP: mass_event **未发布**(drop_publish_mass_event'
+                '=false) — MHE 须自行从 T_phys 残差检测'.format(nmpc_time))
         self._reset_px4_rate_gains()               # 空机复位内环增益(否则过增益炸机)
         if self.control_mode == 'l1':
             # 掉包后真实 lumped 扰动阶跃回零,残留 d̂_f 会把推力拽偏(等价于

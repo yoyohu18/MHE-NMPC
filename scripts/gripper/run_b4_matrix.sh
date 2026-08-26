@@ -1,4 +1,9 @@
 #!/bin/bash
+# 【2026-08-26 去先验改造】本脚本原先顺带设置的载荷质量先验环境变量
+# (GRIP_GEOM_MP_PRIOR / GRIP_GEOM_MP_FLOOR / MHE_CONFIRM_PRIOR 等)已删除:
+# 对应的节点参数不复存在,留着只会静默失效并误导读者。载荷质量信息现在只有
+# grip_payload_envelope 一条(机架规格包线上界,run_gripper_headless.sh 默认 0.5)。
+# 本脚本自身的研究主题不受影响。
 # B.4 学习+强闭环合流矩阵(2026-07-15):{M0规则, θ*学习}×质量×偏心×n,全部在
 # **online 无真值几何**配置下(NMPC_GEOM_SOURCE=online + floor=0.15),问"θ* 在 B.2
 # 训练(有真值几何)之外、放到强闭环无真值配置里,对 M0 的收益是否保持"。
@@ -52,8 +57,8 @@ for method in $METHODS; do for mass in $MASSES; do for ecc in $ECCS; do for rep 
   echo "[b4] === method=$method mass=$mass ecc=$ecc rep=$rep ==="
   LAUNCH="$RUNDIR/b4_launch_${STAMP}_${method}_${mass}_${ecc}_${rep}.log"
   GRIP_PAYLOAD_KG=$mass GRIP_ECC_Y=$ecc USE_MHE=true MHE_C_XY_EST=true \
-    GRIP_GEOM_MP_FLOOR=0.15 NMPC_GEOM_SOURCE=online \
-    MHE_SCHEDULE_THETA="$TH" MHE_CONFIRM_ALPHA="$ALPHA" MHE_CONFIRM_PRIOR="$PRIOR" \
+    NMPC_GEOM_SOURCE=online \
+    MHE_SCHEDULE_THETA="$TH" MHE_CONFIRM_ALPHA="$ALPHA" \
     bash "$WS/src/scripts/gripper/run_gripper_headless.sh" > "$LAUNCH" 2>&1
   NMPC=""; for k in $(seq 1 12); do
     NMPC=$(grep -oE "/home/[^ ]*grip_nmpc_[0-9_]+\.log" "$LAUNCH" 2>/dev/null | head -1)

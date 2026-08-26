@@ -1,4 +1,9 @@
 #!/bin/bash
+# 【2026-08-26 去先验改造】本脚本原先顺带设置的载荷质量先验环境变量
+# (GRIP_GEOM_MP_PRIOR / GRIP_GEOM_MP_FLOOR / MHE_CONFIRM_PRIOR 等)已删除:
+# 对应的节点参数不复存在,留着只会静默失效并误导读者。载荷质量信息现在只有
+# grip_payload_envelope 一条(机架规格包线上界,run_gripper_headless.sh 默认 0.5)。
+# 本脚本自身的研究主题不受影响。
 # B.3 主实验网格 n≥5(2026-07-14):方法{truth,online}×质量×偏心×n 全格配对,量化
 # "NMPC 吃在线 c_xy 估计"vs"吃 attach 真值几何"的控制层暂态(pos_err 峰/恢复),
 # 证在线估计版≈真值版、消 attach 真值依赖不掉性能。attach→lift→稳飞(不含 drop,
@@ -71,7 +76,7 @@ for mass in $MASSES; do for ecc in $ECCS; do for mode in $MODES; do for rep in $
   GS=$mode; CM=mhe
   [ "$mode" = l1 ] && { GS=truth; CM=l1; }
   GRIP_PAYLOAD_KG=$mass GRIP_ECC_Y=$ecc USE_MHE=true MHE_C_XY_EST=true \
-    GRIP_GEOM_MP_FLOOR=0.15 NMPC_GEOM_SOURCE=$GS NMPC_CONTROL_MODE=$CM \
+    NMPC_GEOM_SOURCE=$GS NMPC_CONTROL_MODE=$CM \
     bash "$WS/src/scripts/gripper/run_gripper_headless.sh" > "$LAUNCH" 2>&1
   NMPC=""; for k in $(seq 1 12); do
     NMPC=$(grep -oE "/home/[^ ]*grip_nmpc_[0-9_]+\.log" "$LAUNCH" 2>/dev/null | head -1)

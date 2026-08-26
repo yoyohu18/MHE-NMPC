@@ -1,4 +1,9 @@
 #!/bin/bash
+# 【2026-08-26 去先验改造】本脚本原先顺带设置的载荷质量先验环境变量
+# (GRIP_GEOM_MP_PRIOR / GRIP_GEOM_MP_FLOOR / MHE_CONFIRM_PRIOR 等)已删除:
+# 对应的节点参数不复存在,留着只会静默失效并误导读者。载荷质量信息现在只有
+# grip_payload_envelope 一条(机架规格包线上界,run_gripper_headless.sh 默认 0.5)。
+# 本脚本自身的研究主题不受影响。
 # 几何来源 A/B: geom_source=truth vs online (2026-07-29)。
 #
 # 【问什么】NMPC 的几何来自 attach 真值(truth) vs 在线估计(online)时,m_est 精度、
@@ -73,7 +78,6 @@ for group in $GGRP; do for mass in $MASSES; do for ecc in $ECCS; do for rep in $
   LAUNCH="$RUNDIR/geomsrc_launch_${STAMP}_${group}_${mass}_${ecc}_${rep}.log"
   # ⚠️ GRIP_GEOM_MP_PRIOR 必须带小数点语义(这里恒等于 $mass,非 0,无 ROS 类型坑)
   GRIP_PAYLOAD_KG=$mass GRIP_ECC_Y=$ecc USE_MHE=true MHE_C_XY_EST=true \
-    GRIP_GEOM_MP_PRIOR=$mass GRIP_GEOM_MP_FLOOR=0.15 \
     NMPC_GEOM_SOURCE=$group \
     bash "$WS/src/scripts/gripper/run_gripper_headless.sh" > "$LAUNCH" 2>&1
   NMPC=""; for k in $(seq 1 12); do

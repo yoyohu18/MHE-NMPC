@@ -3,6 +3,7 @@
 # 缓存机制(is_code_reuse_possible,配置没变就跳过重新生成/编译),独立的
 # code_export_directory/json,不跟 NMPC 的求解器互相干扰。
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -80,6 +81,28 @@ def build_ocp() -> AcadosOcp:
     ocp.solver_options.hessian_approx = 'GAUSS_NEWTON'
     ocp.solver_options.qp_solver_cond_N = mhe_p.N
     ocp.solver_options.nlp_solver_type = 'SQP'
+    # --- 求解性能旋钮(2026-08-26,默认全部不生效,行为逐位不变)---
+    # 背景:coupled 档实测 solve 中位 33ms / p90 50ms(legacy 才 ~2ms),且一轮里
+    # 136 次 status=2。acados 的 status=2 = **达到最大 SQP 迭代数**,所以"慢"和
+    # "失败"是同一件事:跑满默认的 100 次迭代仍不收敛。两个对症旋钮:
+    #   MHE_MAX_ITER  —— 给迭代数封顶。MHE 每拍都 warm start,一拍内不收敛并不
+    #                    等于估计失效,下一拍接着优化;封顶换来的是确定的实时性。
+    #   MHE_LM        —— Levenberg-Marquardt 正则化。Gauss-Newton 的 Hessian 在
+    #                    coupled 档下病态(m 进了 μ=m_B·m_P/m_T 和 1/J,非线性强,
+    #                    drop 后还要在 m_P⁺→0 的平滑正部拐点上挣扎),加一点对角
+    #                    正则直接改善条件数。
+    # 都用环境变量而不是改默认值:改了会触发 acados 重新生成,且尚无 n>=8 实测。
+    _max_iter = int(os.environ.get('MHE_MAX_ITER', '0'))
+    if _max_iter > 0:
+        ocp.solver_options.nlp_solver_max_iter = _max_iter
+    _lm = float(os.environ.get('MHE_LM', '0'))
+    if _lm > 0:
+        ocp.solver_options.levenberg_marquardt = _lm
+    _tol = float(os.environ.get('MHE_TOL', '0'))
+    if _tol > 0:
+        for _k in ('nlp_solver_tol_stat', 'nlp_solver_tol_eq',
+                   'nlp_solver_tol_ineq', 'nlp_solver_tol_comp'):
+            setattr(ocp.solver_options, _k, _tol)
     #跟 NMPC 那边同样的理由:FIXED_STEP 在四元数这种非线性代价上容易卡死循环,
     # 换成带回溯线搜索的 MERIT_BACKTRACKING。
     ocp.solver_options.globalization = 'MERIT_BACKTRACKING'

@@ -1,4 +1,9 @@
 #!/bin/bash
+# 【2026-08-26 去先验改造】本脚本原先顺带设置的载荷质量先验环境变量
+# (GRIP_GEOM_MP_PRIOR / GRIP_GEOM_MP_FLOOR / MHE_CONFIRM_PRIOR 等)已删除:
+# 对应的节点参数不复存在,留着只会静默失效并误导读者。载荷质量信息现在只有
+# grip_payload_envelope 一条(机架规格包线上界,run_gripper_headless.sh 默认 0.5)。
+# 本脚本自身的研究主题不受影响。
 # 几何-质量耦合 A/B(2026-08-24)。唯一差异 = MHE_GEOM_COUPLED(0=legacy:dJ/c_xy
 # 是窗外算好的常参数,∂(J,c)/∂m≡0;1=coupled:J(m)/c(m) 在模型内由被估质量现算)。
 # 其余全部对齐:同载荷/偏心/几何先验/θ/确认阈值/轨迹/drop 时刻。
@@ -62,7 +67,7 @@ run_one() {
   echo "[ab] === mode=$mode rep=$rep (MHE_GEOM_COUPLED=$cpl) ==="
   MHE_GEOM_COUPLED=$cpl \
   GRIP_PAYLOAD_KG=$MASS GRIP_ECC_Y=$ECC USE_MHE=true MHE_C_XY_EST=true \
-    GRIP_GEOM_MP_FLOOR=0.15 GRIP_GEOM_MP_PRIOR=$MASS NMPC_GEOM_SOURCE=online \
+    NMPC_GEOM_SOURCE=online \
     GRIP_DROP_AFTER=$DROP_AFTER RESID_LOG_DIR="$rdir" \
     EVAL_TRUE_PAYLOAD_MASS=$MASS \
     bash "$WS/src/scripts/gripper/run_gripper_headless.sh" > "$launch" 2>&1

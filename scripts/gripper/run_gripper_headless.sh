@@ -67,57 +67,49 @@ USE_MHE="${USE_MHE:-true}"
 # 这里把**所有**喂给 DOUBLE 参数的环境变量统一规范化成带小数点的字面量,
 # 于是 GRIP_DROP_AFTER=40 / GRIP_DYN_R=5 / L1_OMEGA_C=1 这类自然写法都能用。
 _f2d() { python3 -c "print(float('$1'))"; }
+# ⚠️ bool 也是强类型的:`-p foo:=1` 会被 rclpy 当 INTEGER 解析,而声明成 BOOL 的
+# 参数会抛 InvalidParameterTypeException —— **节点启动即崩**,崩在自己的 nohup
+# 日志里,脚本照样打印 "stack up",整轮静默没有该节点(2026-08-25 实测踩到:
+# GRIP_LIFT_HOLD=1 让 nmpc 和 mhe 双双起不来)。这与 residual_log_dir 传空值
+# 是同一类坑。_b() 把 1/0/yes/no/on/off 一律规范成 true/false。
+_b() { case "$(echo "${1:-}" | tr 'A-Z' 'a-z')" in
+         1|true|yes|on|y) echo true ;; *) echo false ;; esac; }
 GRIP_DYN_R_D=$(_f2d "${GRIP_DYN_R:-0.8}")
 GRIP_DYN_W_D=$(_f2d "${GRIP_DYN_W:-0.25}")
 GRIP_DYN_RAMP_D=$(_f2d "${GRIP_DYN_RAMP:-0.0}")
 GRIP_PAYLOAD_KG_D=$(_f2d "$GRIP_PAYLOAD_KG")
 GRIP_ECC_Y_D=$(_f2d "$GRIP_ECC_Y")
 PUBLISH_HZ_D=$(_f2d "${PUBLISH_HZ:-50.0}")
-# 【2026-08-25 拆分 + 默认改 0,"去先验"第 #1 项】
-# 拆分前这一个变量同时喂两条**性质不同**的路,且默认值是 $GRIP_PAYLOAD_KG(载荷
-# **真值**),等于默认让系统知道"这次抓的盒子正好多重":
-#   ① NMPC 的 grip_payload_prior → dJ_est → model.p  :模型对惯量的信念,可以给错
-#   ② MHE  的 grip_geom_mp_prior → MHE 自己的 dJ/c_xy:另一条独立先验路径(07-19)
-# 现在拆成两个变量,#1 只动 ①:
-# ⚠️ 默认一度改 0.0,当日回退 —— 首批 A/B 的 prior0 臂出现 1/7 轮 LIFT 段发散
-#    (前置硬条件一票否决,详见 acados_nmpc_node.py 的 grip_payload_prior 注释)。
-#    拆分本身保留:它修的是"一个变量喂两条路"这个真实混淆,行为逐位不变。
-GRIP_NMPC_MP_PRIOR_D=$(_f2d "${GRIP_GEOM_MP_PRIOR:-${GRIP_NMPC_MP_PRIOR:-$GRIP_PAYLOAD_KG}}")
-# ② MHE 侧保持历史默认(跟随载荷质量),不在 #1 范围内 —— 它属于"几何释放"那一项,
-#    要单独消融。显式设 GRIP_MHE_MP_PRIOR 可覆盖。
-GRIP_MHE_MP_PRIOR_D=$(_f2d "${GRIP_MHE_MP_PRIOR:-$GRIP_PAYLOAD_KG}")
-# 评估专用真值(2026-08-24):只喂给 mhe_node 的 eval_true_payload_mass,唯一用途是
-# 往日志/internal 流写 m_true/c_true/J_true 做 estimate-vs-truth 对比。它在节点里
-# **没有任何通往模型的路径**(与 grip_true_payload_mass 是两个不同参数,后者会把
-# 真值灌进几何,生产实验不要开)。默认就等于 box 的真实质量,因为它只进评估。
+# --- 载荷质量信息:唯一入口 = 包线上界(2026-08-26 去先验改造)---
+# 本项目前提:**不能知道载荷质量**,否则在线质量估计失去意义。此前这里有六个
+# 变量把载荷质量喂进两个节点,其中四个默认值直接回落到 $GRIP_PAYLOAD_KG
+# (= box 的**真值**),等于默认让系统知道"这次抓的盒子正好多重":
+#   GRIP_NMPC_MP_PRIOR / GRIP_GEOM_MP_PRIOR → grip_payload_prior (NMPC 模型侧 dJ)
+#   GRIP_MHE_MP_PRIOR                       → grip_geom_mp_prior (MHE 几何)
+#   GRIP_GAIN_PRIOR                         → grip_gain_prior    (内环增益整定)
+#   MHE_CONFIRM_PRIOR                       → confirm_payload_prior (事件确认阈值)
+#   GRIP_GEOM_MP_FLOOR                      → grip_geom_mp_floor (0.15kg 永久地板)
+#   GRIP_TRUE_PAYLOAD_MASS                  → grip_true_payload_mass (真值直灌)
+# 六个参数已从两个节点里全部删除,这些变量随之作废。
+#
+# 留下的这一个是**机架规格**("这架飞机最多吊得动多少"),写在整定表里、与飞
+# 哪一趟无关 —— 拿它做几何标度和内环整定不算"知道载荷质量"。
+# ⚠️ m_p>=0.2937kg 时 ratio 撞 cap 5.0,故 0.3kg 主线工况下包线与旧点估计先验
+#    给出**逐位相同**的 MC_*RATE_K;轻载(0.15/0.2)不在 cap 里,是真的改了整定。
+GRIP_PAYLOAD_ENVELOPE_D=$(_f2d "${GRIP_PAYLOAD_ENVELOPE:-0.5}")
 EVAL_TRUE_PAYLOAD_D=$(_f2d "${EVAL_TRUE_PAYLOAD_MASS:-$GRIP_PAYLOAD_KG}")
 L1_A_GAIN_D=$(_f2d "${L1_A_GAIN:-10.0}")
 L1_OMEGA_C_D=$(_f2d "${L1_OMEGA_C:-0.5}")
 GRIP_DROP_AFTER_D=$(_f2d "${GRIP_DROP_AFTER:-0.0}")
 ATTACH_WINDOW_SEC_D=$(_f2d "${ATTACH_WINDOW_SEC:-40.0}")
 MHE_CONFIRM_THRESH_D=$(_f2d "${MHE_CONFIRM_THRESH:-1.5}")
-MHE_CONFIRM_PRIOR_D=$(_f2d "${MHE_CONFIRM_PRIOR:-0.3}")
-GRIP_TRUE_PAYLOAD_MASS_D=$(_f2d "${GRIP_TRUE_PAYLOAD_MASS:-0.0}")
-GRIP_GEOM_MP_FLOOR_D=$(_f2d "${GRIP_GEOM_MP_FLOOR:-0.15}")
 # 转动 lumped 扰动通道 xi(2026-08-25)。默认关 → model.p 的 xi 槽恒零,逐位兼容。
 XI_MAX_D=$(_f2d "${XI_MAX:-40.0}")
 XI_OMEGA_C_D=$(_f2d "${XI_OMEGA_C:-0.5}")
-# PX4 内环增益缩放专用先验(2026-08-25 从 GRIP_GEOM_MP_PRIOR 拆出)。负值=回落到
-# grip_payload_prior,不设时逐位兼容。测"模型不知道 dJ"时:
-#   GRIP_GEOM_MP_PRIOR=0.0(模型 dJ=0) + GRIP_GAIN_PRIOR=0.3(执行器仍按档位整定)
-# 负值=回落到模型侧先验(见上)。这一路是**尚未**去掉的先验(任务信息),
-# 替代方案见 GRIP_GAIN_ENVELOPE(机架规格,不是任务信息)。
-GRIP_GAIN_PRIOR_D=$(_f2d "${GRIP_GAIN_PRIOR:--1.0}")
 # ω_cmd 缩放(2026-08-25):增益调度的等效实现,走 setpoint 侧不碰 PX4 参数。
 # 开启时**自动关闭** scale_px4_rate_gains(两者补同一件事,同开=双重补偿)。
 OMEGA_SCALE_TAU_D=$(_f2d "${OMEGA_SCALE_TAU:-0.5}")
 OMEGA_SCALE_CAP_D=$(_f2d "${OMEGA_SCALE_CAP:-5.0}")
-# 载荷**包线上界**(2026-08-25,"去先验"#2/方案 b)。>=0 时取代 GRIP_GAIN_PRIOR
-# 驱动内环增益;负值(默认)=不启用,逐位兼容。语义:机架规格("最多吊得动多少"),
-# 不是任务信息("这次这个盒子多重")—— 后者才是要去掉的先验。
-# ⚠️ m_p>=0.2937kg 时 ratio 撞 cap 5.0,故 0.3kg 主线工况下包线与点估计**逐位相同**;
-#    轻载(0.15/0.2)不在 cap 里,换包线是真的改整定,必须实测(run_gain_envelope_ab.sh)。
-GRIP_GAIN_ENVELOPE_D=$(_f2d "${GRIP_GAIN_ENVELOPE:--1.0}")
 # 抬升目标高度与抬升时长(2026-08-24 参数化,默认值 = 历史写死值,逐位兼容)。
 # ⚠️ 必须一起调:LIFT 段在 GRIP_LIFT_DUR 秒内从 grip_z_low(0.55) 抬到 Z_HIGH,
 # 抬升速率 = (Z_HIGH-0.55)/LIFT_DUR。08-19 定案的新 4m/s 工作点 r=10 在 z=2.5
@@ -125,6 +117,16 @@ GRIP_GAIN_ENVELOPE_D=$(_f2d "${GRIP_GAIN_ENVELOPE:--1.0}")
 # 所以 r=10 必须配 GRIP_Z_HIGH=6 GRIP_LIFT_DUR=8.4(速率与 2.5/3.0 同量级)。
 GRIP_Z_HIGH_D=$(_f2d "${GRIP_Z_HIGH:-2.5}")
 GRIP_LIFT_DUR_D=$(_f2d "${GRIP_LIFT_DUR:-3.0}")
+# LIFT 中途 hold + dJ 跟随 m_est(2026-08-25,默认全关)。动机见 acados_nmpc_node
+# 的 grip_lift_hold_enable 注释:attach 后 box 还在地上时 MHE 学不到任何东西
+# (实测 m_est 反而从 2.064 下漂到 2.023),真正该给的时间在**离地之后**。
+# GRIP_LIFT_HOLD=1   抬升 GRIP_LIFT_HOLD_DZ 米后把斜坡冻结 GRIP_LIFT_HOLD_SEC 秒
+# DJ_TRACK_MEST=1    让 dJ 和 PX4 内环增益跟着 m_est 棘轮上升(只增不减+封顶)
+# ⚠️ DJ_TRACK_MEST 只在 geom_source=online 下生效(_update_online_geometry 是
+#    唯一的刷新点);legacy 几何档不走那条路。
+GRIP_LIFT_HOLD_DZ_D=$(_f2d "${GRIP_LIFT_HOLD_DZ:-0.35}")
+GRIP_LIFT_HOLD_SEC_D=$(_f2d "${GRIP_LIFT_HOLD_SEC:-3.0}")
+GRIP_MP_CAP_D=$(_f2d "${GRIP_MP_CAP:-0.6}")
 
 WS="/home/clear/ros2_ws_HJH"
 PX4_DIR="/home/clear/PX4-Autopilot"
@@ -231,11 +233,17 @@ nohup ros2 run offboard_test_acados acados_nmpc_node --ros-args \
     -p grip_z_low:=0.55 -p grip_z_high:=$GRIP_Z_HIGH_D \
     -p grip_mass_step_sec:=0.0 -p grip_payload_mass:=$GRIP_PAYLOAD_KG_D -p grip_arm_d:=0.47 \
     -p grip_lift_after_sec:=1.5 -p grip_lift_dur:=$GRIP_LIFT_DUR_D \
+    -p grip_lift_hold_enable:=$(_b "${GRIP_LIFT_HOLD:-false}") \
+    -p grip_lift_hold_dz:=$GRIP_LIFT_HOLD_DZ_D \
+    -p grip_lift_hold_sec:=$GRIP_LIFT_HOLD_SEC_D \
+    -p dj_track_mest:=$(_b "${DJ_TRACK_MEST:-false}") \
+    -p drop_publish_mass_event:=$(_b "${DROP_PUBLISH_MASS_EVENT:-true}") \
+    -p grip_mp_cap:=$GRIP_MP_CAP_D \
     -p use_mhe:=$USE_MHE \
     -p decouple_publish:=${DECOUPLE_PUB:-true} -p publish_hz:=$PUBLISH_HZ_D \
     -p geom_source:=${NMPC_GEOM_SOURCE:-truth} \
     -p geom_release_mode:=${NMPC_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-event}} \
-    -p grip_payload_prior:=$GRIP_NMPC_MP_PRIOR_D \
+    -p grip_payload_envelope:=$GRIP_PAYLOAD_ENVELOPE_D \
     -p control_mode:=${NMPC_CONTROL_MODE:-mhe} \
     -p l1_a_gain:=$L1_A_GAIN_D \
     -p l1_omega_c:=$L1_OMEGA_C_D \
@@ -248,18 +256,41 @@ nohup ros2 run offboard_test_acados acados_nmpc_node --ros-args \
     -p attach_window_sec:=$ATTACH_WINDOW_SEC_D \
     -p tau_lumped_enable:=${NMPC_TAU_LUMPED:-false} \
     -p xi_max:=$XI_MAX_D -p xi_omega_c:=$XI_OMEGA_C_D \
-    -p grip_gain_prior:=$GRIP_GAIN_PRIOR_D \
     -p omega_scale_enable:=${NMPC_OMEGA_SCALE:-false} \
     -p omega_scale_source:=${OMEGA_SCALE_SRC:-thrust} \
     -p omega_scale_tau:=$OMEGA_SCALE_TAU_D -p omega_scale_cap:=$OMEGA_SCALE_CAP_D \
-    -p grip_gain_envelope:=$GRIP_GAIN_ENVELOPE_D \
     > "$NODE_LOG" 2>&1 &
 
 # 8. MHE(dJ/c_xy + 棘轮修复已内建在 mhe_node.py,attach_offset 一到就自动生效)
-# GRIP_TRUE_PAYLOAD_MASS(2026-07-08 诊断用,默认 0=关闭):>0 时 mhe_node 的
-# dJ/c_xy 直接用这个真值算,不走 self.m_est 反推的棘轮——排查 0.15kg CEM
-# 结构性失败是否是"用质量反推几何缩放"这个自举耦合导致的。诊断专用,不是
-# 正式 CEM 花名册的默认路径。
+# 载荷几何标度 = grip_payload_envelope(包线上界,见文件顶部)。2026-08-26 去先验
+# 改造前这里还有 GRIP_TRUE_PAYLOAD_MASS(真值直灌)/GRIP_GEOM_MP_FLOOR(0.15kg 永久
+# 地板)/GRIP_MHE_MP_PRIOR(操作先验)三条通路,全部已删。
+# --- MHE<->NMPC 力矩通道解耦(2026-08-25,默认 command 不变)---
+# MHE_TAU_SOURCE=phys_full:u_known 三轴力矩**全部**用电机转速反算,MHE 只吃
+#   rate control + allocation 之后真实发生的量,与 NMPC 彻底解耦。
+#   (phys 档只换 roll/pitch,yaw 仍是 NMPC 意图值 —— 实测那个意图值比执行器
+#    实际输出大 3 倍,20 批残差 CSV 对表:roll 斜率 1.08/pitch 1.10/yaw 0.32。)
+# MHE_MOTOR_AVG=1:把取自电机的分量换成 MHE 采样区间内的**平均值**。
+#   motor_speed 是 250Hz、MHE 才 10Hz,取端点瞬时值当 0.1s 常量 = 混叠。
+# ⚠️⚠️ 2026-08-24 血泪:coupled+self+phys 在 attach/LIFT 段就发散坠机,而
+#   coupled+event+command 是已验证可用配置。当时留下的待验假说正是"NMPC 意图
+#   力矩虽不准但 20Hz 分段常值、与射击区间匹配;tau_phys 准但混叠"。所以
+#   **phys_full 必须配 MHE_MOTOR_AVG=1 一起测**,单开 phys_full 大概率复现那次
+#   坠机(它只是把 yaw 也换成瞬时值,混叠更重)。两者都默认关,需显式 opt-in。
+# --- 冷启动/"从头估计"(2026-08-25,默认全关)---
+# MHE_PRE_OFFBOARD=1:NMPC 接管**之前**(posctl 悬停段)就开始估质量,收敛后才
+#   往 /acados_nmpc/mhe_mass_estimate 发 —— NMPC 侧零改动(mhe_mass_cb 本来就
+#   没有"是否已接管"的门控,收到就用)。
+# MHE_NO_MASS_PRIOR=1:卸掉空机质量先验。注意通往 MHE 的空机质量先验有**三条**
+#   路,这个开关一次卸两条(Q0[13] 0.1->1e-6、lbx 下界 0.95*m_B->0.2),第三条
+#   (x0_bar 种子)降级为纯初始猜测。只改种子不动 lbx 是**假的零先验**——1.961
+#   那个硬下界把答案圈在真值下方 5% 处。
+# ⚠️⚠️ MHE_NO_MASS_PRIOR 会改 lbx 和 W_0 => **acados 必然重新生成+编译 solver**
+#   (首轮启动慢约 30s),而且它和默认档共用同一个 codegen 目录 —— 跑完冷启动档
+#   再跑默认档批次,那一轮也会重新生成一次。跟 MHE_M_MIN 是同一个坑,批次混跑
+#   时把重生成的耗时算进超时预算,别当成"脚本卡住了"。
+# 单测:src/offboard_test_acados/test/test_mhe_cold_start_standalone.py
+#   MHE_NO_MASS_PRIOR=1 跑可验证"起点不影响最终解"(实测两个起点末值差 0.0000kg)。
 MHE_LOG="$RUNDIR/grip_mhe_$STAMP.log"
 # ⚠️ residual_log_dir 只在非空时才传(2026-08-03 修):rclpy 的 --ros-args 解析
 # 不接受空的参数值,`-p residual_log_dir:=` 会让 mhe_node 启动即崩
@@ -267,6 +298,17 @@ MHE_LOG="$RUNDIR/grip_mhe_$STAMP.log"
 # 批次脚本照跑不误——整轮**静默没有 MHE**。07-31 加残差采集时引入,当时所有批次
 # 都经 run_residual_collect.sh 带着 RESID_LOG_DIR 进来,所以一直没暴露;任何不设
 # 该变量的裸跑都会中招。
+# --- 机动门控(2026-08-25,默认关)---
+# MHE_MANEUVER_GATE=1:机动期(|ω|或|v_xy| 超阈)按 lvl^exp 锚紧 Q0 的质量维,
+#   悬停期用名义权重。动机:m_est 静态准 -0.17% 但机动中系统性低估 8%;机动期
+#   的残差混着未建模气动/转子角加速度/内环滞后,都被归因到质量。降权同时也切细
+#   了自举耦合 m_est→dJ/c→NMPC→飞行→残差→m_est 在机动期的增益。
+# ⚠️ 与事件降权互斥(过渡期自动让位),避免两套 stage-0 权重互相覆盖。
+MHE_MG_OMEGA_D=$(_f2d "${MHE_MG_OMEGA:-0.15}")
+MHE_MG_VEL_D=$(_f2d "${MHE_MG_VEL:-0.20}")
+MHE_MG_CAP_D=$(_f2d "${MHE_MG_CAP:-10000.0}")
+MHE_MG_EXP_D=$(_f2d "${MHE_MG_EXP:-2.0}")
+
 RESID_ARG=()
 if [ -n "${RESID_LOG_DIR:-}" ]; then
   RESID_ARG=(-p "residual_log_dir:=$RESID_LOG_DIR")
@@ -279,16 +321,31 @@ nohup ros2 run offboard_test_acados mhe_node --ros-args \
     -p schedule_theta:="${MHE_SCHEDULE_THETA:-[-4.0,0.0,0.0,0.0]}" \
     -p event_confirm_thresh_n:=$MHE_CONFIRM_THRESH_D \
     -p confirm_thresh_alpha:=${MHE_CONFIRM_ALPHA:--1.0} \
-    -p confirm_payload_prior:=$MHE_CONFIRM_PRIOR_D \
-    -p grip_true_payload_mass:=$GRIP_TRUE_PAYLOAD_MASS_D \
-    -p grip_geom_mp_floor:=$GRIP_GEOM_MP_FLOOR_D \
-    -p grip_geom_mp_prior:=$GRIP_MHE_MP_PRIOR_D \
+    -p grip_payload_envelope:=$GRIP_PAYLOAD_ENVELOPE_D \
     -p eval_true_payload_mass:=$EVAL_TRUE_PAYLOAD_D \
     -p geom_release_mode:=${MHE_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-event}} \
     -p c_xy_est_enable:=${MHE_C_XY_EST:-false} \
+    -p c_xy_from_moment:=$(_b "${MHE_C_XY_FROM_MOMENT:-false}") \
+    -p maneuver_gate_enable:=$(_b "${MHE_MANEUVER_GATE:-false}") \
+    -p resid_release_geom:=$(_b "${MHE_RESID_RELEASE_GEOM:-true}") \
+    -p resid_step_enable:=$(_b "${MHE_RESID_STEP:-false}") \
+    -p resid_step_half:=${MHE_RESID_STEP_HALF:-3} \
+    -p resid_step_thresh:=$(_f2d "${MHE_RESID_STEP_TH:-1.0}") \
+    -p resid_step_persist:=${MHE_RESID_STEP_PERSIST:-2} \
+    -p resid_step_release_thresh:=$(_f2d "${MHE_RESID_STEP_REL:-2.0}") \
+    -p maneuver_omega_thresh:=$MHE_MG_OMEGA_D \
+    -p maneuver_vel_thresh:=$MHE_MG_VEL_D \
+    -p maneuver_q0_cap:=$MHE_MG_CAP_D \
+    -p maneuver_exponent:=$MHE_MG_EXP_D \
+    -p mhe_tau_source:=${MHE_TAU_SOURCE:-command} \
+    -p motor_window_avg:=$(_b "${MHE_MOTOR_AVG:-false}") \
+    -p pre_offboard_estimate:=$(_b "${MHE_PRE_OFFBOARD:-false}") \
+    -p pre_offboard_min_z:=${MHE_PRE_OFF_MIN_Z_D:-0.5} \
+    -p pre_offboard_conv_std:=${MHE_PRE_OFF_CONV_STD_D:-0.02} \
+    -p pre_offboard_timeout_sec:=${MHE_PRE_OFF_TIMEOUT_D:-30.0} \
     > "$MHE_LOG" 2>&1 &
 
 echo "gripper headless stack up: nmpc=$NODE_LOG mhe=$MHE_LOG"
 echo "  payload=${GRIP_PAYLOAD_KG}kg ecc_y=${GRIP_ECC_Y}m r_xy=$R_XY"
 echo "  event=${MHE_EVENT_TRIGGER:-true} theta=${MHE_SCHEDULE_THETA:-M0} confirm_thresh=${MHE_CONFIRM_THRESH:-1.5}"
-echo "  true_payload_mass=${GRIP_TRUE_PAYLOAD_MASS:-0.0} geom_mp_floor=${GRIP_GEOM_MP_FLOOR:-0.15}kg"
+echo "  payload_envelope=${GRIP_PAYLOAD_ENVELOPE:-0.5}kg (机架规格; 任务信息型质量先验已于 2026-08-26 全部删除)"

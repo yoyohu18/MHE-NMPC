@@ -1,4 +1,9 @@
 #!/bin/bash
+# 【2026-08-26 去先验改造】本脚本原先顺带设置的载荷质量先验环境变量
+# (GRIP_GEOM_MP_PRIOR / GRIP_GEOM_MP_FLOOR / MHE_CONFIRM_PRIOR 等)已删除:
+# 对应的节点参数不复存在,留着只会静默失效并误导读者。载荷质量信息现在只有
+# grip_payload_envelope 一条(机架规格包线上界,run_gripper_headless.sh 默认 0.5)。
+# 本脚本自身的研究主题不受影响。
 # 动力学残差**可辨识性诊断**数据采集(2026-07-31)。
 #
 # 【定位】这不是"神经网络训练数据采集"。采完先答四个问题,不全过就不上网络:
@@ -93,7 +98,7 @@ run_one() {
   echo "[resid] === traj=$traj mass=$mass ecc=$ecc rep=$rep ==="
   local LAUNCH="$RUNDIR/resid_launch_${STAMP}_${traj}_${mass}_${ecc}_${rep}.log"
   GRIP_PAYLOAD_KG=$mass GRIP_ECC_Y=$ecc USE_MHE=true MHE_C_XY_EST=true \
-    GRIP_GEOM_MP_FLOOR=0.15 GRIP_GEOM_MP_PRIOR="$mass" NMPC_GEOM_SOURCE=online \
+    NMPC_GEOM_SOURCE=online \
     GRIP_DYNAMIC="$DYN" ATTACH_WINDOW_SEC=60.0 \
     RESID_LOG_DIR="$OUTDIR" \
     bash "$WS/src/scripts/gripper/run_gripper_headless.sh" > "$LAUNCH" 2>&1 9>&-

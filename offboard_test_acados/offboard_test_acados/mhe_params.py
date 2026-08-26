@@ -131,8 +131,27 @@ class MHEParams:
     # 从 37.5% 降到 ~8.7%),所以要单独测"几何解耦"的效应时,必须把 m_min 固定在
     # 同一档、避免两个变量混在一起。用环境变量而不是改默认值,是防止实验后忘记恢复。
     # ⚠️ 改这个值会让 acados 重新生成 solver(lbx 变了),第一轮启动会慢约 30s。
+    # --- 冷启动:去掉空机质量先验(2026-08-25,"去先验"下半程第 #5 项)---
+    # 背景:通向 MHE 的空机质量先验有**三条**路,只堵一条等于没堵:
+    #   ① x0_bar 的质量维种子 = m_nominal   → 软(能被数据推开),见 seed_from_thrust
+    #   ② Q0[13] = 0.1 即 σ=3.16kg          → 相对 2.06kg 的量级本来就≈无先验
+    #   ③ m_min = 0.95·m_nominal = 1.961     → **lbx 硬约束,数据推不开**
+    # ③ 才是真正的强先验:它把答案硬圈在真值下方 5% 处。铁证是那些"m_est 钉在
+    # 下界 1.961"的现象(N=40 全程钉、4m/s drop 后卡 138s 不回)——如果下界不是从
+    # m_B 派生的,这些现象不会恰好长在那个位置。只改种子不动 m_min 是**假的
+    # 零先验**。开关打开时②③同时卸掉;① 降级为纯初始猜测(见 mhe_node 里
+    # _seed_mass_from_thrust 的调用处注释:initial guess ≠ prior)。
+    # 默认**关**(本仓惯例:新机制先需 n>=8 实测才能改默认值)。
+    no_mass_prior = os.environ.get(
+        'MHE_NO_MASS_PRIOR', '0') not in ('0', '', 'false', 'False')
+    # 无先验下界 [kg]:唯一职责是防 1/m 除零奇异(动力学里 a=T/m-g),
+    # **不含任何 m_B 信息**——取 0.2kg,低于任何合理四旋翼机架。
+    # 上界 m_max=5.0 本来就是硬编码常数、不从 m_B 派生,不需要改。
+    m_min_free = float(os.environ.get('MHE_M_MIN_FREE', '0.2'))
+
+    # ⚠️ MHE_M_MIN 显式覆盖优先级最高(消融实验要把下界固定在同一档时用)。
     m_min = float(os.environ['MHE_M_MIN']) if os.environ.get('MHE_M_MIN') \
-        else 0.95 * m_nominal   # ≈1.961 kg
+        else (m_min_free if no_mass_prior else 0.95 * m_nominal)
     m_max = 5.0
     # m_B 的显式别名:m_nominal 这个名字只说"名义",没说是**空机**质量。全仓
     # 统一约定(2026-08-24):m_B=空机(已知常数)、m_P=载荷(未知)、m_T=m_B+m_P
@@ -258,7 +277,11 @@ class MHEParams:
         1e3, 1e3, 1e3,
         1e4, 1e4, 1e4, 1e4,
         1e2, 1e2, 1e2,
-        0.1,                   # 质量,软锚定
+        # 质量:默认 0.1(σ=3.16kg)已经是极软的锚;no_mass_prior 时降到 1e-6
+        # (σ=1000kg)= 数值上的零先验。**不直接写 0**:Q0 全零会让质量维在激励
+        # 不足的窗口里丢掉 Hessian 的正定性(参考 2a 参数随机游走那 472 次病态失败),
+        # 1e-6 既不携带信息又保住数值健康。
+        (1e-6 if no_mass_prior else 0.1),
     ])
     if estimate_moment:
         # s 的到达代价:σ_s=0.1 kg·m → 权重 100。带载典型值 m_P·r_y≈0.3*0.14=0.042,

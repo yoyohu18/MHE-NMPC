@@ -1,4 +1,9 @@
 #!/bin/bash
+# 【2026-08-26 去先验改造】本脚本原先顺带设置的载荷质量先验环境变量
+# (GRIP_GEOM_MP_PRIOR / GRIP_GEOM_MP_FLOOR / MHE_CONFIRM_PRIOR 等)已删除:
+# 对应的节点参数不复存在,留着只会静默失效并误导读者。载荷质量信息现在只有
+# grip_payload_envelope 一条(机架规格包线上界,run_gripper_headless.sh 默认 0.5)。
+# 本脚本自身的研究主题不受影响。
 # α-only 消融:θ* 的收益到底来自哪一维?(2026-07-30)
 #
 # 【问什么】θ* = 4 维节奏 + 1 维无量纲阈值 α。B.4/holdout 只比过 {M0, 完整θ*},
@@ -184,8 +189,8 @@ for rep in $(seq 1 "$REPS"); do
   # `MHE_CONFIRM_THRESH=0.8` 会被当成**命令名**而不是环境变量(报 command not found)。
   # env 把它们当普通参数收,展开后语义才正确。对既有各臂完全等价。
   env GRIP_PAYLOAD_KG=$mass GRIP_ECC_Y=$ecc USE_MHE=true MHE_C_XY_EST=true \
-    GRIP_GEOM_MP_FLOOR=0.15 GRIP_GEOM_MP_PRIOR="$GP" NMPC_GEOM_SOURCE=online \
-    MHE_SCHEDULE_THETA="$TH" MHE_CONFIRM_ALPHA="$ALPHA" MHE_CONFIRM_PRIOR="$PRIOR" \
+    NMPC_GEOM_SOURCE=online \
+    MHE_SCHEDULE_THETA="$TH" MHE_CONFIRM_ALPHA="$ALPHA" \
     ${CONFIRM_N:+MHE_CONFIRM_THRESH=$CONFIRM_N} \
     bash "$WS/src/scripts/gripper/run_gripper_headless.sh" > "$LAUNCH" 2>&1 9>&-
   NMPC=""; for k in $(seq 1 12); do
