@@ -71,6 +71,9 @@ LIFT_HOLD=$(_b "${GRIP_LIFT_HOLD:-false}")
 LIFT_HOLD_DZ_D=$(_f2dv "${GRIP_LIFT_HOLD_DZ:-0.35}")
 LIFT_HOLD_SEC_D=$(_f2dv "${GRIP_LIFT_HOLD_SEC:-3.0}")
 DJ_TRACK=$(_b "${DJ_TRACK_MEST:-false}")
+# 模型 dJ 的下界载荷质量 kg。棘轮从 0 起步而 attach 时 dJ 按包线算,第一步必然
+# 往下打一次;地板保证它不掉到空机惯量附近。设 0 = 裸棘轮(旧行为)。
+DJ_FLOOR_MP_D=$(_f2dv "${GRIP_DJ_FLOOR_MP:-0.15}")
 # drop 时是否把 mass_event 发给 MHE。false = 让 MHE 自己从 T_phys 残差看出来
 # (须配 MHE_SIGNAL_MODE=residual)。默认 true = 历史行为。
 DROP_PUB_EVENT=$(_b "${DROP_PUBLISH_MASS_EVENT:-true}")
@@ -263,6 +266,8 @@ nohup bash -c "source /opt/ros/jazzy/setup.bash && source '$WS/install/setup.bas
     -p grip_lift_hold_enable:=$LIFT_HOLD \
     -p grip_lift_hold_dz:=$LIFT_HOLD_DZ_D -p grip_lift_hold_sec:=$LIFT_HOLD_SEC_D \
     -p dj_track_mest:=$DJ_TRACK -p grip_mp_cap:=$MP_CAP_D \
+    -p grip_dj_floor_mp:=$DJ_FLOOR_MP_D \
+    -p dj_ratchet_enable:=$(_b "${DJ_RATCHET:-true}") \
     -p drop_publish_mass_event:=$DROP_PUB_EVENT \
     -p geom_source:=online -p grip_payload_envelope:=$PAYLOAD_ENVELOPE_D \
     -p geom_release_mode:=${NMPC_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-event}} \

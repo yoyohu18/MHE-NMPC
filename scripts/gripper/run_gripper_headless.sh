@@ -77,6 +77,10 @@ _b() { case "$(echo "${1:-}" | tr 'A-Z' 'a-z')" in
 GRIP_DYN_R_D=$(_f2d "${GRIP_DYN_R:-0.8}")
 GRIP_DYN_W_D=$(_f2d "${GRIP_DYN_W:-0.25}")
 GRIP_DYN_RAMP_D=$(_f2d "${GRIP_DYN_RAMP:-0.0}")
+# 立体 8 字的 z 振幅(2026-08-28 补透传)。节点默认 0.0 = 平面 8 字,本脚本沿用
+# 该默认 => 不设此变量的历史批次逐位不变。viz 脚本默认 0.8,跨脚本对比同一
+# 工作点时必须显式对齐(z 实际范围 = GRIP_Z_HIGH ± GRIP_DYN_DZ,留够离地余量)。
+GRIP_DYN_DZ_D=$(_f2d "${GRIP_DYN_DZ:-0.0}")
 GRIP_PAYLOAD_KG_D=$(_f2d "$GRIP_PAYLOAD_KG")
 GRIP_ECC_Y_D=$(_f2d "$GRIP_ECC_Y")
 PUBLISH_HZ_D=$(_f2d "${PUBLISH_HZ:-50.0}")
@@ -97,6 +101,11 @@ PUBLISH_HZ_D=$(_f2d "${PUBLISH_HZ:-50.0}")
 # ⚠️ m_p>=0.2937kg 时 ratio 撞 cap 5.0,故 0.3kg 主线工况下包线与旧点估计先验
 #    给出**逐位相同**的 MC_*RATE_K;轻载(0.15/0.2)不在 cap 里,是真的改了整定。
 GRIP_PAYLOAD_ENVELOPE_D=$(_f2d "${GRIP_PAYLOAD_ENVELOPE:-0.5}")
+# MHE 侧几何标度的**独立覆盖**(2026-08-28)。默认回落到 GRIP_PAYLOAD_ENVELOPE,
+# 逐位兼容。拆开的理由:08-28 排查 m_est 带载低估时发现,同一个变量同时喂 NMPC
+# (模型 dJ 初值 + PX4 增益)和 MHE(转动通路几何标度),扫它无法区分是哪一侧起
+# 作用。要检验"MHE 几何过估经 quat 间接压低质量"必须只动 MHE 这一侧。
+MHE_PAYLOAD_ENVELOPE_D=$(_f2d "${MHE_PAYLOAD_ENVELOPE:-${GRIP_PAYLOAD_ENVELOPE:-0.5}}")
 EVAL_TRUE_PAYLOAD_D=$(_f2d "${EVAL_TRUE_PAYLOAD_MASS:-$GRIP_PAYLOAD_KG}")
 L1_A_GAIN_D=$(_f2d "${L1_A_GAIN:-10.0}")
 L1_OMEGA_C_D=$(_f2d "${L1_OMEGA_C:-0.5}")
@@ -121,12 +130,39 @@ GRIP_LIFT_DUR_D=$(_f2d "${GRIP_LIFT_DUR:-3.0}")
 # 的 grip_lift_hold_enable 注释:attach 后 box 还在地上时 MHE 学不到任何东西
 # (实测 m_est 反而从 2.064 下漂到 2.023),真正该给的时间在**离地之后**。
 # GRIP_LIFT_HOLD=1   抬升 GRIP_LIFT_HOLD_DZ 米后把斜坡冻结 GRIP_LIFT_HOLD_SEC 秒
-# DJ_TRACK_MEST=1    让 dJ 和 PX4 内环增益跟着 m_est 棘轮上升(只增不减+封顶)
+# DJ_TRACK_MEST=1    让模型侧 dJ 跟着 m_est 棘轮走(只增不减 + 上界 cap + 下界地板)
+# GRIP_DJ_FLOOR_MP=  模型 dJ 的下界载荷质量 kg(默认 0.15)。棘轮从 0 起步,而 attach
+#                    时 dJ 是按包线上界算的,所以第一步必然把 dJ 往下打一次——地板
+#                    保证它不会掉到空机惯量附近(dJ→0 会力矩饱和级联发散)。设 0 =
+#                    无地板(裸棘轮,复现 08-25 旧行为)。
 # ⚠️ DJ_TRACK_MEST 只在 geom_source=online 下生效(_update_online_geometry 是
 #    唯一的刷新点);legacy 几何档不走那条路。
+# ⚠️ PX4 内环增益**不跟着棘轮下调**:它在 attach 时按包线整定一次,只有棘轮涨过
+#    包线才上调(而默认 cap=0.6 < 门槛 0.625,所以默认配置下它永不改动)。
+# ── geom_source 默认值:2026-08-28 由 truth 改为 online(勿删,改回前先读)──────
+# NMPC 的载荷几何(dJ/c_xy)从哪来。truth = 由 attach 真值几何 + grip_payload_mass
+# **载荷真值质量**算(acados_nmpc_node._payload_geometry);online = attach 瞬间用
+# grip_payload_envelope 机架规格包线初始化 dJ/内环增益,c_xy 随后吃 τ_phys 反算的
+# /acados_nmpc/c_xy_est 在线精修。
+#  · 为什么改:truth 读载荷真值,违背本项目前提"不能知道包裹质量",是通往 NMPC 的
+#    四条路里最后一条脏的(MHE 侧 08-26 已用包线洗干净)。且默认值早与实践脱节——
+#    14 个正式批次脚本都显式传 online 覆盖它,run_sitl_gripper_viz.sh 也写死
+#    online;truth 只在"忘了传"时生效 = 实验静默拿到真值的陷阱。
+#  · 证据:4m/s 首次 truth vs online 配对 A/B(nmpc_test_results/
+#    geomsrc_ab_4ms_20260828_184240.txt):truth 3/8 失败 vs online 1/8
+#    (Fisher p=0.569,不显著);bias 非劣成立(n=5 配对,d=+0.025pp,95%CI 上界
+#    +0.788 < δ=1.0pp)。truth 在 4m/s 上**历史零数据**,是未经验证的配置;
+#    online 已累计 57 轮。
+#  · ⚠️ 诚实记录:该批**前置硬条件①(16/16 全 ok)未通过**(4 轮失败),本次改默认
+#    是在知悉①未通过的情况下由用户拍板,**不是判据放行**。支持理由是 ①未过的
+#    主因为工作点自身脆弱(两臂共有:yaw 力矩饱和 tau_psi=0.2Nm + LIFT 段 m_est
+#    触 1.961 下界),非 geom_source;online 唯一那次失败(rep8)已诊断为 yaw 边界
+#    所致、与被测变量无关。
+#  · 回归风险:显式传 NMPC_GEOM_SOURCE 的脚本全不受影响,仅改变裸跑行为。
 GRIP_LIFT_HOLD_DZ_D=$(_f2d "${GRIP_LIFT_HOLD_DZ:-0.35}")
 GRIP_LIFT_HOLD_SEC_D=$(_f2d "${GRIP_LIFT_HOLD_SEC:-3.0}")
 GRIP_MP_CAP_D=$(_f2d "${GRIP_MP_CAP:-0.6}")
+GRIP_DJ_FLOOR_MP_D=$(_f2d "${GRIP_DJ_FLOOR_MP:-0.15}")
 
 WS="/home/clear/ros2_ws_HJH"
 PX4_DIR="/home/clear/PX4-Autopilot"
@@ -239,9 +275,11 @@ nohup ros2 run offboard_test_acados acados_nmpc_node --ros-args \
     -p dj_track_mest:=$(_b "${DJ_TRACK_MEST:-false}") \
     -p drop_publish_mass_event:=$(_b "${DROP_PUBLISH_MASS_EVENT:-true}") \
     -p grip_mp_cap:=$GRIP_MP_CAP_D \
+    -p grip_dj_floor_mp:=$GRIP_DJ_FLOOR_MP_D \
+    -p dj_ratchet_enable:=$(_b "${DJ_RATCHET:-true}") \
     -p use_mhe:=$USE_MHE \
     -p decouple_publish:=${DECOUPLE_PUB:-true} -p publish_hz:=$PUBLISH_HZ_D \
-    -p geom_source:=${NMPC_GEOM_SOURCE:-truth} \
+    -p geom_source:=${NMPC_GEOM_SOURCE:-online} \
     -p geom_release_mode:=${NMPC_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-event}} \
     -p grip_payload_envelope:=$GRIP_PAYLOAD_ENVELOPE_D \
     -p control_mode:=${NMPC_CONTROL_MODE:-mhe} \
@@ -251,6 +289,7 @@ nohup ros2 run offboard_test_acados acados_nmpc_node --ros-args \
     -p grip_dynamic_after_lift:=${GRIP_DYNAMIC:-false} \
     -p grip_dyn_r:=$GRIP_DYN_R_D -p grip_dyn_w:=$GRIP_DYN_W_D \
     -p grip_dyn_ramp:=$GRIP_DYN_RAMP_D \
+    -p grip_dyn_dz:=$GRIP_DYN_DZ_D \
     -p traj_scale_weights:=${TRAJ_SCALE_WEIGHTS:-false} \
     -p grip_drop_at_fig8_tip:=${GRIP_DROP_AT_TIP:-false} \
     -p attach_window_sec:=$ATTACH_WINDOW_SEC_D \
@@ -321,7 +360,7 @@ nohup ros2 run offboard_test_acados mhe_node --ros-args \
     -p schedule_theta:="${MHE_SCHEDULE_THETA:-[-4.0,0.0,0.0,0.0]}" \
     -p event_confirm_thresh_n:=$MHE_CONFIRM_THRESH_D \
     -p confirm_thresh_alpha:=${MHE_CONFIRM_ALPHA:--1.0} \
-    -p grip_payload_envelope:=$GRIP_PAYLOAD_ENVELOPE_D \
+    -p grip_payload_envelope:=$MHE_PAYLOAD_ENVELOPE_D \
     -p eval_true_payload_mass:=$EVAL_TRUE_PAYLOAD_D \
     -p geom_release_mode:=${MHE_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-event}} \
     -p c_xy_est_enable:=${MHE_C_XY_EST:-false} \

@@ -462,6 +462,27 @@ class AcadosNMPCNode(Node):
         self.declare_parameter('drop_publish_mass_event', True)
         self.declare_parameter('dj_track_mest', False)
         self.declare_parameter('grip_mp_cap', 0.6)       # 载荷质量操作包线上界 kg
+        # 模型侧 dJ 的**下界**载荷质量 [kg](2026-08-28)。棘轮从 0 起步,而 attach
+        # 瞬间 dJ 是按包线上界算的(过估),所以棘轮第一步必然把模型 dJ **往下**打
+        # 一次 —— 这正是"用在线 m_est 精修包线过估"想要的方向,但不能打到 0 附近:
+        # dJ→0 时 NMPC 按空机惯量规划角加速度、真实惯量数倍于此,力矩饱和后级联
+        # 发散(08-25 run_prior_ab_4ms rep5 实测 peak_pos_err 15.1m)。风险窗口只有
+        # attach→m_est 收敛那 ~0.6s(实测 m_est 离地后 0.6s 就到 m_p=0.255),地板
+        # 只需覆盖这一段。取值与 MHE 侧 grip_geom_mp_floor 同口径(0.15)。
+        # 设 0.0 = 无地板(棘轮裸跑);设 = grip_payload_envelope 则 dJ 退回"只增
+        # 不减且不低于包线",在主线 0.3kg 工况上等价于不变。
+        self.declare_parameter('grip_dj_floor_mp', 0.15)
+        # 模型 dJ 是否走棘轮(2026-08-28)。默认 True = 既有行为。
+        # False = **双向跟随** m_p_now,每帧贴着当前 m_est 走。
+        # 为什么这条现在敢开(07-28 撤销双向跟随时它是不敢的):棘轮当初担的两个
+        # 职责已经分别被两个**静态界**接管 —— 高估无界跟涨归 grip_mp_cap,
+        # LIFT 段合法低值归 grip_dj_floor_mp(那次撤销时这两个界都还不存在)。
+        # 棘轮只剩"抑制 dJ 逐帧抖动"这一项独有价值,而 m_est 本身就每帧抖着喂进
+        # model.p(且以 1/m 的形式更直接地进推力项),dJ 跟着抖不引入新性质。
+        # 代价:失去单调性 = 失去"m_est→dJ→u→飞行→m_est 这个环不能自激"的保证。
+        # 环仍被 [floor, cap] 限界,但界内可能振荡。**判负条件是 SITL,不是推理。**
+        # ⚠️ 增益侧**永远**用棘轮(峰值)语义,与这个开关无关:"必须够大"天然要峰值。
+        self.declare_parameter('dj_ratchet_enable', True)
         # 增益重缩放的滞回:棘轮相对上次缩放至少涨 dmp[kg],或涨够 (ratio-1)
         # 的相对量,取两者较大。⚠️ 纯比例滞回不行 —— 从 m_p≈0 起步时基数太小,
         # 0→0.3kg 会触发十几次(单测实测 14 次);绝对增量才是这里的主约束。
@@ -612,6 +633,10 @@ class AcadosNMPCNode(Node):
             self.drop_publish_mass_event = bool(
                 self.get_parameter('drop_publish_mass_event').value)
             self.grip_mp_cap = float(self.get_parameter('grip_mp_cap').value)
+            self.grip_dj_floor_mp = float(
+                self.get_parameter('grip_dj_floor_mp').value)
+            self.dj_ratchet_enable = bool(
+                self.get_parameter('dj_ratchet_enable').value)
             self.dj_gain_rescale_dmp = float(
                 self.get_parameter('dj_gain_rescale_dmp').value)
             self.dj_gain_rescale_ratio = float(
@@ -623,6 +648,7 @@ class AcadosNMPCNode(Node):
             # dJ 棘轮状态
             self._mp_ratchet = 0.0         # 见过的最大载荷质量(只增不减)
             self._mp_gain_applied = 0.0    # 上次用来缩增益的 m_p(滞回基准)
+            self._geom_log_count = 0       # [dJ_online] 低频日志的帧计数
             self.grip_drop_at_fig8_tip = bool(
                 self.get_parameter('grip_drop_at_fig8_tip').value)
             self.grip_payload_mass = float(
@@ -1030,22 +1056,49 @@ class AcadosNMPCNode(Node):
             self._mp_gain_applied = 0.0
             return
         self.c_est = self.c_xy_online.copy()
-        # dJ 跟随 m_est:棘轮(只增不减)+ 硬上界。两个方向的保护都不能少,
-        # 理由见 dj_track_mest 参数声明处搬过来的 07-28 撤销记录。
+        # dJ 跟随 m_est:棘轮(只增不减)+ 硬上界 + 下界地板。三个方向的保护都不能少,
+        # 前两个见 dj_track_mest 参数声明处搬过来的 07-28 撤销记录,地板见
+        # grip_dj_floor_mp 声明处(治"棘轮从 0 起步把包线过估一次性打穿")。
         if self.dj_track_mest and self.grip_mass_stepped:
             m_p_now = max(float(self.m_est) - p.m, 0.0)
             m_p_now = min(m_p_now, self.grip_mp_cap)        # 治"高估无界跟涨"
+            # 棘轮**永远更新**:增益侧无条件用它(峰值 = "必须够大"的语义),
+            # dj_ratchet_enable 只决定模型侧 dJ 用不用它。
             if m_p_now > self._mp_ratchet:                  # 治"LIFT 段冻住"
                 self._mp_ratchet = m_p_now
-                self.dJ_est = self._dJ_from_mp(self._mp_ratchet)
-                # 内环增益跟进,但要滞回:估计每涨一点就重设一次 PX4 参数既没
-                # 意义又会刷服务调用(而且 PX4 会把它当真机参数落盘,见 headless
-                # 脚本的持久化护栏)。只在棘轮相对上次缩放涨够 ratio 才动。
-                _need = max(self.dj_gain_rescale_dmp,
-                            self._mp_gain_applied * (self.dj_gain_rescale_ratio - 1.0))
-                if self._mp_ratchet - self._mp_gain_applied >= _need:
-                    self._mp_gain_applied = self._mp_ratchet
-                    self._scale_px4_rate_gains(self.dJ_est, allow_rescale=True)
+            # 模型侧的跟踪量:棘轮(峰值,默认) 或 m_p_now(双向跟随)。
+            _m_p_track = (self._mp_ratchet if self.dj_ratchet_enable
+                          else m_p_now)
+            # 再按 max(·, 地板) 兜底:跟踪量低于地板时(attach 后 m_est 尚未收敛
+            # 的那 ~0.6s,或双向跟随下 m_est 任何一次探底)模型 dJ 停在地板上,
+            # 不会被打到空机惯量附近。
+            m_p_model = max(_m_p_track, self.grip_dj_floor_mp)
+            self.dJ_est = self._dJ_from_mp(m_p_model)
+            # 内环增益**不跟着棘轮下调**:它是执行器整定,语义是"必须够大"
+            # (08-25 坐实 prior 的两个用途里起作用的是这一半),attach 时已按
+            # 包线上界缩放过,_mp_gain_applied 的基准就是包线。只有棘轮真的
+            # 涨过包线(= 机架规格给小了)才需要再往上调。
+            # 滞回照旧:估计每涨一点就重设一次 PX4 参数既没意义又会刷服务调用
+            # (而且 PX4 会把它当真机参数落盘,见 headless 脚本的持久化护栏)。
+            _need = max(self.dj_gain_rescale_dmp,
+                        self._mp_gain_applied * (self.dj_gain_rescale_ratio - 1.0))
+            if self._mp_ratchet - self._mp_gain_applied >= _need:
+                self._mp_gain_applied = self._mp_ratchet
+                self._scale_px4_rate_gains(
+                    self._dJ_from_mp(self._mp_ratchet), allow_rescale=True)
+            # dJ 在线轨迹低频日志(~5s 一行 @20Hz)。没有它就没法验证"dJ 真的在
+            # 线变了"——原先只有 LIFT hold 结束时打一行,而 hold 默认是关的。
+            # 格式仿 mhe_node 的 [c_xy_est]。src 标出当前是地板还是棘轮在定值。
+            self._geom_log_count += 1
+            if self._geom_log_count % 100 == 1:
+                _src = ('floor' if self.grip_dj_floor_mp > _m_p_track
+                        else ('ratchet' if self.dj_ratchet_enable else 'track'))
+                self.get_logger().info(
+                    f'[dJ_online] m_est={self.m_est:.3f} m_p={m_p_now:.3f} '
+                    f'ratchet={self._mp_ratchet:.3f} floor={self.grip_dj_floor_mp:.3f}'
+                    f' -> m_p_model={m_p_model:.3f}({_src}) dJ={self.dJ_est:.4f} '
+                    f'| gain_base={self._mp_gain_applied:.3f} '
+                    f'c_xy=[{self.c_est[0]*100:+.2f},{self.c_est[1]*100:+.2f}]cm')
 
     def mhe_mass_cb(self, msg):
         # use_mhe=False 时:MHE 只当诊断,不把估计喂回 NMPC(m_est 保持固定)。
@@ -1588,6 +1641,13 @@ class AcadosNMPCNode(Node):
             self.c_est = np.zeros(2)
             mp_gain, src_gain = self._envelope_mp()      # 执行器侧:必须够大
             self._scale_px4_rate_gains(self._dJ_from_mp(mp_gain))
+            # 增益滞回基准对齐到刚施加的包线。**不设这一行 dj_track_mest 就会
+            # 把包线整定推翻**:_mp_gain_applied 停在 0 时,棘轮第一步(m_p≈0.05)
+            # 就满足 >= dj_gain_rescale_dmp,于是内环比从包线的 5.00 掉到 1.76
+            # (降到 35%)—— 而 attach 这次缩放的存在理由正是"不等估计收敛,
+            # 否则实测炸机"。棘轮(_mp_ratchet)保持 0 不动:模型侧要能从包线
+            # 过估精修下来,那是 dj_track_mest 的目的。
+            self._mp_gain_applied = mp_gain
             self.get_logger().info(
                 f't={nmpc_time:.1f}s | ATTACH (geom_source=online): model dJ from '
                 f'envelope m_p={mp0:.2f}kg arm={self.grip_arm_d:.2f}m '

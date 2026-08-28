@@ -31,10 +31,16 @@ class _Stub:
         self._lift_hold_done = False
         self.dj_track_mest = True
         self.grip_mp_cap = 0.6
+        self.grip_dj_floor_mp = 0.15
+        self.dj_ratchet_enable = True
+        self.grip_payload_envelope = 0.5
         self.dj_gain_rescale_dmp = 0.05
         self.dj_gain_rescale_ratio = 1.25
         self._mp_ratchet = 0.0
-        self._mp_gain_applied = 0.0
+        # attach(online 分支)之后的真实状态:棘轮从 0 起步(模型侧要能从包线
+        # 过估精修下来),增益滞回基准已对齐到包线(执行器侧只许上调)。
+        self._mp_gain_applied = 0.5
+        self._geom_log_count = 0
         self.grip_mass_stepped = True
         self.grip_dropped = False
         self.grip_arm_d = 0.47
@@ -106,28 +112,109 @@ def test_dj_ratchet_monotonic_and_capped():
         _geom(s)
         dJs.append(s.dJ_est)
     assert all(b >= a - 1e-12 for a, b in zip(dJs, dJs[1:])), f'dJ 非单调: {dJs}'
-    # 下漂段(前三个)不该产生任何 dJ
-    assert dJs[2] == 0.0, f'box 在地上时 dJ 应为 0,实得 {dJs[2]}'
+    # 下漂段(前三个)棘轮不动,模型 dJ 停在地板上——不是 0(dJ→0 会让 NMPC
+    # 按空机惯量规划角加速度,力矩饱和后级联发散,见 grip_dj_floor_mp 注释)
+    dJ_floor = _dJ(s, s.grip_dj_floor_mp)
+    assert abs(dJs[2] - dJ_floor) < 1e-12, \
+        f'box 在地上时 dJ 应停在地板 {dJ_floor:.4f},实得 {dJs[2]:.4f}'
     # 回落不回退
     assert dJs[9] == dJs[8], 'm_est 回落时 dJ 不该跟着降'
     # 高估被 cap 住
     dJ_cap = _dJ(s, s.grip_mp_cap)
     assert abs(dJs[-1] - dJ_cap) < 1e-12, f'高估应被封顶到 {dJ_cap:.4f},实得 {dJs[-1]:.4f}'
     dJ_true = _dJ(s, 0.3)
-    print(f'[3] dJ 棘轮 OK (地上 0.0 → 离地 {dJs[4]:.4f} → 真值参考 {dJ_true:.4f} '
-          f'→ 高估封顶 {dJs[-1]:.4f})')
+    print(f'[3] dJ 棘轮 OK (地上=地板 {dJs[2]:.4f} → 离地 {dJs[4]:.4f} → 真值参考 '
+          f'{dJ_true:.4f} → 高估封顶 {dJs[-1]:.4f})')
 
 
-def test_gain_rescale_has_hysteresis():
-    """增益重缩放要有滞回:m_est 每抖一下就重设 PX4 参数是不可接受的
-    (服务调用刷屏 + PX4 会把它当真机参数落盘)。"""
+def test_gain_not_dragged_down_by_ratchet():
+    """★ 内环增益不许被棘轮往下拖。attach 时已按包线上界(0.5kg)缩放过,棘轮
+    从 0 爬到真值 0.3 全程都在包线之下,不该产生任何重缩放调用。
+
+    不设这条保护时的实测代数:_mp_gain_applied 停在 0 → 棘轮第一步 m_p≈0.05
+    就满足 >= dj_gain_rescale_dmp=0.05 → 增益比从包线的 5.00 掉到 1.76(35%),
+    而 attach 那次缩放的存在理由正是"不等估计收敛,否则实测炸机"。"""
     s = _Stub()
-    for m in np.linspace(2.064, 2.364, 60):   # 平滑爬升 60 帧
+    for m in np.linspace(2.064, 2.364, 60):   # 平滑爬升 60 帧,m_p: 0 → 0.30
         s.m_est = float(m)
         _geom(s)
-    assert len(s.gain_calls) <= 7, f'增益缩放调用 {len(s.gain_calls)} 次,滞回失效'
-    assert len(s.gain_calls) >= 1, '至少应缩放一次'
-    print(f'[4] 增益滞回 OK (60 帧爬升只触发 {len(s.gain_calls)} 次重缩放)')
+    assert s._mp_ratchet > 0.29, f'棘轮应爬到真值附近,实得 {s._mp_ratchet:.3f}'
+    assert s.gain_calls == [], \
+        f'棘轮在包线之下时不该动增益,实得 {len(s.gain_calls)} 次: {s.gain_calls}'
+    print(f'[4] 增益不被棘轮下拖 OK (棘轮爬到 {s._mp_ratchet:.3f} < 包线 '
+          f'{s.grip_payload_envelope}, 0 次重缩放)')
+
+
+def test_gain_rescale_unreachable_at_default_params():
+    """⚠️ 记录一个参数间的既有关系:**默认参数下增益上调这条路不可达**。
+    滞回门槛 = max(dj_gain_rescale_dmp, _mp_gain_applied*(ratio-1))
+             = max(0.05, 0.5*0.25) = 0.125 → 棘轮要到 0.625 才触发,
+    而 grip_mp_cap=0.6 先把棘轮封死。两个数都表达"机架规格上界",所以自洽:
+    默认配置下增益就钉在 attach 时的包线整定上,永不改动。
+    要让上调真的能发生,得抬 grip_mp_cap 或降 dj_gain_rescale_ratio。"""
+    s = _Stub()
+    for m in np.linspace(2.064, 3.2, 200):    # m_p 一路顶到 cap 0.6
+        s.m_est = float(m)
+        _geom(s)
+    assert abs(s._mp_ratchet - s.grip_mp_cap) < 1e-12, '棘轮应被 cap 封顶'
+    assert s.gain_calls == [], \
+        f'默认参数下不该有任何上调(门槛 0.625 > cap 0.6),实得 {s.gain_calls}'
+    print(f'[5a] 默认参数下增益上调不可达 OK (棘轮封顶 {s._mp_ratchet:.2f}, '
+          f'门槛 0.625)')
+
+
+def test_gain_still_rescales_above_envelope():
+    """但机制本身要在:棘轮真的涨过包线(机架规格给小了)时必须能往上调,
+    且要有滞回——每抖一下就重设 PX4 参数会刷服务调用,而且 PX4 会把它当真机
+    参数落盘。用放宽的 cap 测机制,不测默认取值(见上一条)。"""
+    s = _Stub(grip_mp_cap=1.2)
+    for m in np.linspace(2.064, 3.164, 200):  # m_p: 0 → 1.10,越过门槛 0.625
+        s.m_est = float(m)
+        _geom(s)
+    assert len(s.gain_calls) >= 1, '棘轮越过包线后应至少上调一次'
+    assert len(s.gain_calls) <= 4, f'滞回失效,实得 {len(s.gain_calls)} 次'
+    assert all(b >= a for a, b in zip(s.gain_calls, s.gain_calls[1:])), \
+        f'增益只该单调上调: {s.gain_calls}'
+    assert s.gain_calls[0] >= _dJ(s, s.grip_payload_envelope), \
+        '第一次上调时棘轮就该已经超过包线'
+    print(f'[5b] 越过包线才上调 OK ({len(s.gain_calls)} 次: '
+          f'{[round(v, 4) for v in s.gain_calls]})')
+
+
+def test_floor_zero_restores_bare_ratchet():
+    """grip_dj_floor_mp=0 = 无地板,退回裸棘轮语义(给要复现旧行为的批次留后路)。"""
+    s = _Stub(grip_dj_floor_mp=0.0)
+    s.m_est = p.m - 0.04          # box 还在地上,m_est 下漂到空机以下
+    _geom(s)
+    assert s.dJ_est == 0.0, f'无地板时 dJ 应为 0,实得 {s.dJ_est}'
+    print('[6] floor=0 退回裸棘轮 OK')
+
+
+def test_no_ratchet_tracks_both_ways():
+    """dj_ratchet_enable=False:模型 dJ 双向跟随 m_est,不再记住峰值。
+    地板和 cap 两个静态界仍然生效(它们才是治高估/治 LIFT 低值的那两道),
+    而增益侧**照旧**用棘轮峰值——两者由不同语义驱动,不该被同一个开关连坐。"""
+    s = _Stub(dj_ratchet_enable=False)
+    # 涨 → 更涨 → 回落 → 再涨。回落值取 2.25(m_p=0.186)而不是 2.20
+    # (m_p=0.136)——后者低于地板 0.15,会被地板抬住,测不出"跟着降"。
+    seq = [2.30, 2.40, 2.25, 2.35]
+    dJs = []
+    for m in seq:
+        s.m_est = m
+        _geom(s)
+        dJs.append(s.dJ_est)
+    assert dJs[2] < dJs[1], f'回落时 dJ 应跟着降(无棘轮),实得 {dJs}'
+    assert abs(dJs[2] - _dJ(s, 2.25 - p.m)) < 1e-12, 'dJ 应等于当前 m_p 对应值'
+    # 棘轮本身仍在走(增益侧要用),只是模型侧不再消费它
+    assert abs(s._mp_ratchet - (2.40 - p.m)) < 1e-9, \
+        f'棘轮仍应记住峰值供增益侧使用,实得 {s._mp_ratchet:.3f}'
+    # 地板仍然兜底
+    s.m_est = p.m - 0.05                  # 探到空机以下
+    _geom(s)
+    assert abs(s.dJ_est - _dJ(s, s.grip_dj_floor_mp)) < 1e-12, \
+        '无棘轮时地板仍须兜住 dJ'
+    print(f'[9] 无棘轮双向跟随 OK (dJ {[round(v, 4) for v in dJs]}, '
+          f'棘轮仍走到 {s._mp_ratchet:.3f}, 探底后回到地板 {s.dJ_est:.4f})')
 
 
 def test_drop_releases_ratchet():
@@ -138,7 +225,7 @@ def test_drop_releases_ratchet():
     s.grip_dropped = True
     _geom(s)
     assert s.dJ_est == 0.0 and s._mp_ratchet == 0.0, 'drop 后应清零'
-    print('[5] drop 释放棘轮 OK')
+    print('[7] drop 释放棘轮 OK')
 
 
 def test_disabled_keeps_legacy_behaviour():
@@ -149,14 +236,18 @@ def test_disabled_keeps_legacy_behaviour():
     assert s.dJ_est == 0.0588, 'legacy 下 dJ 不该被改'
     assert np.allclose(s.c_est, [0.01, -0.02]), 'c_est 仍应更新'
     assert s.gain_calls == [], 'legacy 下不该动增益'
-    print('[6] 开关关闭 = legacy 行为 OK')
+    print('[8] 开关关闭 = legacy 行为 OK')
 
 
 if __name__ == '__main__':
     test_hold_freezes_ramp()
     test_hold_triggers_after_liftoff_height()
     test_dj_ratchet_monotonic_and_capped()
-    test_gain_rescale_has_hysteresis()
+    test_gain_not_dragged_down_by_ratchet()
+    test_gain_rescale_unreachable_at_default_params()
+    test_gain_still_rescales_above_envelope()
+    test_floor_zero_restores_bare_ratchet()
+    test_no_ratchet_tracks_both_ways()
     test_drop_releases_ratchet()
     test_disabled_keeps_legacy_behaviour()
     print('\nall passed')

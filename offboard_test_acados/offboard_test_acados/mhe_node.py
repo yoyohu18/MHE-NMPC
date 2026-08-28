@@ -1599,6 +1599,29 @@ class MHENode(Node):
                             f'(m_p={m_p:.3f} r=[{rx:+.3f},{ry:+.3f}])')
                 self.get_logger().info(
                     f'[tau_phys] roll={tr:+.3f} pitch={tp:+.3f} Nm{pred}')
+            # ---- 机动低估诊断(2026-08-28)----
+            # 08-28 三轮实测把问题收窄到:T_phys/g 精确等于真质量(0.04%),而 m_est
+            # 低 1.4~2.7% —— 推力测量没问题,是 MHE 拿着对的推力估低了。
+            # 悬停/准稳态下垂直平衡给出 m = T·cosθ/g(θ=推力轴倾角)。打出这三个量
+            # 就能判:m_est ≈ T·cosθ/g ⇒ MHE 内部自洽,偏差来自 T_phys 的乘性标定;
+            # m_est <  T·cosθ/g ⇒ MHE 里还有别的项在吃掉它(kd/滞后/权重)。
+            # cosθ 由体 z 轴在世界 z 上的投影给出 = R33 = 1-2(qx²+qy²)。
+            if self.thrust_phys is not None and self.x_meas is not None:
+                _q = self.x_meas[6:10]
+                _n = float(np.linalg.norm(_q))
+                if _n > 1e-6:
+                    _qw, _qx, _qy, _qz = (_q / _n)
+                    _c = 1.0 - 2.0 * (_qx * _qx + _qy * _qy)   # R33 = cos(tilt)
+                    _c = float(np.clip(_c, 1e-3, 1.0))
+                    _mq = self.thrust_phys * _c / mhe_p.g       # 准静态质量
+                    _vz = float(self.x_meas[5])
+                    self.get_logger().info(
+                        f'[mass-diag] m_est={self.m_est:.4f} T={self.thrust_phys:.3f}N '
+                        f'tilt={math.degrees(math.acos(_c)):.2f}deg cos={_c:.5f} '
+                        f'| T/g={self.thrust_phys / mhe_p.g:.4f} '
+                        f'T*cos/g={_mq:.4f} '
+                        f'| m_est-T*cos/g={self.m_est - _mq:+.4f}kg '
+                        f'({(self.m_est - _mq) / _mq * 100:+.2f}%) vz={_vz:+.3f}')
             # B.3 Phase1 验证行:在线 c_xy 估计 vs attach 真值反推的 c_xy。质量
             # 因子用 eval_true_payload_mass(**纯评估**真值,不通往模型),否则退回
             # m_est 反推 —— 后者只是个标签近似,不是真值(见记忆 cxy-truth-label-defect:
