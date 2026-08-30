@@ -71,6 +71,9 @@ LIFT_HOLD=$(_b "${GRIP_LIFT_HOLD:-false}")
 LIFT_HOLD_DZ_D=$(_f2dv "${GRIP_LIFT_HOLD_DZ:-0.35}")
 LIFT_HOLD_SEC_D=$(_f2dv "${GRIP_LIFT_HOLD_SEC:-3.0}")
 DJ_TRACK=$(_b "${DJ_TRACK_MEST:-false}")
+# 载荷**意外**脱落看门狗(2026-08-30,与 headless 同名同默认)。演示视频用
+# MHE_PAYLOAD_LOST_WATCH=1 打开;计划内 drop 不走这条路,见 payload-lost-watchdog。
+PL_WATCH=$(_b "${MHE_PAYLOAD_LOST_WATCH:-false}")
 # 模型 dJ 的下界载荷质量 kg。棘轮从 0 起步而 attach 时 dJ 按包线算,第一步必然
 # 往下打一次;地板保证它不掉到空机惯量附近。设 0 = 裸棘轮(旧行为)。
 DJ_FLOOR_MP_D=$(_f2dv "${GRIP_DJ_FLOOR_MP:-0.15}")
@@ -117,6 +120,11 @@ DYNAMIC="${GRIP_DYNAMIC:-true}"        # figure8 动态
 # INTEGER,与节点里 DOUBLE 声明冲突抛 InvalidParameterTypeException **打挂节点**
 # (07-29/30 在两个 headless 脚本上各踩一次)。这里同样统一规范化。
 _f2d() { python3 -c "print(float('$1'))"; }
+# 看门狗的浮点参数必须放在 _f2d 定义**之后**(前面那几行只用 _b)。
+PL_STEP_TH_D=$(_f2d "${MHE_PL_STEP_TH:-2.0}")
+PL_MARGIN_D=$(_f2d "${MHE_PL_MASS_MARGIN:-0.10}")
+PL_HOLD_D=$(_f2d "${MHE_PL_HOLD_SEC:-3.0}")
+PL_VZ_D=$(_f2d "${MHE_PL_VZ_GATE:-0.30}")
 DYN_R_D=$(_f2d "$DYN_R"); DYN_W_D=$(_f2d "$DYN_W"); DYN_RAMP_D=$(_f2d "$DYN_RAMP")
 DYN_DZ_D=$(_f2d "$DYN_DZ")
 Z_HIGH_D=$(_f2d "$Z_HIGH"); LIFT_DUR_D=$(_f2d "$LIFT_DUR")
@@ -290,6 +298,13 @@ nohup bash -c "source /opt/ros/jazzy/setup.bash && source '$WS/install/setup.bas
     -p resid_step_half:=$RESID_STEP_HALF -p resid_step_thresh:=$RESID_STEP_TH_D \
     -p resid_step_persist:=$RESID_STEP_PERSIST \
     -p resid_step_release_thresh:=$RESID_STEP_REL_D \
+    -p payload_lost_watch_enable:=$PL_WATCH \
+    -p payload_lost_step_thresh:=$PL_STEP_TH_D \
+    -p payload_lost_step_half:=${MHE_PL_STEP_HALF:-3} \
+    -p payload_lost_step_persist:=${MHE_PL_STEP_PERSIST:-2} \
+    -p payload_lost_mass_margin:=$PL_MARGIN_D \
+    -p payload_lost_hold_sec:=$PL_HOLD_D \
+    -p payload_lost_vz_gate:=$PL_VZ_D \
     -p maneuver_omega_thresh:=$MG_OMEGA_D -p maneuver_vel_thresh:=$MG_VEL_D \
     -p maneuver_q0_cap:=$MG_CAP_D -p maneuver_exponent:=$MG_EXP_D \
     -p motor_speed_topic:=/x500_0/command/motor_speed \

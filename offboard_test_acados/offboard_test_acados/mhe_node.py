@@ -565,6 +565,45 @@ class MHENode(Node):
         self.c_xy_est = np.zeros(2)   # [cx, cy] 估计
         self._c_xy_inited = False
 
+        # ---- 载荷**意外**脱落看门狗(2026-08-30)----
+        # 动机:内环增益在 attach 时按包线放大到 5×,复位的唯一触发是 nmpc_node
+        # 的 grip_dropped —— 而那条只在"夹爪是它自己松的"时置位。真机上夹爪失效
+        # /载荷被扯掉时**没有任何复位路径**,5× 过增益留在空机上 = 高频振荡→姿态
+        # 发散→掉高(2026-07-14 实测过这个崩法)。这里补一条 MHE→NMPC 的安全网。
+        # 与 _residual_detect(A.2 无信号消融)**刻意分开实现**:那条的语义和已发表
+        # 结果绑在 event_signal_mode='residual' 上,不能为了安全网去动它的触发条件。
+        # 两层判据(见 payload_lost_watch_enable 的取值理由):
+        #   快层 = T_phys 双窗阶跃(反应快,但灵敏度随载荷质量缩放,轻载会漏)
+        #   慢层 = 倾角修正后的推力隐含质量持续贴近空机(与载荷质量无关,但要等)
+        self.declare_parameter('payload_lost_watch_enable', False)
+        self.declare_parameter('payload_lost_step_thresh', 2.0)   # N,快层
+        self.declare_parameter('payload_lost_step_half', 3)       # 半窗帧数
+        self.declare_parameter('payload_lost_step_persist', 2)
+        self.declare_parameter('payload_lost_mass_margin', 0.10)  # kg,慢层
+        self.declare_parameter('payload_lost_hold_sec', 3.0)
+        self.declare_parameter('payload_lost_vz_gate', 0.30)      # m/s
+        self.payload_lost_watch = bool(
+            self.get_parameter('payload_lost_watch_enable').value)
+        self.pl_step_thresh = float(
+            self.get_parameter('payload_lost_step_thresh').value)
+        self.pl_step_half = int(self.get_parameter('payload_lost_step_half').value)
+        self.pl_step_persist = int(
+            self.get_parameter('payload_lost_step_persist').value)
+        self.pl_mass_margin = float(
+            self.get_parameter('payload_lost_mass_margin').value)
+        self.pl_hold_frames = int(round(
+            float(self.get_parameter('payload_lost_hold_sec').value) / mhe_p.dt))
+        self.pl_vz_gate = float(self.get_parameter('payload_lost_vz_gate').value)
+        self._pl_hist = []
+        self._pl_step_pending = 0
+        self._pl_hold = 0
+        if self.payload_lost_watch:
+            self.get_logger().info(
+                f'[payload-lost] 看门狗 on: 快层 |ΔT|≥{self.pl_step_thresh}N '
+                f'(双窗 {self.pl_step_half}帧, persist {self.pl_step_persist}) | '
+                f'慢层 T·cosθ/g < m_B+{self.pl_mass_margin}kg 持续 '
+                f'{self.pl_hold_frames * mhe_p.dt:.1f}s (|vz|<{self.pl_vz_gate})')
+
         # ---- 机动门控:降低机动期质量估计的权重(2026-08-25)----
         # 动机:m_est 静态准(-0.17%)但**机动中系统性低估 8%**(记忆
         # new-4ms-workpoint-validation / high-maneuver-ablation 实测)。机动期
@@ -661,6 +700,10 @@ class MHENode(Node):
         # attach 真值反推的几何(Phase1 只发+记录,NMPC 暂不吃)
         self.c_xy_est_pub = self.create_publisher(
             Float64MultiArray, '/acados_nmpc/c_xy_est', 10)
+        # 载荷意外脱落告警(见 payload_lost_watch_enable):MHE→NMPC 的唯一一条
+        # 反向通路,收方复位内环增益 + 归零几何。RELIABLE 默认 QoS 即可(单次事件)。
+        self.payload_lost_pub = self.create_publisher(
+            Empty, '/mhe/payload_lost', 10)
 
         # ---- 残差可辨识性诊断采集(2026-07-31,默认关) ----
         # residual_log_dir 为空 = 完全关闭,回调里只多一次 `if not enabled: return`。
@@ -770,6 +813,107 @@ class MHENode(Node):
                     self.u_known = np.array(
                         [self.thrust_phys, tau_roll, tau_pitch, tau_yaw])
 
+    def _release_payload(self, src):
+        """载荷卸载时的**对称释放**:三条触发路径(外部 mass_event / 残差慢基线
+        自检测 / 残差阶跃自检测)共用这一处,免得再漏项。**只释放几何/偏心,
+        不动 m_est** —— 质量状态要让估计器自己连续收敛回空机,否则验证不了
+        "模型正确后估计器能回归"(理由同 mass_event_cb 原注释)。
+
+        2026-08-30 加 c_xy_est 归零:那条支路**自己没有卸载检测**,更新入口
+        _update_c_xy_est 的稳态门控(|ω|<c_xy_steady_omega、|v_xy|<c_xy_steady_vel)
+        在机动中永远不满足,EMA 也就不会自行衰减 —— 实测 drop 后 138s 仍停在
+        带载值 cy=-10.4mm(真值 0)。模型侧没吃到脏值是 nmpc_node 的 grip_dropped
+        分支兜住的,但话题 /acados_nmpc/c_xy_est 上跑的仍是幽灵偏心,任何别的
+        订阅者都会读到。与 2026-07-15 那个 "nmpc 侧归零了、mhe 侧漏了对称处理"
+        是同构缺陷,只是漏在这条支路上。
+        清 _c_xy_inited 而不只是清值:下次进稳态窗口时用 c_inst 直接重播种,
+        不必从带载旧值慢慢 EMA 爬回来。"""
+        self._payload_attached = False
+        self.attach_offset = None
+        if self._c_xy_inited or bool(np.any(self.c_xy_est)):
+            self.c_xy_est = np.zeros(2)
+            self._c_xy_inited = False
+            self.c_xy_est_pub.publish(Float64MultiArray(data=[0.0, 0.0]))
+            self.get_logger().info(
+                f'[c_xy_est] 载荷释放({src}) → 在线偏心估计归零(重新播种)')
+
+    def _payload_lost_watch(self):
+        """载荷**意外**脱落看门狗(2026-08-30)。两层并行判据,任一命中就发
+        /mhe/payload_lost 并本地释放几何。只在"MHE 认为载荷还在机上"时工作;
+        命中后 _payload_attached 已置 False,自然不会重复触发。
+
+        与 _residual_detect(A.2 无信号消融)**刻意分开实现**:那条的语义和已
+        发表结果绑在 event_signal_mode='residual' 上,不该为了安全网去改它的
+        触发条件;这条只服务"复位内环增益",判据可以按自己的风险取舍来定。
+
+        ⚠️ 误触发的代价 = 载荷还在却把增益复位 → 内环带宽掉回 1/4 → 正是
+        2026-07-02 ulog 实测的 ~1Hz 增幅振荡崩法。所以两层都取保守方向:
+          快层门槛(默认 2.0N)高于 A.2 降权用的 1.0N;实测 0.3kg 掉包阶跃
+            2.53N、检测器口径(0.3s 双窗)噪声 σ≈0.30N ⇒ 8σ 余量。
+          慢层用 T·cosθ/g,机动中该量只会**偏大**(要多给推力),方向上只会
+            漏检不会误报;再加 |vz| 门,垂直加速段推力与质量不对应时不判。
+        两层的分工:快层反应快但灵敏度随载荷质量缩放(0.2kg 阶跃只有 ~1.7N,
+        会被 2.0N 门漏掉);慢层与载荷质量无关但要等 hold_sec。而增益是按
+        **包线**放大的(掉多轻的载荷都留着同样的 5× 过增益),所以轻载必须靠
+        慢层兜住。"""
+        if not self._payload_attached or self.thrust_phys is None:
+            return
+        T = float(self.thrust_phys)
+
+        # --- 快层:T_phys 双窗阶跃(与 resid_step 同式,独立缓冲与阈值)---
+        self._pl_hist.append(T)
+        n2 = 2 * self.pl_step_half
+        if len(self._pl_hist) > n2:
+            self._pl_hist.pop(0)
+        if len(self._pl_hist) == n2:
+            h = self.pl_step_half
+            d = (sum(self._pl_hist[h:]) - sum(self._pl_hist[:h])) / h
+            if d <= -self.pl_step_thresh:
+                self._pl_step_pending += 1
+                if self._pl_step_pending >= self.pl_step_persist:
+                    self._fire_payload_lost(
+                        f'快层 ΔT={d:+.2f}N over {n2 * mhe_p.dt:.1f}s '
+                        f'(门槛 {self.pl_step_thresh}N, persist '
+                        f'{self.pl_step_persist})')
+                    return
+            else:
+                self._pl_step_pending = 0
+
+        # --- 慢层:倾角修正后的推力隐含质量持续贴近空机 ---
+        if self.x_meas is None:
+            return
+        if abs(float(self.x_meas[5])) > self.pl_vz_gate:
+            self._pl_hold = 0      # 垂直加速中,T 与质量不对应,不判
+            return
+        _q = self.x_meas[6:10]
+        _n = float(np.linalg.norm(_q))
+        if _n < 1e-6:
+            return
+        _qw, _qx, _qy, _qz = (_q / _n)
+        _c = float(np.clip(1.0 - 2.0 * (_qx * _qx + _qy * _qy), 1e-3, 1.0))
+        m_implied = T * _c / mhe_p.g
+        if m_implied < mhe_p.m_B + self.pl_mass_margin:
+            self._pl_hold += 1
+            if self._pl_hold >= self.pl_hold_frames:
+                self._fire_payload_lost(
+                    f'慢层 T·cosθ/g={m_implied:.3f}kg < '
+                    f'{mhe_p.m_B + self.pl_mass_margin:.3f}kg 持续 '
+                    f'{self._pl_hold * mhe_p.dt:.1f}s')
+        else:
+            self._pl_hold = 0
+
+    def _fire_payload_lost(self, why):
+        """命中后的统一动作:告警话题 + 本地释放几何/偏心。**不动 m_est**
+        (同 _release_payload 的理由)。增益复位在 nmpc_node 侧——那边才有
+        mavros 参数客户端,且它自己发起的 drop 已有同一条复位路径。"""
+        self.get_logger().warn(f'[payload-lost] 检出载荷意外脱落: {why} '
+                               '→ 发 /mhe/payload_lost(NMPC 侧复位内环增益)')
+        self.payload_lost_pub.publish(Empty())
+        self._release_payload('payload-lost watchdog')
+        self._pl_step_pending = 0
+        self._pl_hold = 0
+        self._pl_hist.clear()
+
     def mass_event_cb(self, msg):
         """质量突变事件 = **卸载**(wrench drop / gripper drop——nmpc_node 释放
         夹爪时同帧发这条)。真实载荷已不存在,必须立刻释放"幽灵几何",否则
@@ -777,8 +921,7 @@ class MHENode(Node):
         _payload_attached 注释)。**只释放几何,不动 m_est**——质量状态由 MHE
         自己从当前值连续收敛回空机,这样才验证得了"模型正确后估计器能回归"。
         wrench 场景本来就没几何(attach_offset 恒 None),这里是无害的 no-op。"""
-        self._payload_attached = False
-        self.attach_offset = None
+        self._release_payload('external mass_event')
         self._on_mass_event('drop')
 
     def attach_event_cb(self, msg):
@@ -1131,8 +1274,7 @@ class MHENode(Node):
                         # 只释放几何状态。棘轮 _m_p_hat_ratchet 已随 2026-08-26
                         # 去先验改造移除(几何标度改用常数包线,不再读 m_est,
                         # 棘轮在这条路径上根本不参与),故此处不再有它要清。
-                        self._payload_attached = False
-                        self.attach_offset = None
+                        self._release_payload('step-detect')
                         self.get_logger().info(
                             f'[step-detect] → 自主释放载荷几何 '
                             f'(|Δ|={-_d:.2f}N ≥ '
@@ -1193,14 +1335,14 @@ class MHENode(Node):
                 #    档是被明确拒绝的(几何幅值来自先验/棘轮,不随质量熄灭),所以
                 #    legacy 档下要去掉外部 drop 信号,**只能**走这条"自检测到
                 #    推力下降 → 自己释放几何"的路。
-                # 这三件事与 mass_event_cb 完全一致(释放几何 / 清棘轮 / 丢弃
-                # attach 几何),差别只在触发源:那边是别人告诉它,这边是自己看出来的。
-                # **不动 m_est** —— 同 mass_event_cb 的理由:让估计器自己连续
-                # 收敛回空机,才验证得了"模型正确后它能回归"。
+                # 释放动作与 mass_event_cb 完全一致(2026-08-30 起三条路径共用
+                # _release_payload:丢 attach 几何 + c_xy_est 归零),差别只在触发源:
+                # 那边是别人告诉它,这边是自己看出来的。**不动 m_est** —— 同
+                # mass_event_cb 的理由:让估计器自己连续收敛回空机,才验证得了
+                # "模型正确后它能回归"。
                 if (dropped and self.resid_release_geom
                         and self._payload_attached):
-                    self._payload_attached = False
-                    self.attach_offset = None
+                    self._release_payload('no-signal residual')
                     self.get_logger().info(
                         '[no-signal] → 自主释放载荷几何(无外部 drop 信号)')
                 self._resid_pending = 0
@@ -1294,6 +1436,8 @@ class MHENode(Node):
         if len(self.u_buf) > mhe_p.N:
             self.u_buf.pop(0)
         self.frames += 1
+        if self.payload_lost_watch:
+            self._payload_lost_watch()
         if self.event_enabled and self.signal_mode == 'residual':
             self._residual_detect()
         else:

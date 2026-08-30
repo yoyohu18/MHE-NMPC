@@ -110,7 +110,9 @@ def load_mission(stamp, t_end):
     t_m, v_m = _clip_sort(tm, mm)
     t_c, v_c, v_ct = _clip_sort(tc, cyv, cy_tr)
     # c_xy 只在挂载期间有物理意义(drop 后发布端冻结的 EMA 是残留,画了误导)
-    keep_c = t_c <= phases.get('DROP', t_end)
+    # 载荷离机的时刻 = 计划投放 DROP 或意外脱落 LOST,取先发生的那个
+    t_off = min(phases.get('DROP', t_end), phases.get('LOST', t_end))
+    keep_c = t_c <= t_off
     t_c, v_c, v_ct = t_c[keep_c], v_c[keep_c], v_ct[keep_c]
 
     return dict(off=off, phases=phases, t_err=t_err, v_err=v_err,
@@ -119,9 +121,11 @@ def load_mission(stamp, t_end):
 
 
 PHASE_CN = {'ATTACH': '接近并抓取载荷', 'LIFT': '抬升(有效质量阶跃)',
-            'DYNAMIC': '8 字动态轨迹跟踪', 'DROP': '投放载荷(突卸扰动)'}
+            'DYNAMIC': '8 字动态轨迹跟踪', 'DROP': '投放载荷(突卸扰动)',
+            'LOST': '载荷意外脱落(看门狗复位内环增益)'}
 PHASE_EN = {'ATTACH': 'approach & grasp payload', 'LIFT': 'lift (effective mass step)',
-            'DYNAMIC': 'figure-8 trajectory tracking', 'DROP': 'release (sudden unloading)'}
+            'DYNAMIC': 'figure-8 trajectory tracking', 'DROP': 'release (sudden unloading)',
+            'LOST': 'unplanned payload loss (watchdog resets inner-loop gains)'}
 
 
 def build(d, payload, t_end, fps, width, height, out_path, lang='zh'):
@@ -154,7 +158,7 @@ def build(d, payload, t_end, fps, width, height, out_path, lang='zh'):
 
     ph = d['phases']
     t_att = ph.get('ATTACH', 7.0)
-    t_drop = ph.get('DROP', t_end)
+    t_drop = min(ph.get('DROP', t_end), ph.get('LOST', t_end))
 
     # 1) 位置误差
     axes[0].set_ylabel('位置误差 [m]' if use_cn else 'position error [m]')

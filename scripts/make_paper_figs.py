@@ -236,7 +236,7 @@ NMPC_PERIODIC = re.compile(WALL + r'.*t=([\d.]+)s \| pos_err=([\d.]+)m \| '
 NMPC_WIN = re.compile(WALL + r'.*\[attach-window\] t=([\d.]+)s '
                       r'pos_err=([\d.]+)m T=([\d.]+)N z=([\d.-]+) '
                       r'm_est=([\d.]+)')
-PHASE = re.compile(WALL + r'.*t=([\d.]+)s \| (ATTACH|LIFT|DYNAMIC|DROP)')
+PHASE = re.compile(WALL + r'.*t=([\d.]+)s \| (ATTACH|LIFT|DYNAMIC|DROP|LOST)')
 MASS_LN = re.compile(WALL + r'.*MHE mass estimate: ([\d.]+) kg '
                      r'\(T_phys=([\d.]+)N\)')
 T_END = 115.0

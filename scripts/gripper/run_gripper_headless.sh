@@ -372,6 +372,13 @@ nohup ros2 run offboard_test_acados mhe_node --ros-args \
     -p resid_step_thresh:=$(_f2d "${MHE_RESID_STEP_TH:-1.0}") \
     -p resid_step_persist:=${MHE_RESID_STEP_PERSIST:-2} \
     -p resid_step_release_thresh:=$(_f2d "${MHE_RESID_STEP_REL:-2.0}") \
+    -p payload_lost_watch_enable:=$(_b "${MHE_PAYLOAD_LOST_WATCH:-false}") \
+    -p payload_lost_step_thresh:=$(_f2d "${MHE_PL_STEP_TH:-2.0}") \
+    -p payload_lost_step_half:=${MHE_PL_STEP_HALF:-3} \
+    -p payload_lost_step_persist:=${MHE_PL_STEP_PERSIST:-2} \
+    -p payload_lost_mass_margin:=$(_f2d "${MHE_PL_MASS_MARGIN:-0.10}") \
+    -p payload_lost_hold_sec:=$(_f2d "${MHE_PL_HOLD_SEC:-3.0}") \
+    -p payload_lost_vz_gate:=$(_f2d "${MHE_PL_VZ_GATE:-0.30}") \
     -p maneuver_omega_thresh:=$MHE_MG_OMEGA_D \
     -p maneuver_vel_thresh:=$MHE_MG_VEL_D \
     -p maneuver_q0_cap:=$MHE_MG_CAP_D \

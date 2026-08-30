@@ -782,6 +782,10 @@ class AcadosNMPCNode(Node):
         # 在线 c_xy 估计(B.3 Phase2,geom_source='online' 时喂 model.p 的 c_est)
         self.c_xy_online_sub = self.create_subscription(
             Float64MultiArray, '/acados_nmpc/c_xy_est', self.c_xy_online_cb, 10)
+        # 载荷**意外**脱落告警(mhe_node._payload_lost_watch)。MHE→NMPC 唯一
+        # 一条反向通路,收到就复位内环增益 + 归零几何,见 payload_lost_cb。
+        self.payload_lost_sub = self.create_subscription(
+            Empty, '/mhe/payload_lost', self.payload_lost_cb, 10)
 
         # proximity 节点在 attach 瞬间发布的真实几何偏移(TRANSIENT_LOCAL,
         # 订阅方必须同 QoS 才能收到 latched 消息)
@@ -1026,6 +1030,43 @@ class AcadosNMPCNode(Node):
                     and self.control_mode != 'l1'):
                 dJ, _ = self._payload_geometry(data)
                 self._scale_px4_rate_gains(dJ)
+
+    def payload_lost_cb(self, msg):
+        """MHE 看门狗检出载荷**意外**脱落(mhe_node._payload_lost_watch)。
+        与 _grip_drop_phase 的区别:那条是"夹爪是我自己松的"(计划内 drop),
+        这条是"货没了、但不是我松的"——真机上夹爪失效 / 载荷被扯掉。此前
+        这个故障模式**没有任何复位路径**:增益在 attach 时按包线放大到 5×,
+        载荷没了还留着 = 空机严重过增益 → 高频振荡 → 姿态发散(2026-07-14
+        实测过这个崩法),这条通路就是补它。
+
+        只做两件必需的事:复位内环增益 + 归零模型几何。**不发 enable=false**
+        (夹爪状态未知,也可能正是它失效了)、**不发 mass_event**(MHE 是消息源,
+        它自己已经释放过几何了,再发回去是回音)。"""
+        if (not self.gripper_mode or not self.grip_mass_stepped
+                or self.grip_dropped):
+            return                      # 未挂载 / 已经处理过 drop:幂等
+        self.grip_dropped = True
+        self.grip_drop_done = True      # 抑制之后按时刻触发的计划 drop(货已经没了)
+        self.dJ_est = 0.0               # truth 档没有每帧几何刷新,必须显式归零
+        self.c_est = np.zeros(2)
+        self._mp_ratchet = 0.0
+        self._mp_gain_applied = 0.0
+        self._reset_px4_rate_gains()
+        if self.control_mode == 'l1':
+            self.l1.reset()
+            self.d_lumped = np.zeros(3)
+        if self.tau_lumped_enable:
+            self.l1_rot.reset()
+            self.xi_lumped = np.zeros(3)
+            self._l1_rot_last_stamp = None
+        # 日志格式**刻意对齐阶段行** `t=..s | XXX`(make_paper_figs.PHASE 的口径),
+        # 演示视频/论文图的解析器才能把它当一个阶段事件标出来 —— 意外脱落没有
+        # NMPC 侧的 DROP 行,不这么写在时间轴上完全看不见。
+        _t = (0.0 if self.nmpc_start_time is None else
+              (self.get_clock().now() - self.nmpc_start_time).nanoseconds / 1e9)
+        self.get_logger().warn(
+            f't={_t:.1f}s | LOST: PAYLOAD LOST (MHE watchdog) 非计划脱落 → '
+            '内环增益已复位、模型几何归零')
 
     def c_xy_online_cb(self, msg):
         d = np.asarray(msg.data, dtype=float)
@@ -1925,6 +1966,11 @@ class AcadosNMPCNode(Node):
             self.get_logger().info(
                 't={:.1f}s | DROP: mass_event **未发布**(drop_publish_mass_event'
                 '=false) — MHE 须自行从 T_phys 残差检测'.format(nmpc_time))
+        # 几何归零:online 档每帧的 _update_online_geometry 会做,但 **truth 档
+        # 没有那条每帧路径**,不显式清就会带着 attach 时的 dJ/c_xy 继续飞
+        # (日志那句 "geometry -> empty" 在 truth 档原本是假的)。2026-08-30 补。
+        self.dJ_est = 0.0
+        self.c_est = np.zeros(2)
         self._reset_px4_rate_gains()               # 空机复位内环增益(否则过增益炸机)
         if self.control_mode == 'l1':
             # 掉包后真实 lumped 扰动阶跃回零,残留 d̂_f 会把推力拽偏(等价于
