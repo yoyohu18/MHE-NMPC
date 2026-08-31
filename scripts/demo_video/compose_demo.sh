@@ -64,10 +64,14 @@ SUBS=$(python3 - "$OVL_META" "$FONT" "$DEMO_LANG" <<'PY'
 import json, sys
 meta = json.load(open(sys.argv[1])); font = sys.argv[2]; lang = sys.argv[3]
 CN = {'ATTACH': '接近并抓取载荷', 'LIFT': '抬升:有效质量阶跃',
-      'DYNAMIC': '8 字动态轨迹跟踪', 'DROP': '投放:载荷突卸扰动'}
+      'DYNAMIC': '8 字动态轨迹跟踪', 'DROP': '投放:载荷突卸扰动',
+      # 2026-08-30:意外脱落场景。缺这一条时 LAB.get 会回落到 key 本身,
+      # 中文版成片左上角就会显示英文 "LOST"(实测踩到)。
+      'LOST': '载荷意外脱落 → 看门狗复位内环增益'}
 EN = {'ATTACH': 'Approach & grasp payload', 'LIFT': 'Lift: effective mass step',
       'DYNAMIC': 'Figure-8 trajectory tracking',
-      'DROP': 'Release: sudden unloading'}
+      'DROP': 'Release: sudden unloading',
+      'LOST': 'Unplanned payload loss -> watchdog resets inner-loop gains'}
 LAB = CN if lang == 'zh' else EN
 parts = []
 for k, t in sorted(meta['phases'].items(), key=lambda kv: kv[1]):

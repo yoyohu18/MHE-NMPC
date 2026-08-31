@@ -860,6 +860,24 @@ class MHENode(Node):
             return
         T = float(self.thrust_phys)
 
+        # ★★ 2026-08-31:|vz| 门**提到两层之前**(原来只有慢层有,快层没有)。
+        # 根因实测(看门狗 on/off 批次 rep3_on,grip_nmpc_20260830_235339):
+        # LIFT 抬升坡道 vz≈0.65m/s,爬升后推力回落被快层读成 ΔT=−2.40N(门槛 2.0N)
+        # → **载荷还挂着就把内环增益从 5.0 打回 1.0** → 复现 07-02 的 ~1Hz 增幅
+        # 振荡 → 发散 15.69m。真正的脱落在那之后 **35 秒**才发生。
+        # 即"推力与质量不对应的时段两层都不判",慢层本来就是这个语义,快层漏了。
+        # ⚠️ 代价:抬升途中真脱落会漏检(慢层同样被门住)。接受它 —— 那一段飞机
+        # 低、慢,而误触发的代价是直接炸机;n=4 实测误触发率 1/4。
+        # ⚠️ 被门住时必须**清空快层缓冲**:否则窗口会横跨门的两侧,拿爬升段的均值
+        # 和平飞段的均值作差,那个差本身就是伪阶跃。
+        if self.x_meas is None:
+            return
+        if abs(float(self.x_meas[5])) > self.pl_vz_gate:
+            self._pl_hist.clear()
+            self._pl_step_pending = 0
+            self._pl_hold = 0
+            return
+
         # --- 快层:T_phys 双窗阶跃(与 resid_step 同式,独立缓冲与阈值)---
         self._pl_hist.append(T)
         n2 = 2 * self.pl_step_half
@@ -880,11 +898,7 @@ class MHENode(Node):
                 self._pl_step_pending = 0
 
         # --- 慢层:倾角修正后的推力隐含质量持续贴近空机 ---
-        if self.x_meas is None:
-            return
-        if abs(float(self.x_meas[5])) > self.pl_vz_gate:
-            self._pl_hold = 0      # 垂直加速中,T 与质量不对应,不判
-            return
+        # (|vz| 门已在函数开头统一施加,这里不再重复)
         _q = self.x_meas[6:10]
         _n = float(np.linalg.norm(_q))
         if _n < 1e-6:

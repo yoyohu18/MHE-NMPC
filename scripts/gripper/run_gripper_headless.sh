@@ -57,7 +57,18 @@ set -e
 GRIP_PAYLOAD_KG="${GRIP_PAYLOAD_KG:-0.3}"
 GRIP_ECC_Y="${GRIP_ECC_Y:-0.05}"
 BOX_I=$(python3 -c "print(f'{$GRIP_PAYLOAD_KG * 0.00375:.6f}')")
-R_XY=$(python3 -c "print(f'{max(0.20, $GRIP_ECC_Y + 0.08):.3f}')")
+# 抓取偏心上限 [m] = 设计偏心 ECC_Y + 容差。**不是**"够得着"的判据,而是
+# **配平力矩余量**的判据:带偏心悬停要常值输出 tau_roll = (m_P/m_T)*r_y*T
+# ≈ 2.944*r_y N·m,而 NMPC 的 roll 约束是 ±0.5 —— r_y=0.17 时配平吃掉 99%,
+# figure8 没有机动余量,实测直接姿态发散坠机(gviz_20260831_165224)。
+# 408 轮历史回归:|r_y|>=0.15 坠机 38.5%、0.12~0.15 为 15.5%、<0.12 为 9.0%。
+# 旧公式 max(0.20, ECC_Y+0.08) 给到 0.20,等于**不设防**(266 次 attach 只挡掉 1 次)。
+# 容差 0.03 → ECC_Y=0.10 时上限 0.13,历史拒绝率 15.4%。⚠️ 容差不能给 0:
+# 实际 d_xy 中位 0.096、p90 0.139,本来就在设计值附近抖(跟踪误差 + 旋翼下洗
+# 吹动 box)。超限只是**这一 tick 不 attach**,drone 继续跟踪悬停点等它收敛;
+# proximity 侧有节流日志 + 8s 未 attach 的 WARN。
+GRIP_ATTACH_TOL="${GRIP_ATTACH_TOL:-0.03}"
+R_XY=$(python3 -c "print(f'{$GRIP_ECC_Y + $GRIP_ATTACH_TOL:.3f}')")
 USE_MHE="${USE_MHE:-true}"
 
 # ⚠️ ROS2 参数是强类型的:`-p grip_dyn_r:=5` / `grip_drop_after_sec:=40` 会被解析
@@ -272,7 +283,7 @@ nohup ros2 run offboard_test_acados acados_nmpc_node --ros-args \
     -p grip_lift_hold_enable:=$(_b "${GRIP_LIFT_HOLD:-false}") \
     -p grip_lift_hold_dz:=$GRIP_LIFT_HOLD_DZ_D \
     -p grip_lift_hold_sec:=$GRIP_LIFT_HOLD_SEC_D \
-    -p dj_track_mest:=$(_b "${DJ_TRACK_MEST:-false}") \
+    -p dj_track_mest:=$(_b "${DJ_TRACK_MEST:-true}") \
     -p drop_publish_mass_event:=$(_b "${DROP_PUBLISH_MASS_EVENT:-true}") \
     -p grip_mp_cap:=$GRIP_MP_CAP_D \
     -p grip_dj_floor_mp:=$GRIP_DJ_FLOOR_MP_D \
@@ -337,6 +348,23 @@ MHE_LOG="$RUNDIR/grip_mhe_$STAMP.log"
 # 批次脚本照跑不误——整轮**静默没有 MHE**。07-31 加残差采集时引入,当时所有批次
 # 都经 run_residual_collect.sh 带着 RESID_LOG_DIR 进来,所以一直没暴露;任何不设
 # 该变量的裸跑都会中招。
+# ===== 几何-质量耦合档(2026-08-31 起默认开)=====
+# MHE 的几何槽从 [dJ,cx,cy](窗外算好的常参数,∂(J,c)/∂m≡0)换成可测杆臂
+# [rx,ry,rz],J(m)/c(m) 由被估质量在模型内现算 —— 质量因此能从**转动通路**辨识。
+# 证据(记忆 geom-coupled-ab-n8,两批 n=8 配对 A/B,唯一差异就是本变量):
+#   figure8 v_peak=2.0m/s:|err| p50 2.31%→0.53%,偏差中位 −2.57%→+0.45%,
+#                          配对 8/8 同向 p=0.0078;
+#   悬停带载            :0.58%→0.21%,−0.57%→+0.01%,7/7 同向 p=0.0156。
+#   ★ legacy 两批合计 16/16 轮**全是负偏差**,coupled 围绕零 —— 这坐实了
+#     "m_est 带载低估"的根源是 legacy 缺 ∂(J,c)/∂m 这条通路(记忆
+#     mest-maneuver-underestimate 的 H2' 假说)。
+# 代价:MHE solve 中位 4.20→5.95ms(10Hz 下占 6% 周期);首轮会重新 codegen
+#       (MODEL_NAME 带 _coupled 后缀,与 legacy 目录隔离,不互相覆盖)。
+# ⚠️ 只改**这一侧**:NMPC_GEOM_COUPLED 保持关(可用边界 r_y≲0.05m,而本场景
+#    ecc=0.10 远在禁区外);推荐组合是 MHE coupled + NMPC 几何走 online。
+# ⚠️ 未覆盖:4m/s 工作点、一阶质量矩(MHE_ESTIMATE_MOMENT)仍默认关。
+# 回退:MHE_GEOM_COUPLED=0
+export MHE_GEOM_COUPLED="${MHE_GEOM_COUPLED:-1}"
 # --- 机动门控(2026-08-25,默认关)---
 # MHE_MANEUVER_GATE=1:机动期(|ω|或|v_xy| 超阈)按 lvl^exp 锚紧 Q0 的质量维,
 #   悬停期用名义权重。动机:m_est 静态准 -0.17% 但机动中系统性低估 8%;机动期

@@ -83,6 +83,15 @@ def parse(stamp):
         for row in d['cxy']:
             if row[0] > d['t_drop'] and np.isnan(row[3]):
                 row[3] = row[4] = 0.0
+    # 载荷离机时模型 dJ 被显式清零(LOST 走 payload_lost_cb、计划 DROP 走
+    # _grip_drop_phase),但 [dJ_online] 在 grip_dropped 分支提前 return,**日志
+    # 里不会有那个 0** —— 不补的话曲线停在最后一个带载值,看着像"没归零"。
+    if d['dj'] and d['t_drop'] is not None:
+        d['dj'] = [r for r in d['dj'] if r[0] <= d['t_drop']]
+        last = list(d['dj'][-1]) if d['dj'] else [d['t_drop'], 0, 0, 0, 0, 0,
+                                                  'drop', 0.0]
+        last[0] = d['t_drop']; last[7] = 0.0; last[6] = 'dropped'
+        d['dj'].append(tuple(last))
     for k in ('truth', 'cxy', 'hf'):
         d[k] = np.array(d[k]) if d[k] else np.zeros((0, 9))
     if d['t0'] is None and len(d['truth']):
@@ -285,9 +294,12 @@ def main():
             djt = np.array([dJ_nmpc(max(v, 0.0)) for v in mp_t])
             ok = (dj[:, 0] > 20) & (djt > 1e-6) & (dj[:, 0] < td)
             if ok.any():
+                # ⚠️ 用最后一个**带载**样本,不能用 r['dj'][-1] —— 那是 drop 时
+                # 补进去的归零点(见 parse 里的注释)。
+                _i = np.where(ok)[0][-1]
                 print(f"         NMPC dJ (own arm convention): "
                       f"bias={100*np.mean((dj[ok,1]-djt[ok])/djt[ok]):+.2f}%"
-                      f"  final dJ={r['dj'][-1][7]:.4f} vs truth {djt[-1]:.4f}")
+                      f"  last loaded dJ={dj[_i,1]:.4f} vs truth {djt[_i]:.4f}")
 
 
 if __name__ == '__main__':

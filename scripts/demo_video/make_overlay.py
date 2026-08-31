@@ -37,6 +37,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 import make_paper_figs as mpf   # noqa: E402
 
 M_DRY = 2.064            # 裸机质量 [kg]
+J_DRY = 0.0142           # 裸机 Jxx [kg·m²](acados_params;文档里那个 0.0217 是错的)
+ARM_D = 0.47             # grip_arm_d 标称力臂 [m](NMPC 的 dJ=μ·d² 用的就是它)
 
 # 深色底上的配色:主曲线亮蓝/亮绿,真值中性灰虚线
 C_EST, C_TRUTH, C_ERR = '#5aa9ff', '#9be27a', '#ffd166'
@@ -63,6 +65,8 @@ def load_mission(stamp, t_end):
             sys.exit(f'找不到日志: {p}')
 
     tp, ep, tw, ew = [], [], [], []
+    c_zero = [None]        # 载荷离机时 c_xy_est 被清零的任务时刻(见下)
+    tj, jv = [], []        # NMPC 模型侧 dJ 的在线轨迹([dJ_online] 低频日志)
     phases, offsets = {}, []
     r_att = [None]
     for line in open(nmpc):
@@ -83,9 +87,17 @@ def load_mission(stamp, t_end):
                        r'\[\s*([-+0-9.]+),\s*([-+0-9.]+),', line)
         if ma and r_att[0] is None:
             r_att[0] = (float(ma.group(1)), float(ma.group(2)))
+        # 模型侧 dJ 的在线轨迹(dj_track_mest=true 才有)。⚠️ 这条日志在 **NMPC**
+        # 日志里,别放到下面的 MHE 循环去(2026-08-30 第一版就放错了,解析恒为空)。
+        # off 要等这个循环跑完才算得出来,所以先存墙钟,循环后统一换算。
+        mj = re.search(r'\[INFO\] \[(\d+\.\d+)\].*\[dJ_online\].*'
+                       r'dJ=([\d.]+)', line)
+        if mj:
+            tj.append(float(mj.group(1))); jv.append(float(mj.group(2)))
     if not offsets:
         sys.exit(f'{nmpc}: 没解析到任何 NMPC 时间行')
     off = float(np.median(offsets))
+    tj = [t - off for t in tj]      # 墙钟 -> 任务时间(见上面存墙钟的理由)
 
     tm, mm, tc, cyv, cy_tr = [], [], [], [], []
     for line in open(mhe):
@@ -97,6 +109,22 @@ def load_mission(stamp, t_end):
         if mc:
             tc.append(mpf._wall(mc) - off); cyv.append(float(mc.group(4)))
             cy_tr.append(float(mc.group(6)) if mc.group(6) else np.nan)
+        # 2026-08-30 起 MHE 在载荷离机时把 c_xy_est **清零并发一次 0**(见
+        # mhe_node._release_payload)。这一下不走 [c_xy_est] 周期日志(那条被
+        # _c_xy_inited 门着),所以单独抓,否则曲线停在最后一个带载值、角落读数
+        # 也一直显示那个陈旧值 —— 而演示要说明的恰恰是"看门狗把它归零了"。
+        mz = re.search(r'\[c_xy_est\] 载荷释放\(', line)
+        if mz:
+            mw2 = mpf.WALL_RE.search(line) if hasattr(mpf, 'WALL_RE') else None
+            _w = None
+            if mw2:
+                _w = float(mw2.group(1))
+            else:
+                _m = re.search(r'\[INFO\] \[(\d+\.\d+)\]', line)
+                if _m:
+                    _w = float(_m.group(1))
+            if _w is not None:
+                c_zero[0] = _w - off
 
     def _clip_sort(t, *ys):
         t = np.asarray(t, float)
@@ -114,10 +142,26 @@ def load_mission(stamp, t_end):
     t_off = min(phases.get('DROP', t_end), phases.get('LOST', t_end))
     keep_c = t_c <= t_off
     t_c, v_c, v_ct = t_c[keep_c], v_c[keep_c], v_ct[keep_c]
+    # 补一个**真实发生过**的零采样:估计器在载荷离机那一刻确实清零并发布了 0。
+    # 只有日志里出现过归零行才补 —— 2026-08-30 之前的旧日志没有这条(那时的
+    # 行为是冻结残留值),补了就是伪造。
+    if c_zero[0] is not None and 0 <= c_zero[0] <= t_end:
+        t_c = np.append(t_c, c_zero[0])
+        v_c = np.append(v_c, 0.0)
+        v_ct = np.append(v_ct, 0.0)   # 载荷没了,真值偏心也是 0
+
+    t_j, v_j = _clip_sort(tj, jv)
+    # 载荷离机时模型 dJ 确实被归零(LOST 走 payload_lost_cb、计划 DROP 走
+    # _grip_drop_phase,两条都显式清 dJ_est)。而 [dJ_online] 日志在
+    # _update_online_geometry 的 grip_dropped 分支里提前 return,所以**不会**
+    # 打出那个 0 —— 曲线会停在最后一个带载值。这里按已发生的事补上。
+    if len(t_j) and ('LOST' in phases or 'DROP' in phases) and t_off <= t_end:
+        t_j = np.append(t_j[t_j <= t_off], t_off)
+        v_j = np.append(v_j[:len(t_j) - 1], 0.0)
 
     return dict(off=off, phases=phases, t_err=t_err, v_err=v_err,
                 t_m=t_m, v_m=v_m, t_c=t_c, v_c=v_c, v_ct=v_ct,
-                r_att=r_att[0])
+                t_j=t_j, v_j=v_j, r_att=r_att[0])
 
 
 PHASE_CN = {'ATTACH': '接近并抓取载荷', 'LIFT': '抬升(有效质量阶跃)',
@@ -149,8 +193,10 @@ def build(d, payload, t_end, fps, width, height, out_path, lang='zh'):
     fig = plt.figure(figsize=(width / 100, height / 100), dpi=100)
     fig.patch.set_facecolor(PANEL_RGBA[:3])
     fig.patch.set_alpha(PANEL_RGBA[3])
-    axes = [fig.add_axes([0.045 + i * 0.322, 0.20, 0.245, 0.60])
-            for i in range(3)]
+    # 2026-08-30 由三栏改四栏(加惯量 J)。栏宽/间距同步收窄,末栏右边缘
+    # 0.045+3*0.238+0.185=0.944,仍留得下读数文字。
+    axes = [fig.add_axes([0.045 + i * 0.238, 0.20, 0.185, 0.60])
+            for i in range(4)]
     for ax in axes:
         ax.set_facecolor((0, 0, 0, 0))
         ax.set_xlim(0, t_end)
@@ -191,6 +237,21 @@ def build(d, payload, t_end, fps, width, height, out_path, lang='zh'):
         pad = max(1.0, 0.2 * (hi - lo))
         axes[2].set_ylim(lo - pad, hi + pad)
 
+    # 4) 惯量 Jxx:模型侧在线值(J_dry + dJ) vs 真值
+    #    ⚠️ 口径:NMPC 的 dJ = μ·d²(μ=约化质量,d=标称力臂 grip_arm_d),与 MHE
+    #    那条按 attach 实际几何分解出来的 Jxx **不是一个口径**(差 ~6%),所以
+    #    真值也必须按 NMPC 自己这套算,否则画出来的误差是口径差不是估计误差。
+    _mu = M_DRY * payload / (M_DRY + payload)
+    _dJ_true = _mu * ARM_D ** 2
+    axes[3].set_ylabel('惯量 $J_{xx}$ [kg·m$^2$]' if use_cn
+                       else 'inertia $J_{xx}$ [kg m$^2$]')
+    axes[3].set_ylim(J_DRY - 0.008, J_DRY + _dJ_true + 0.020)
+    axes[3].plot([0, t_att, t_att, t_drop, t_drop, t_end],
+                 [J_DRY, J_DRY, J_DRY + _dJ_true, J_DRY + _dJ_true,
+                  J_DRY, J_DRY],
+                 color=C_TRUTH, lw=1.4, ls='--',
+                 label='真值' if use_cn else 'truth')
+
     # 阶段竖线(全程静态,避免逐帧闪烁)
     for ax in axes:
         for k, tv in ph.items():
@@ -202,11 +263,15 @@ def build(d, payload, t_end, fps, width, height, out_path, lang='zh'):
                          label='MHE 估计' if use_cn else 'MHE estimate')
     ln_c, = axes[2].plot([], [], color=C_EST, lw=1.8,
                          label='在线估计' if use_cn else 'online estimate')
+    # dJ 是 5s 一条日志的阶梯量(棘轮只增不减),用 steps-post 才不会画成斜线
+    ln_j, = axes[3].plot([], [], color=C_EST, lw=1.8, drawstyle='steps-post',
+                         label='在线估计' if use_cn else 'online estimate')
     cursors = [ax.axvline(0, color=FG, lw=1.0, alpha=0.85) for ax in axes]
     readouts = [ax.text(0.98, 1.06, '', transform=ax.transAxes, ha='right',
                         va='bottom', fontsize=13, color=FG) for ax in axes]
     axes[1].legend(loc='upper left', handlelength=1.5)
     axes[2].legend(loc='upper left', handlelength=1.5)
+    axes[3].legend(loc='upper left', handlelength=1.5)
     phase_txt = fig.text(0.045, 0.94, '', fontsize=17, color=FG, va='top')
     clock_txt = fig.text(0.955, 0.94, '', fontsize=14, color=FG2, va='top',
                          ha='right')
@@ -233,6 +298,10 @@ def build(d, payload, t_end, fps, width, height, out_path, lang='zh'):
         ln_m.set_data(x, y); readouts[1].set_text(s)
         x, y, s = _cur(t, d['t_c'], d['v_c'], '{:.1f} cm', 1e2)
         ln_c.set_data(x, 1e2 * y); readouts[2].set_text(s)
+        x, y, s = _cur(t, d['t_j'], d['v_j'], '{:.4f}')
+        # 画的是总惯量 J_dry+dJ(相对变化看得出来),读数同口径
+        ln_j.set_data(x, J_DRY + y)
+        readouts[3].set_text('' if not len(y) else f'{J_DRY + y[-1]:.4f}')
         for c in cursors:
             c.set_xdata([t, t])
         cur_ph = ''

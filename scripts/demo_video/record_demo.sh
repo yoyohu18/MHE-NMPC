@@ -24,6 +24,20 @@ FPS="${DEMO_FPS:-25}"
 mkdir -p "$OUTDIR"
 
 if [ -z "${DISPLAY:-}" ]; then echo "没有 DISPLAY,x11grab 无法录制"; exit 1; fi
+# ⚠️ 2026-08-30:Wayland 会话下 x11grab 抓 X11 根窗口只会得到**纯黑**,而且
+# **不报错、退出码 0** —— 脚本一路"成功"跑完 165s,素材全废(判据:文件异常小,
+# 323KB/165s;抽帧平均亮度 0.0)。07-20/08-21 能录成是因为当时登录的是 Xorg。
+# 出路:注销后在登录界面齿轮里选 "GNOME on Xorg" 再录;或改用 kmsgrab/PipeWire。
+_SESS="${XDG_SESSION_TYPE:-}"
+if [ -z "$_SESS" ] && command -v loginctl >/dev/null 2>&1; then
+  _SESS=$(loginctl show-session "$(loginctl list-sessions --no-legend 2>/dev/null \
+          | awk 'NR==1{print $1}')" -p Type --value 2>/dev/null)
+fi
+if [ "$_SESS" = "wayland" ]; then
+  echo "拒录:当前是 **Wayland** 会话($_SESS),x11grab 只会录出全黑且不报错。"
+  echo "     改登录 'GNOME on Xorg' 会话后重跑;确要强行录制:DEMO_ALLOW_WAYLAND=1"
+  [ "${DEMO_ALLOW_WAYLAND:-0}" = "1" ] || exit 1
+fi
 # 双屏时默认只录主屏 —— 整块 3840x1080 缩进 1920 宽的成片里什么都看不清。
 # 覆盖示例:DEMO_GRAB=1920x1080+1920+0 录副屏;DEMO_GRAB=3840x1080+0+0 录全部。
 if [ -n "${DEMO_GRAB:-}" ]; then
@@ -161,6 +175,15 @@ ffmpeg -y -hide_banner -loglevel warning \
   "$RAW"
 REC_RC=$?
 echo ">>> 录制结束 rc=$REC_RC -> $RAW"
+# 全黑自检(2026-08-30):x11grab 失败是静默的,rc=0 说明不了任何事。抽一帧看
+# 平均亮度,顺带看文件大小 —— 全黑帧压完约 2KB/s,正常画面高一两个数量级。
+_SZ=$(stat -c %s "$RAW" 2>/dev/null || echo 0)
+_MEAN=$(ffmpeg -v error -ss $((DURATION/3)) -i "$RAW" -frames:v 1 -f rawvideo \
+        -pix_fmt gray - 2>/dev/null | od -An -tu1 -v | awk '{for(i=1;i<=NF;i++){s+=$i;n++}}END{if(n)printf "%.1f",s/n; else print "NA"}')
+echo ">>> 素材自检: 大小 $((_SZ/1024))KB, 1/3 处帧平均亮度 $_MEAN"
+if [ "$_SZ" -lt 2000000 ]; then
+  echo "!!! 警告:录屏文件过小(<2MB),极可能是全黑素材(Wayland/屏幕被遮挡)。"
+fi
 
 cat > "$OUTDIR/record_$STAMP.meta.json" <<EOF
 {

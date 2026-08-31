@@ -11,7 +11,20 @@
 # 每轮是完整的 attach → 飞行 → drop → 回收,配对交错(奇偶轮换先后顺序,抵消
 # 机器热身/漂移),每轮独立 RESID 子目录,便于按目录聚合。
 #
-# 用法: REPS=3 bash src/scripts/gripper/run_geom_coupled_ab.sh
+# 【2026-08-31 更新到新条件】
+#   · 工作点从 ecc=0.05 改到 **ecc=0.10**(主线 viz/headless 默认),这批要回答的是
+#     "主体能不能往 coupled 切",不是复现 08-24 那个已中断的批次(它 reps=7 只留下
+#     一行表头)。两批不可比,这是有意的。
+#   · attach 偏心现在**有上限**:proximity 的 r_xy = ECC + GRIP_ATTACH_TOL(0.03)。
+#     08-31 定位到坠机根因是偏心过大致配平力矩吃满 roll 权限(记忆
+#     grip-attach-eccentricity-roll-saturation),那是 legacy/coupled 共有的失效模式;
+#     卡住它之后两臂才可比 —— 这也正是现在值得跑这个 A/B 的原因。
+#   · 指标从"只记 peak_pos_err"扩到 7 列(见 extract_ab_metrics.py 里的理由):
+#     **status 必须先看**,坠机会把 solve 耗时/失败数/估计误差全部染色。
+#   · NMPC 侧**不开** coupled:NMPC_GEOM_COUPLED 的可用边界是 r_y≲0.05m,
+#     而本批 ecc=0.10 远在禁区外。推荐组合始终是 MHE coupled + NMPC 几何走 online。
+#
+# 用法: REPS=8 bash src/scripts/gripper/run_geom_coupled_ab.sh
 #       (长跑用 setsid 脱离会话:setsid bash ... > log 2>&1 < /dev/null &)
 # 聚合: python3 src/scripts/gripper/aggregate_mass_truth.py <resid 子目录>
 
@@ -25,9 +38,18 @@ if ! flock -n 9; then
   echo "[ab] 已有实例在跑(/tmp/geom_coupled_ab.lock 被持有),退出。"; exit 1
 fi
 
-REPS="${REPS:-3}"
+REPS="${REPS:-8}"
 MASS="${MASS:-0.3}"
-ECC="${ECC:-0.05}"
+ECC="${ECC:-0.10}"                   # 主线工作点(08-31 起,见头部)
+ATTACH_TOL="${ATTACH_TOL:-0.03}"     # attach 偏心上限 = ECC + 本值
+# 【2026-08-31 第二批】figure8 机动。DYNAMIC=false 时是悬停带载(第一批就是,
+# 因为 run_gripper_headless.sh 的 GRIP_DYNAMIC 默认 false 而这里没传)。
+# ⚠️ headless 的 8 字默认是 r=0.8/w=0.25 —— 峰值速度只有 0.28m/s、包络 1.6×0.8m,
+# 那不算机动。这里显式取 **viz 主线那一套**(r=5.0/w=0.283/ramp=3.0/dz=0.8,
+# 峰值速度 2.0m/s),否则两个脚本"跑的 figure8"根本不是一回事。
+DYNAMIC="${DYNAMIC:-true}"
+DYN_R="${DYN_R:-5.0}"; DYN_W="${DYN_W:-0.283}"
+DYN_RAMP="${DYN_RAMP:-3.0}"; DYN_DZ="${DYN_DZ:-0.8}"
 DROP_AFTER="${DROP_AFTER:-45.0}"     # lift 完成后再悬停这么久才 drop
 RECOVER_SEC="${RECOVER_SEC:-25}"     # drop 之后再录这么久,用来量恢复
 TIMEOUT="${TIMEOUT:-260}"            # 单轮等待上限(秒)
@@ -37,10 +59,13 @@ MANIFEST="$RUNDIR/geom_coupled_ab_${STAMP}.txt"
 mkdir -p "$RESID_ROOT"
 {
   echo "# 几何-质量耦合 A/B  $STAMP"
-  echo "# 列: mode rep nmpc_stamp status peak_pos_err resid_dir"
-  echo "# 配置: mass=$MASS ecc=$ECC drop_after=$DROP_AFTER recover=$RECOVER_SEC reps=$REPS"
-  echo "# 对齐: geom_source=online, geom_mp_prior=$MASS, theta=M0, c_xy_est=on"
+  echo "# 列: mode rep nmpc_stamp status peak_pos_err nmpc_failed attach_ecc m_err_p50 m_err_p90 solve_med traj n_samples resid_dir"
+  echo "# 配置: mass=$MASS ecc=$ECC attach_tol=$ATTACH_TOL (r_xy 上限 $(python3 -c "print(f'{$ECC+$ATTACH_TOL:.3f}')")) drop_after=$DROP_AFTER recover=$RECOVER_SEC reps=$REPS"
+  echo "# 轨迹: dynamic=$DYNAMIC r=$DYN_R w=$DYN_W ramp=$DYN_RAMP dz=$DYN_DZ (v_peak=$(python3 -c "import math;print(f'{math.sqrt(2)*$DYN_R*$DYN_W:.2f}')")m/s)"
+  echo "# 对齐: geom_source=online(NMPC 侧不开 coupled), theta=M0, c_xy_est=on, envelope=0.5(headless 默认)"
   echo "# 唯一差异: MHE_GEOM_COUPLED"
+  echo "# m_err_* = |误差|%,取 **DROP 前 20s** 稳态带载窗口(见 extract_ab_metrics.py);"
+  echo "# traj 列标出该轮是 fig8 还是 hover —— 两种批次的数字不可混读;status=CRASH 行其余列不可用"
 } > "$MANIFEST"
 echo "[ab] manifest: $MANIFEST"
 echo "[ab] resid root: $RESID_ROOT"
@@ -66,7 +91,10 @@ run_one() {
   local launch="$RUNDIR/geomab_launch_${STAMP}_${mode}_${rep}.log"
   echo "[ab] === mode=$mode rep=$rep (MHE_GEOM_COUPLED=$cpl) ==="
   MHE_GEOM_COUPLED=$cpl \
-  GRIP_PAYLOAD_KG=$MASS GRIP_ECC_Y=$ECC USE_MHE=true MHE_C_XY_EST=true \
+  GRIP_PAYLOAD_KG=$MASS GRIP_ECC_Y=$ECC GRIP_ATTACH_TOL=$ATTACH_TOL \
+    GRIP_DYNAMIC=$DYNAMIC GRIP_DYN_R=$DYN_R GRIP_DYN_W=$DYN_W \
+    GRIP_DYN_RAMP=$DYN_RAMP GRIP_DYN_DZ=$DYN_DZ \
+    USE_MHE=true MHE_C_XY_EST=true \
     NMPC_GEOM_SOURCE=online \
     GRIP_DROP_AFTER=$DROP_AFTER RESID_LOG_DIR="$rdir" \
     EVAL_TRUE_PAYLOAD_MASS=$MASS \
@@ -89,18 +117,16 @@ run_one() {
     if grep -q "DROP: released gripper" "$nmpc" 2>/dev/null; then dropped=1; break; fi
     sleep 6; waited=$((waited+6))
   done
-  local status=ok
-  if [ "$dropped" -eq 1 ]; then
-    sleep "$RECOVER_SEC"
-  else
-    status=NO_DROP
-  fi
-  local peak
-  peak=$(grep -oE "pos_err=[0-9.]+" "$nmpc" 2>/dev/null | grep -oE "[0-9.]+" \
-         | sort -rn | head -1); [ -z "$peak" ] && peak=99
-  awk "BEGIN{exit !($peak>2.0)}" && status=DIVERGED
-  echo "$mode $rep $nstamp $status $peak $rdir" >> "$MANIFEST"
-  echo "[ab] $mode rep$rep stamp=$nstamp peak=$peak -> $status"
+  [ "$dropped" -eq 1 ] && sleep "$RECOVER_SEC"
+  # 指标一律由 extract_ab_metrics.py 统一口径地抽(status 也在里面判),
+  # 避免这里和聚合脚本各写一套 grep 而口径悄悄分叉。
+  local mhe="${nmpc/grip_nmpc_/grip_mhe_}"
+  local metrics
+  metrics=$(python3 "$WS/src/scripts/gripper/extract_ab_metrics.py" \
+            "$nmpc" "$mhe" 2>/dev/null)
+  [ -z "$metrics" ] && metrics="EXTRACT_FAIL 99 99 nan nan nan nan - 0"
+  echo "$mode $rep $nstamp $metrics $rdir" >> "$MANIFEST"
+  echo "[ab] $mode rep$rep stamp=$nstamp -> $metrics"
   cleanup
 }
 

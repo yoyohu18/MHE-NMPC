@@ -70,7 +70,9 @@ _f2dv() { python3 -c "print(float('$1'))"; }
 LIFT_HOLD=$(_b "${GRIP_LIFT_HOLD:-false}")
 LIFT_HOLD_DZ_D=$(_f2dv "${GRIP_LIFT_HOLD_DZ:-0.35}")
 LIFT_HOLD_SEC_D=$(_f2dv "${GRIP_LIFT_HOLD_SEC:-3.0}")
-DJ_TRACK=$(_b "${DJ_TRACK_MEST:-false}")
+# 2026-08-30 默认改 true(与节点/headless 同步,用户拍板;证据未达 n>=8 门槛,
+# 见 acados_nmpc_node.py 里 dj_track_mest 的声明注释)。
+DJ_TRACK=$(_b "${DJ_TRACK_MEST:-true}")
 # 载荷**意外**脱落看门狗(2026-08-30,与 headless 同名同默认)。演示视频用
 # MHE_PAYLOAD_LOST_WATCH=1 打开;计划内 drop 不走这条路,见 payload-lost-watchdog。
 PL_WATCH=$(_b "${MHE_PAYLOAD_LOST_WATCH:-false}")
@@ -81,6 +83,23 @@ DJ_FLOOR_MP_D=$(_f2dv "${GRIP_DJ_FLOOR_MP:-0.15}")
 # (须配 MHE_SIGNAL_MODE=residual)。默认 true = 历史行为。
 DROP_PUB_EVENT=$(_b "${DROP_PUBLISH_MASS_EVENT:-true}")
 MP_CAP_D=$(_f2dv "${GRIP_MP_CAP:-0.6}")
+# ===== 几何-质量耦合档(2026-08-31 起默认开)=====
+# MHE 的几何槽从 [dJ,cx,cy](窗外算好的常参数,∂(J,c)/∂m≡0)换成可测杆臂
+# [rx,ry,rz],J(m)/c(m) 由被估质量在模型内现算 —— 质量因此能从**转动通路**辨识。
+# 证据(记忆 geom-coupled-ab-n8,两批 n=8 配对 A/B,唯一差异就是本变量):
+#   figure8 v_peak=2.0m/s:|err| p50 2.31%→0.53%,偏差中位 −2.57%→+0.45%,
+#                          配对 8/8 同向 p=0.0078;
+#   悬停带载            :0.58%→0.21%,−0.57%→+0.01%,7/7 同向 p=0.0156。
+#   ★ legacy 两批合计 16/16 轮**全是负偏差**,coupled 围绕零 —— 这坐实了
+#     "m_est 带载低估"的根源是 legacy 缺 ∂(J,c)/∂m 这条通路(记忆
+#     mest-maneuver-underestimate 的 H2' 假说)。
+# 代价:MHE solve 中位 4.20→5.95ms(10Hz 下占 6% 周期);首轮会重新 codegen
+#       (MODEL_NAME 带 _coupled 后缀,与 legacy 目录隔离,不互相覆盖)。
+# ⚠️ 只改**这一侧**:NMPC_GEOM_COUPLED 保持关(可用边界 r_y≲0.05m,而本场景
+#    ecc=0.10 远在禁区外);推荐组合是 MHE coupled + NMPC 几何走 online。
+# ⚠️ 未覆盖:4m/s 工作点、一阶质量矩(MHE_ESTIMATE_MOMENT)仍默认关。
+# 回退:MHE_GEOM_COUPLED=0
+export MHE_GEOM_COUPLED="${MHE_GEOM_COUPLED:-1}"
 MANEUVER_GATE=$(_b "${MHE_MANEUVER_GATE:-false}")
 RESID_RELEASE_GEOM=$(_b "${MHE_RESID_RELEASE_GEOM:-true}")
 # 并行阶跃判据(2026-08-26,默认关):短窗前后均值差,不需慢基线因而没有预热失效面。
@@ -143,7 +162,18 @@ ECC_Y_D=$(_f2d "$ECC_Y"); PAYLOAD_KG_D=$(_f2d "$PAYLOAD_KG")
 PAYLOAD_ENVELOPE_D=$(_f2d "${GRIP_PAYLOAD_ENVELOPE:-0.5}")
 ATTACH_WINDOW_SEC_D=$(_f2d "${ATTACH_WINDOW_SEC:-40.0}")
 BOX_I=$(python3 -c "print(f'{$PAYLOAD_KG * 0.00375:.6f}')")
-R_XY=$(python3 -c "print(f'{max(0.20, $ECC_Y + 0.08):.3f}')")
+# 抓取偏心上限 [m] = 设计偏心 ECC_Y + 容差。**不是**"够得着"的判据,而是
+# **配平力矩余量**的判据:带偏心悬停要常值输出 tau_roll = (m_P/m_T)*r_y*T
+# ≈ 2.944*r_y N·m,而 NMPC 的 roll 约束是 ±0.5 —— r_y=0.17 时配平吃掉 99%,
+# figure8 没有机动余量,实测直接姿态发散坠机(gviz_20260831_165224)。
+# 408 轮历史回归:|r_y|>=0.15 坠机 38.5%、0.12~0.15 为 15.5%、<0.12 为 9.0%。
+# 旧公式 max(0.20, ECC_Y+0.08) 给到 0.20,等于**不设防**(266 次 attach 只挡掉 1 次)。
+# 容差 0.03 → ECC_Y=0.10 时上限 0.13,历史拒绝率 15.4%。⚠️ 容差不能给 0:
+# 实际 d_xy 中位 0.096、p90 0.139,本来就在设计值附近抖(跟踪误差 + 旋翼下洗
+# 吹动 box)。超限只是**这一 tick 不 attach**,drone 继续跟踪悬停点等它收敛;
+# proximity 侧有节流日志 + 8s 未 attach 的 WARN。
+GRIP_ATTACH_TOL="${GRIP_ATTACH_TOL:-0.03}"
+R_XY=$(python3 -c "print(f'{$ECC_Y + $GRIP_ATTACH_TOL:.3f}')")
 
 if [ "$METHOD" = thetastar ]; then
   THETA="[-4.8038,-1.2080,0.4930,-0.9602,0.9875]"; CALPHA="0.9875"

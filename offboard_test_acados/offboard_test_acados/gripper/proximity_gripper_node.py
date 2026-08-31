@@ -3,7 +3,7 @@
 
 监听无人机和目标 box 的位姿,当**全部**条件满足时,往夹爪插件发 attach
 命令,把 box 焊到机体上:
-  - 水平距离 < r_xy
+  - 水平距离 < r_xy  ← 这一条同时是**偏心上限**,见 should_attach 里的 08-31 注释
   - 相对高度 (无人机.z - 目标.z) ∈ [h_min, h_max]  (无人机在目标上方)
   - 机体与目标的相对速度模长 < v_rel_max  (避免瞬间刚性约束 + 速度失配
     产生冲击 jerk 把仿真打崩)
@@ -22,6 +22,7 @@ detach:收到 /gripper/release (std_msgs/Bool = true),或 enable 拉低时释放
 只有"夹取使能/释放"这两个外部信号走 ROS(方便飞行节点/人工触发)。
 """
 import math
+import time
 
 import rclpy
 from rclpy.node import Node
@@ -59,7 +60,30 @@ class ProximityGripperNode(Node):
         self.declare_parameter('parent_link', 'base_link')
         self.declare_parameter('targets', ['box'])
         self.declare_parameter('child_link', 'box_link')
-        self.declare_parameter('r_xy', 0.15)
+        # r_xy 有双重语义:①够不够得着 ②**允许的抓取偏心上限**。
+        # 【2026-08-31】②才是真正吃紧的那一条。box 固定在 world 的 (1.0, 0.0),
+        # 而 drone 悬停点是 grip_y=GRIP_ECC_Y —— 偏心是**故意制造的实验变量**,
+        # 设计值就是 ECC_Y。但跟踪误差 + 旋翼下洗吹动 box 会把实际 d_xy 放大:
+        # 266 次历史 attach 的分布是 中位 0.096 / p90 0.139 / max 0.200,
+        # 而设计值只有 0.10。
+        # 为什么必须卡住上限:带偏心悬停需要一个**常值配平 roll 力矩**
+        #   tau_roll = c_y * T = (m_P/m_T) * r_y * T ≈ 2.944 * r_y   (0.3kg 载荷, T≈23.2N)
+        # 而 NMPC 的 roll 约束是 ±0.5 N·m。r_y=0.17 时配平就吃掉 99%,figure8
+        # **没有任何机动余量** → 姿态发散 → 倾角 35° → cos 损失 → 掉高坠机
+        # (gviz_20260831_165224 实测:tau_phys roll 在 figure8 之前就贴到 −0.537)。
+        # 408 轮历史回归(飞行≥60s):|r_y|≥0.15 坠机 5/13=38.5%,0.12~0.15 为
+        # 15.5%,<0.12 为 9.0%(单调,Fisher p=0.0056)。
+        # 门槛与配平占比的换算:0.12→71%  0.13→77%  0.15→88%  0.17→100%。
+        # 默认 0.13 = ECC_Y 标称 0.10 + 0.03 容差,配平占 77%、留 23% 给机动;
+        # 对应历史拒绝率 15.4%(0.15 只拒 4.9% 但放行了高危档,0.12 拒 23.7%)。
+        self.declare_parameter('r_xy', 0.13)
+        # 被拒时的节流日志间隔 [s]。0 = 不打(旧行为)。**默认要打**:收紧门槛后
+        # "为什么迟迟不 attach"必须看得见,否则轮次挂在低空而日志里一片空白。
+        self.declare_parameter('reject_log_period', 2.0)
+        # enable 之后多久还没 attach 就告警 [s]。只 WARN 不改变行为——drone 仍在
+        # 跟踪 (grip_x, grip_y),d_xy 通常会自己收敛回设计值;但若 box 被下洗吹偏
+        # 就再也回不来,那时需要这条 WARN 才能判断是"还在等"还是"永远等不到"。
+        self.declare_parameter('attach_timeout_warn', 8.0)
         self.declare_parameter('h_min', 0.3)
         self.declare_parameter('h_max', 1.5)
         self.declare_parameter('v_rel_max', 0.2)
@@ -78,6 +102,12 @@ class ProximityGripperNode(Node):
         self.h_min = float(g('h_min').value)
         self.h_max = float(g('h_max').value)
         self.v_rel_max = float(g('v_rel_max').value)
+        self.reject_log_period = float(g('reject_log_period').value)
+        self.attach_timeout_warn = float(g('attach_timeout_warn').value)
+        self._last_reject = None        # 最近一次拒绝的原因串,或 None
+        self._last_reject_log = 0.0     # 上次打拒绝日志的墙钟
+        self._enable_stamp = None       # 收到 enable=true 的墙钟
+        self._timeout_warned = False
 
         self.enabled = False
         self.poses = {self.drone_model: TrackedPose()}
@@ -131,8 +161,12 @@ class ProximityGripperNode(Node):
             self.get_logger().info('gripper ENABLED')
         elif not msg.data and self.enabled:
             self.get_logger().info('gripper DISABLED -> releasing all')
+        if msg.data and self._enable_stamp is None:
+            self._enable_stamp = time.time()
+            self._timeout_warned = False
         self.enabled = msg.data
         if not self.enabled:
+            self._enable_stamp = None
             for tgt in list(self.attached):
                 self.send_detach(tgt)
 
@@ -157,24 +191,57 @@ class ProximityGripperNode(Node):
             if self.should_attach(drone, tp):
                 self.send_attach(tgt)
                 self.publish_offset(drone, tp)
+            else:
+                self._log_reject(tgt)
 
     def should_attach(self, drone, tgt):
+        """三条判据全过才 attach。不过时把**原因**写进 self._last_reject,
+        由 tick 节流打印 —— 静默拒绝会让"迟迟不 attach"完全无法诊断
+        (2026-08-31 收紧 r_xy 时补,见该参数声明处的偏心-配平力矩推导)。"""
         dx = drone.pos[0] - tgt.pos[0]
         dy = drone.pos[1] - tgt.pos[1]
         dz = drone.pos[2] - tgt.pos[2]
         d_xy = math.hypot(dx, dy)
-        if d_xy >= self.r_xy:
-            return False
-        if not (self.h_min <= dz <= self.h_max):
-            return False
         v_rel = math.sqrt(sum(
             (drone.vel[i] - tgt.vel[i]) ** 2 for i in range(3)))
+        why = []
+        if d_xy >= self.r_xy:
+            # 偏心超限是**本节点最该讲清楚**的一条:顺带把它折算成配平力矩占比,
+            # 免得看日志的人还要自己换算才知道"超了 0.02m 到底要不要紧"。
+            why.append(f'偏心 d_xy={d_xy:.3f} ≥ r_xy={self.r_xy:.3f} '
+                       f'(配平 roll ≈ {2.944 * d_xy:.3f}N·m = '
+                       f'{100.0 * 2.944 * d_xy / 0.5:.0f}% 的 ±0.5 约束)')
+        if not (self.h_min <= dz <= self.h_max):
+            why.append(f'高度 dz={dz:.3f} ∉ [{self.h_min},{self.h_max}]')
         if v_rel >= self.v_rel_max:
+            why.append(f'相对速度 v_rel={v_rel:.3f} ≥ {self.v_rel_max}')
+        if why:
+            self._last_reject = '; '.join(why)
             return False
+        self._last_reject = None
         self.get_logger().info(
             f'attach condition met: d_xy={d_xy:.3f} dz={dz:.3f} '
-            f'v_rel={v_rel:.3f}')
+            f'v_rel={v_rel:.3f} (r_xy 上限 {self.r_xy:.3f})')
         return True
+
+    def _log_reject(self, name):
+        """节流打印"为什么还没 attach",并在超时后升级成一条 WARN。"""
+        if not self._last_reject:
+            return
+        now = time.time()
+        if self.reject_log_period > 0.0 and \
+                now - self._last_reject_log >= self.reject_log_period:
+            self._last_reject_log = now
+            self.get_logger().info(
+                f'attach 暂不触发 [{name}]: {self._last_reject}')
+        if (self._enable_stamp is not None and not self._timeout_warned
+                and self.attach_timeout_warn > 0.0
+                and now - self._enable_stamp >= self.attach_timeout_warn):
+            self._timeout_warned = True
+            self.get_logger().warn(
+                f'enable 已 {self.attach_timeout_warn:.0f}s 仍未 attach [{name}]: '
+                f'{self._last_reject} —— drone 仍在跟踪悬停点,d_xy 通常会自己收敛;'
+                f'若 box 被下洗吹偏则不会,此时本轮不会进入 LIFT。')
 
     def publish_offset(self, drone, tgt):
         msg = Float64MultiArray()

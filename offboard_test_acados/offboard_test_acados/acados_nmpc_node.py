@@ -460,7 +460,13 @@ class AcadosNMPCNode(Node):
         # 默认 True 保持历史行为;设 False 时**必须**同时给 mhe_node 配
         # event_signal_mode:=residual,否则 MHE 既收不到信号也不会自检测。
         self.declare_parameter('drop_publish_mass_event', True)
-        self.declare_parameter('dj_track_mest', False)
+        # 2026-08-30 默认由 False 改 True(用户拍板)。⚠️ 证据基础是 5 轮 n=1
+        # 观察 + 08-28 那次"在线跟随把模型 dJ 误差从包线的 +54% 收到 +1.6%",
+        # **没有达到 [evidence-bar] 要求的 n>=8 配对 + LIFT 段全不发散前置条件**
+        # (我提了这一点,用户明确要求仍然改)。要回退只需把这里改回 False。
+        # 开了它只动**模型侧 dJ**:增益侧因为滞回门槛(0.125)高过 cap(0.6)在默认
+        # 参数下永远够不着,仍钉在 attach 的包线整定上(见 dj_gain_rescale_* 注释)。
+        self.declare_parameter('dj_track_mest', True)
         self.declare_parameter('grip_mp_cap', 0.6)       # 载荷质量操作包线上界 kg
         # 模型侧 dJ 的**下界**载荷质量 [kg](2026-08-28)。棘轮从 0 起步,而 attach
         # 瞬间 dJ 是按包线上界算的(过估),所以棘轮第一步必然把模型 dJ **往下**打
@@ -584,6 +590,11 @@ class AcadosNMPCNode(Node):
         # attach_offset 真的到达;这个超时是它的兜底(万一 attach 真的没发生,
         # 别永远卡住,超时后退回旧的 grip_arm_d 兜底几何路径)。
         self.declare_parameter('grip_mass_step_timeout_sec', 5.0)
+        # 【2026-08-31】attach 是否必须有 proximity 的 attach_offset 为证。
+        # True(默认,新行为)= 超时未收到就判 attach 失败、不做任何 attach 后处理;
+        # False = 旧行为(退回 grip_arm_d 兜底几何并照常缩增益)——旧行为在
+        # 偏心被拒的轮次上会把空机当带载,实测崩机,只保留作回退开关。
+        self.declare_parameter('grip_attach_require_offset', True)
         # [attach-window] 逐帧诊断日志(供 CEM 学习脚本解析)的窗口时长——
         # gripper 瞬态比 wrench 的 [drop-window](硬编码 8.0s)长得多,同一份
         # 后续实测过 20-60s+ 才收敛的工况都有,给足余量。
@@ -670,6 +681,9 @@ class AcadosNMPCNode(Node):
                 self.get_parameter('grip_descend_v_tol').value)
             self.grip_mass_step_timeout_sec = float(
                 self.get_parameter('grip_mass_step_timeout_sec').value)
+            self.grip_attach_require_offset = bool(self.get_parameter(
+                'grip_attach_require_offset').value)
+            self._attach_failed_warned = False
             self.attach_window_sec = float(
                 self.get_parameter('attach_window_sec').value)
             self.grip_climbed = False        # 接近第0段:先在起飞点原地爬到安全高度
@@ -1638,9 +1652,32 @@ class AcadosNMPCNode(Node):
         # 秒仍没收到 attach_offset(万一 attach 没成功),才退回 grip_arm_d 兜底几何。
         if not self.grip_descend_done or self.grip_descend_done_time is None:
             return
-        if (self.attach_offset is None and nmpc_time <
-                self.grip_descend_done_time + self.grip_mass_step_timeout_sec):
-            return
+        if self.attach_offset is None:
+            if nmpc_time < (self.grip_descend_done_time
+                            + self.grip_mass_step_timeout_sec):
+                return
+            # 【2026-08-31】超时兜底原来在这里直接往下走,把"没抓到"当成"抓到了
+            # 但 offset 消息丢了"。那个假设是错的:proximity 的 send_attach 与
+            # publish_offset 是同一处连着调的(见 proximity_gripper_node.tick),
+            # 没有 offset 就是**根本没 attach**。
+            # 代价有多大:同日收紧 attach 偏心上限(r_xy=ECC+0.03)后,
+            # 偏心超限的轮次第一次走到这条路径 —— NMPC 给**空机**上了包线的 5×
+            # 内环增益 + dJ,正是 07-14 实测过的空机过增益振荡崩法,飞机在
+            # 30s 内失控(grip_nmpc_20260831_175710:d_xy 从 0.150 一路飙到米级)。
+            # 所以超时后必须判"attach 失败"并**什么都不做**:不阶跃、不缩增益、
+            # 不注入几何,让飞机保持空机构型继续悬停。本轮不会进入 LIFT,批次
+            # 侧会记成 NO_DROP —— 那是正确的分类,比坠机好。
+            if self.grip_attach_require_offset:
+                if not self._attach_failed_warned:
+                    self._attach_failed_warned = True
+                    self.get_logger().warn(
+                        f't={nmpc_time:.1f}s | ATTACH FAILED: enable 后 '
+                        f'{self.grip_mass_step_timeout_sec:.0f}s 未收到 '
+                        f'attach_offset ⇒ 载荷没抓上(常见原因:偏心超过 '
+                        f'proximity 的 r_xy 上限)。**不做**质量阶跃/增益缩放/'
+                        f'几何注入 —— 给空机上带载增益会过增益振荡致崩。'
+                        f'本轮保持空机悬停,不进入 LIFT。')
+                return
         self.grip_mass_stepped = True
         self.attach_time = nmpc_time  # _lift_phase 从这个时刻起算,而非 NMPC 接管时刻
         # C.1 L1 模式(流派 B):attach 不做模型侧前馈——不阶跃 m_est、不给
@@ -1675,10 +1712,29 @@ class AcadosNMPCNode(Node):
         if self.geom_source == 'online':
             self.geom_online_active = True
             # attach 瞬间用**包线上界**(grip_payload_envelope + grip_arm_d)立刻
-            # 初始化 dJ 与 rate 增益(给内环即时鲁棒性,不等估计收敛——否则实测
-            # 炸机);c_est 先 0,随后 _update_online_geometry 用在线 m_est/c_xy 精修。
-            mp0, _ = self._envelope_mp()
-            self.dJ_est = self._dJ_from_mp(mp0)      # 模型侧:可以是 0/给错
+            # 初始化 rate 增益(给内环即时鲁棒性,不等估计收敛——否则实测炸机);
+            # c_est 先 0,随后 _update_online_geometry 用在线 c_xy 精修。
+            #
+            # ★ 2026-08-30 模型侧初值改为按 dj_track_mest 分流:
+            #   dj_track_mest=False → 仍用包线(该档模型 dJ 全程就是这个常值);
+            #   dj_track_mest=True  → 用 **max(棘轮=0, 地板)=地板**,也就是下一拍
+            #     _update_online_geometry 必然写进去的那个值。
+            # 原实现这里恒用包线,而棘轮档下一拍(实测 **0.2ms** 后)就把它覆盖成
+            # 地板值 —— 包线初值是死代码,更糟的是**日志在说谎**:打印
+            # "model dJ from envelope 0.50kg (dJ=0.0889)",而模型实际上从第二帧
+            # 起就在用 0.0309。分流后日志与模型一致。
+            # ⚠️ 顺带修正下面一句旧注释里的说法:模型侧**不是**"从包线过估精修
+            # 下来"(那需要棘轮从包线起步、只许下调),实际是从地板**由下往上**
+            # 逼近真值。两种做法的取舍见记忆 dj-online-tracking;哪个方向的 dJ
+            # 误差对 NMPC 更糟**至今没有实验支撑**。
+            mp_env, _ = self._envelope_mp()
+            if self.dj_track_mest:
+                mp0 = max(0.0, self.grip_dj_floor_mp)   # 棘轮起点=0,地板兜底
+                mp0_src = 'floor(ratchet starts at 0)'
+            else:
+                mp0 = mp_env
+                mp0_src = 'envelope(rack spec)'
+            self.dJ_est = self._dJ_from_mp(mp0)
             self.c_est = np.zeros(2)
             mp_gain, src_gain = self._envelope_mp()      # 执行器侧:必须够大
             self._scale_px4_rate_gains(self._dJ_from_mp(mp_gain))
@@ -1686,14 +1742,15 @@ class AcadosNMPCNode(Node):
             # 把包线整定推翻**:_mp_gain_applied 停在 0 时,棘轮第一步(m_p≈0.05)
             # 就满足 >= dj_gain_rescale_dmp,于是内环比从包线的 5.00 掉到 1.76
             # (降到 35%)—— 而 attach 这次缩放的存在理由正是"不等估计收敛,
-            # 否则实测炸机"。棘轮(_mp_ratchet)保持 0 不动:模型侧要能从包线
-            # 过估精修下来,那是 dj_track_mest 的目的。
+            # 否则实测炸机"。棘轮(_mp_ratchet)保持 0 不动 —— 它是模型侧的量,
+            # 从 0 起步、由地板兜底、只增不减(见上面 2026-08-30 那段)。
             self._mp_gain_applied = mp_gain
             self.get_logger().info(
                 f't={nmpc_time:.1f}s | ATTACH (geom_source=online): model dJ from '
-                f'envelope m_p={mp0:.2f}kg arm={self.grip_arm_d:.2f}m '
-                f'(dJ={self.dJ_est:.4f}); rate gains from {src_gain} '
-                f'm_p={mp_gain:.2f}kg; c_xy refine online, attach truth eval-only')
+                f'{mp0_src} m_p={mp0:.2f}kg arm={self.grip_arm_d:.2f}m '
+                f'(dJ={self.dJ_est:.4f}, dj_track={self.dj_track_mest}); '
+                f'rate gains from {src_gain} m_p={mp_gain:.2f}kg; '
+                'c_xy refine online, attach truth eval-only')
             return
         if self.attach_offset is not None:
             r_p = self.attach_offset
