@@ -532,6 +532,56 @@ class MHENode(Node):
             self.get_parameter('c_xy_steady_omega').value)
         self.c_xy_steady_vel = float(
             self.get_parameter('c_xy_steady_vel').value)
+        # ---- 基于质量的载荷卸载判据(2026-09-01)----
+        # 动机:geom_release_mode='self' 下 MHE 从不被告知 drop,而 c_xy_est 这条
+        # **发布支路**自己不会熄灭 —— 它的更新入口有稳态门控(|ω|、|v_xy|),
+        # figure8 中一次都不满足,EMA 停在带载值(实测 drop 后 60s 仍报 cy=-4.8mm)。
+        # 模型内部的 c(m) 在 coupled 档下随 m 正常熄灭,脏的只有这条对外话题。
+        # 判据放在**质量域**而非推力残差域:实测 0.15kg 工况带载段 m_p 最低
+        # 0.0785kg、drop 后最高 0.007kg,间隔 11x;同工况推力残差侧真信号 1.47N
+        # vs LIFT 段噪声 1.23N 只有 1.2x(阈值 1.5N 漏检、1.177N 被 LIFT 诈出
+        # 提前释放,两头堵)。而且这是**状态判据**不是事件判据,不必抓准时刻,
+        # 可以加滞回慢慢确认 —— c_xy_est 在机动中本来就不更新,延迟无代价。
+        # ⚠️ 只在 'self' 档启用:'event' 档的 _model_r_p() 读 attach_offset,而
+        #    _release_payload 会清它 -> 等于让 m_est 关掉模型几何 = 自举耦合
+        #    (2026-07 踩过);'self' 档模型走 _r_p_last,不受此影响。
+        self.declare_parameter('c_xy_mass_release_mp', 0.0)      # kg,0=关
+        self.declare_parameter('c_xy_mass_release_persist', 20)  # 帧,10Hz->2s
+        # 武装门控(2026-09-01 第一版实测补):**必须先看见载荷,才允许宣布它消失**。
+        # 第一版漏了这条,判据只问"m_p 小不小" —— 而 attach 后 m_est 要从空机值
+        # 往上爬,收敛期的 m_p 本来就小于阈值,于是在 LIFT 刚开始(drop 前 74s)
+        # 就把释放点着了;真 drop 到来时 _payload_attached 早已 False、判据失效,
+        # c_xy_est 反而 29s 都没熄。武装水位 = arm_ratio × 释放阈值。
+        self.declare_parameter('c_xy_mass_arm_ratio', 3.0)
+        # 武装**也要持续**(2026-09-01 配对批次 1/8 轮实测补):只看单点冲高不够 ——
+        # attach 后 m̂ 的收敛振荡会同时满足"冲高"和"回落":实测 t=9.9s 单点冲到
+        # m_p=0.232 把武装点着,t=12.0s 就回落到 0.017 且持续 2s → 误释放
+        # (drop−71.5s),而 t=14.0s 才真正收敛。要求连续若干帧高于水位后,
+        # 单点冲高武装不了,武装推迟到收敛之后,那以后不再有低于阈值的低谷。
+        self.declare_parameter('c_xy_mass_arm_persist', 20)  # 帧,10Hz->2s
+        self.c_xy_mass_release_mp = float(
+            self.get_parameter('c_xy_mass_release_mp').value)
+        self.c_xy_mass_release_persist = max(
+            1, int(self.get_parameter('c_xy_mass_release_persist').value))
+        self.c_xy_mass_arm_ratio = float(
+            self.get_parameter('c_xy_mass_arm_ratio').value)
+        self.c_xy_mass_arm_persist = max(
+            1, int(self.get_parameter('c_xy_mass_arm_persist').value))
+        self._c_xy_mass_low = 0
+        self._c_xy_mass_high = 0
+        self._c_xy_mass_armed = False
+        if self.c_xy_mass_release_mp > 0.0 and self.geom_release_mode != 'self':
+            self.get_logger().error(
+                "c_xy_mass_release_mp 只在 geom_release_mode='self' 下可用"
+                "(event 档 _release_payload 会清 attach_offset,而该档模型正读它"
+                " -> m_est 关掉模型几何 = 自举耦合)。已停用。")
+            self.c_xy_mass_release_mp = 0.0
+        elif self.c_xy_mass_release_mp > 0.0:
+            self.get_logger().info(
+                f'[c_xy_est] 质量域卸载判据已开:先武装(m_p>'
+                f'{self.c_xy_mass_release_mp * self.c_xy_mass_arm_ratio:.3f}kg)'
+                f',再判 m_p<{self.c_xy_mass_release_mp}kg 持续 '
+                f'{self.c_xy_mass_release_persist} 帧 -> 释放偏心估计')
 
         # --- c_xy 由一阶质量矩 s 直接给出(2026-08-26)---
         # 现状的问题(实测 gviz_20260826_194614):发给 NMPC 的 c_xy 走的是窗外
@@ -1469,6 +1519,36 @@ class MHENode(Node):
         """强闭环 c_xy 在线估计(B.3 Phase1,只记录不闭环)。稳态悬停时从电机
         转速反算的体力矩直接反解复合质心水平偏移,慢 EMA 滤噪。见 __init__ 里
         c_xy_est 的注释。c_xy=[cx,cy]=[-τ_pitch/T, τ_roll/T]。"""
+        # 质量域卸载判据(见 __init__ 里 c_xy_mass_release_mp)。**必须放在最前**:
+        # 下面的稳态门控在机动中直接 return,放它后面就永远轮不到 —— 而"机动中
+        # 也要能熄灭"正是它存在的理由。
+        if self.c_xy_mass_release_mp > 0.0 and self._payload_attached:
+            _m_p = float(self.m_est) - mhe_p.m_B
+            if not self._c_xy_mass_armed:
+                # 未武装:只等 m_p 爬过高水位,期间**不判释放**(attach 收敛期
+                # m_p 天然偏小,判了必误触发 —— 第一版就是这么栽的)。
+                if _m_p > self.c_xy_mass_release_mp * self.c_xy_mass_arm_ratio:
+                    self._c_xy_mass_high += 1
+                    if self._c_xy_mass_high >= self.c_xy_mass_arm_persist:
+                        self._c_xy_mass_armed = True
+                        self.get_logger().info(
+                            f'[c_xy_est] 质量域判据已武装(m_p={_m_p:.3f}kg '
+                            f'连续{self.c_xy_mass_arm_persist}帧高于水位)')
+                else:
+                    self._c_xy_mass_high = 0
+                self._c_xy_mass_low = 0
+            elif _m_p < self.c_xy_mass_release_mp:
+                self._c_xy_mass_low += 1
+                if self._c_xy_mass_low >= self.c_xy_mass_release_persist:
+                    self._c_xy_mass_low = 0
+                    self._c_xy_mass_high = 0
+                    self._c_xy_mass_armed = False
+                    self._release_payload(
+                        f'mass-based m_p<{self.c_xy_mass_release_mp:.3f}kg'
+                        f' x{self.c_xy_mass_release_persist}帧')
+                    return
+            else:
+                self._c_xy_mass_low = 0
         # --- 一阶质量矩驱动(见 __init__ 里 c_xy_from_moment 注释)---
         # 放在最前:这条路不依赖 tau_phys/稳态,s 本身就是窗口解算出来的。
         if self.c_xy_from_moment and mhe_p.ns:

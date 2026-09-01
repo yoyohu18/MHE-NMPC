@@ -391,6 +391,10 @@ nohup ros2 run offboard_test_acados mhe_node --ros-args \
     -p grip_payload_envelope:=$MHE_PAYLOAD_ENVELOPE_D \
     -p eval_true_payload_mass:=$EVAL_TRUE_PAYLOAD_D \
     -p geom_release_mode:=${MHE_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-event}} \
+    -p c_xy_mass_release_mp:=${MHE_CXY_MASS_RELEASE_MP:-0.0} \
+    -p c_xy_mass_release_persist:=${MHE_CXY_MASS_RELEASE_PERSIST:-20} \
+    -p c_xy_mass_arm_ratio:=${MHE_CXY_MASS_ARM_RATIO:-3.0} \
+    -p c_xy_mass_arm_persist:=${MHE_CXY_MASS_ARM_PERSIST:-20} \
     -p c_xy_est_enable:=${MHE_C_XY_EST:-false} \
     -p c_xy_from_moment:=$(_b "${MHE_C_XY_FROM_MOMENT:-false}") \
     -p maneuver_gate_enable:=$(_b "${MHE_MANEUVER_GATE:-false}") \

@@ -270,6 +270,36 @@ nohup bash -c "source /opt/ros/jazzy/setup.bash && source '$WS/install/setup.bas
   > "$LOGDIR/gviz_bridge_$TS.log" 2>&1 &
 sleep 10
 
+# 4b. 动态避让:把 RViz 摆到 Gazebo **不在**的那块屏(2026-09-01)。
+# 双屏录 demo 时两个窗口叠在一起就录不到 Gazebo(后起的 RViz 压在上面),而
+# `~/.gz/sim/8/gui.config` 的 position_x **时灵时不灵** —— 同一天实测 Gazebo
+# 一次落主屏、一次落副屏,配置写的都是 1920(记忆 demo-video-pipeline 坑 6)。
+# RViz 的 `Window Geometry: X` 则一直可靠,所以让可靠的那个去躲不可靠的那个:
+# 起 RViz **之前**看一眼 Gazebo 实际落在哪,把 RViz 的 X 写成另一块屏。
+# 只在双屏 + 有 xwininfo 时生效;单屏或读不到几何就原样不动。
+# 写的是**临时副本**,不碰用户的配置文件。
+if command -v xwininfo >/dev/null 2>&1 && command -v xrandr >/dev/null 2>&1; then
+  _n_mon=$(xrandr --listmonitors 2>/dev/null | awk 'NR==1{print $2}')
+  # Gazebo GUI 可能还没画出窗口,重试等它出现(最多 20s)
+  _gz_x=""
+  for _t in 1 2 3 4 5 6 7 8 9 10; do
+    _gz_x=$(xwininfo -root -tree 2>/dev/null | grep 'gz-sim-gui' | head -1 \
+            | grep -oE '\+-?[0-9]+\+-?[0-9]+$' | cut -d+ -f2)
+    [ -n "$_gz_x" ] && break
+    sleep 2
+  done
+  if [ "${_n_mon:-1}" -ge 2 ] && [ -n "${_gz_x:-}" ]; then
+    # Gazebo 在主屏(x<960) -> RViz 去副屏 1920;否则 RViz 留主屏 0
+    if [ "$_gz_x" -lt 960 ]; then _rv_x=1920; else _rv_x=0; fi
+    _rv_tmp="/tmp/nmpc_view_gripper_auto_$TS.rviz"
+    if sed -E "/^Window Geometry:/,/^[^ ]/ s/^  X: .*/  X: $_rv_x/" \
+         "$RVIZ_CONFIG" > "$_rv_tmp" 2>/dev/null && [ -s "$_rv_tmp" ]; then
+      echo "版面避让: Gazebo x=$_gz_x -> RViz X=$_rv_x ($_rv_tmp)"
+      RVIZ_CONFIG="$_rv_tmp"
+    fi
+  fi
+fi
+
 # 5. RViz2(控制端:figure8 参考 vs 实际 + NMPC 预测 horizon + drone 模型)
 gnome-terminal --title="RViz2 (gripper trajectories)" "${TG2[@]}" -- bash -c \
   "source /opt/ros/jazzy/setup.bash && rviz2 -d '$RVIZ_CONFIG'; exec bash"
@@ -344,7 +374,7 @@ nohup bash -c "source /opt/ros/jazzy/setup.bash && source '$WS/install/setup.bas
     -p c_xy_from_moment:=$C_XY_FROM_MOMENT \
     -p eval_true_payload_mass:=$PAYLOAD_KG_D \
     -p geom_release_mode:=${MHE_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-event}} \
-    -p event_signal_mode:=${MHE_SIGNAL_MODE:-external}" \
+    -p c_xy_mass_release_mp:=${MHE_CXY_MASS_RELEASE_MP:-0.0} -p c_xy_mass_release_persist:=${MHE_CXY_MASS_RELEASE_PERSIST:-20} -p c_xy_mass_arm_ratio:=${MHE_CXY_MASS_ARM_RATIO:-3.0} -p c_xy_mass_arm_persist:=${MHE_CXY_MASS_ARM_PERSIST:-20} -p event_signal_mode:=${MHE_SIGNAL_MODE:-external}" \
   > "$MHE_LOG" 2>&1 &
 
 echo "All components up. Gazebo GUI = 物理飞行; RViz = 控制端跟踪。"
