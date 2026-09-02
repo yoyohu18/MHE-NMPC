@@ -1,7 +1,7 @@
-# Sensing-Minimal Adaptive NMPC for Aerial Delivery
+# Adaptive NMPC for Aerial Delivery Without Payload-Event Signals
 
-**Event-triggered Moving Horizon Estimation + NMPC for a quadrotor that grasps and releases
-payloads in flight — using only motor speeds and odometry.**
+**Self-triggered Moving Horizon Estimation + NMPC for a quadrotor that grasps and releases
+payloads in flight, using only motor speeds and odometry and no external payload-event signal.**
 
 When a delivery drone picks up or drops a parcel, its mass, center of mass, and inertia all
 change at once. This project estimates those parameters *online* and feeds them to a
@@ -41,9 +41,6 @@ objective is flat over a broad neighbourhood of the hand-designed rule, so on th
 # One gripper mission: approach → grasp → figure-eight → phase-triggered release
 bash src/scripts/gripper/run_gripper_headless.sh
 
-# Pure mass-step baseline (wrench platform)
-bash src/scripts/masschanger/run_sitl_headless.sh
-
 # Rebuild every figure and table in the paper from frozen logs
 bash paper/reproduce.sh
 ```
@@ -62,9 +59,9 @@ timestamped log — see [REPRODUCE.md](../paper/REPRODUCE.md) for the figure-by-
   (rejects gusts), then reschedules the MHE stage weights.
 - **NMPC** (`acados_nmpc_node.py`) — acados SQP-RTI, 13 states / 4 inputs, N=20 at
   dt=0.05 s (1.0 s preview), 20 Hz. Consumes `[m, ΔJ, c_xy]` from the estimator.
-- **Gazebo plugins** (`gz_plugins/`) — a magnetic DetachableJoint gripper (genuine
-  mass/CoM/inertia change) and a wrench-based mass-step emulator. The two platforms carry
-  disjoint claims; see the platform table in [REPRODUCE.md](../paper/REPRODUCE.md).
+- **Gazebo plugin** (`gz_plugins/magnetic_gripper/`) — a magnetic DetachableJoint gripper
+  that produces genuine mass/CoM/inertia changes. The retired mass-step experiment stack
+  is no longer a supported entry point.
 
 ## Status
 

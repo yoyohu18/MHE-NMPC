@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# 把实时里程计广播成 map->base_link 的 TF,配合 urdf/masschanger/x500.urdf + robot_state_publisher
+# 把实时里程计广播成 map->base_link 的 TF,配合 urdf/gripper/x500.urdf + robot_state_publisher
 # 在 RViz 的 RobotModel 显示项里渲染出完整机身(机架+4个电机/桨叶)。取代之前
 # 单一 mesh 的 Marker 方案(drone_marker_publisher.py)——同一份 odom,换成更
 # "标准"的 URDF+TF 渲染路径,能看到电机/桨叶而不仅是中央机身,且姿态補偿直接

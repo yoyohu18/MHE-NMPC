@@ -4,10 +4,10 @@
 # figure8 参考 vs 实际轨迹 + NMPC 预测 horizon + drone 模型 + 旋翼动画)。
 # 与 headless 批量版(run_gripper_headless.sh)的区别:开 GUI、接 RViz、用主配置
 # (online 无真值几何 + θ* 学习调度 + α 无真值确认 + drop + figure8 动态)。
-# 复用 masschanger 的 URDF/viz 组件(NMPC 路径话题、drone 模型全通用);RViz 配置
-# 07-30 改用 gripper 专用的 config/gripper/nmpc_view_gripper_hifly.rviz——r=5 的
+# URDF 和 RViz 资源均归属 gripper 场景。RViz 配置于 07-30 改用
+# config/gripper/nmpc_view_gripper_hifly.rviz——r=5 的
 # 大 8 字会顶出原配置那个 ±5m 默认网格、Distance:12 也框不住,故单独一份
-# (网格 24m、Distance 26、焦点挪到 attach 中心 x=1),masschanger 共用那份不动。
+# (网格 24m、Distance 26、焦点挪到 attach 中心 x=1)。
 #
 # ★★ 2026-09-02:默认工作点整体换成**无信号主线 = 演示视频 20260901_141240 那轮**
 #    (原样照抄 run_cxy_mass_repeat.sh 的环境变量)。改了两组东西:
@@ -211,11 +211,8 @@ else
 fi
 # 确认阈值 = α·g·grip_payload_envelope(CALPHA<0 时走固定 event_confirm_thresh_n)。
 # 2026-08-26 前这里是 MHE_CONFIRM_PRIOR(默认回落到 $PAYLOAD_KG = box 真值)。
-# α 与 θ 正交(ParametricWeightSchedule 只读 theta[0..3],α 走独立参数)——
-# run_gripper_headless.sh 早就是两个独立环境变量,viz 这边却把它们绑死在 METHOD
-# 分支里,导致"想让 α 阈值生效"只能连带切到已被析因消融证伪的
-# θ*(见记忆 cem-benefit-refuted)。2026-08-22 解绑:MHE_CONFIRM_ALPHA 可单独
-# 覆盖,于是能跑 run_alpha_only_ablation.sh 里的 alphaonly 臂 = M0 节奏 + α 阈值。
+# α 与 θ 正交(ParametricWeightSchedule 只读 theta[0..3],α 走独立参数)。
+# MHE_CONFIRM_ALPHA 保持为独立覆盖项,便于单独调整确认阈值。
 CALPHA="${MHE_CONFIRM_ALPHA:-$CALPHA}"
 
 WS="/home/clear/ros2_ws_HJH"
@@ -225,7 +222,7 @@ GRIPPER_DIR="$PKG/gz_plugins/magnetic_gripper"
 WORLD_SRC="$PKG/worlds/gripper/gripper_test.sdf"
 PX4_WORLDS="$PX4_DIR/Tools/simulation/gz/worlds"
 RVIZ_CONFIG="${RVIZ_CONFIG:-$PKG/config/gripper/nmpc_view_gripper_hifly.rviz}"
-URDF_FILE="$PKG/urdf/masschanger/x500.urdf"
+URDF_FILE="$PKG/urdf/gripper/x500.urdf"
 LOGDIR="$WS/nmpc_test_results"
 TS=$(date +%Y%m%d_%H%M%S)
 ACADOS_ENV="export ACADOS_SOURCE_DIR=/home/clear/acados && export LD_LIBRARY_PATH=/home/clear/acados/lib:\$LD_LIBRARY_PATH"

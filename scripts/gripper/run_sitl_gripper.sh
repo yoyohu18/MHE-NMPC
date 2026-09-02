@@ -11,8 +11,8 @@
 # 磁吸夹爪 attach 演示 SITL:plain x500(空机)飞到 box 上方 -> 接近触发
 # attach(DetachableJoint 把 box 焊到 base_link)-> 带着 box 爬升悬停。
 #
-# 与 masschanger/run_sitl_acados.sh(payload-drop / mass_changer 基线)完全独立:
-#   - 空机 gz_x500(不是 gz_x500_payload),没有 mass_changer 插件
+# 本脚本只启动 gripper 场景:
+#   - 空机 gz_x500(不是 gz_x500_payload),没有质量阶跃插件
 #   - 用 worlds/gripper/gripper_test.sdf(含独立 box + magnetic_gripper world 插件)
 #   - 用 proximity_gripper_node 按接近条件触发 attach
 #   - 用 gripper_flight_node 走 takeoff->goto box->hover->lift 剖面

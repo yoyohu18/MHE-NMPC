@@ -32,8 +32,8 @@ WS="/home/clear/ros2_ws_HJH"
 RUNDIR="$WS/nmpc_test_results"
 OUTDIR="${OUTDIR:-$RUNDIR/residual}"
 
-# 与 run_alpha_only_ablation / run_b4_decoupled_verify 共用同一把锁:三者的 cleanup
-# 是同一组 kill -9 模式,并发会互杀(07-23 实测作废过两批数据)。
+# 与其他 PX4/Gazebo 批处理共用同一把锁:cleanup 是同一组 kill -9 模式,
+# 并发会互杀(07-23 实测作废过两批数据)。
 exec 9>"/tmp/b4dec_verify.lock"
 if ! flock -n 9; then
   echo "[resid] 已有同类批次在跑(锁 /tmp/b4dec_verify.lock),退出。"

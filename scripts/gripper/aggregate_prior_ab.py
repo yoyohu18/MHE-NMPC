@@ -15,13 +15,47 @@
 
 用法: python3 aggregate_prior_ab.py <manifest.txt>
 """
+import re
 import sys
 from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).parent))
-from aggregate_mhe_window import M_TRUE, one_cell  # noqa: E402
+RUNDIR = Path('/home/clear/ros2_ws_HJH/nmpc_test_results')
+M_TRUE = 2.0643 + 0.3
+M_MIN = 1.961
+AW = re.compile(r'\[attach-window\] t=([\d.]+)s pos_err=([\d.]+)m T=([\d.]+)N '
+                r'z=(-?[\d.]+) m_est=([\d.]+)')
+DYN = re.compile(r't=([\d.]+)s \| DYNAMIC: switch to figure8')
+DROP = re.compile(r't=([\d.]+)s \| DROP: released')
+
+
+def one_cell(stamp, ramp, settle):
+    """提取带载稳态段；固定在本检验中，避免依赖已退役的窗口扫描聚合器。"""
+    log = RUNDIR / f'grip_nmpc_{stamp}.log'
+    if not log.exists():
+        return None
+    txt = log.read_text(errors='ignore')
+    dyn = DYN.search(txt)
+    rows = np.array([[float(g) for g in m.groups()] for m in AW.finditer(txt)])
+    if dyn is None or not len(rows):
+        return None
+    t, pe, _, _, me = rows.T
+    selected = t >= (float(dyn.group(1)) + ramp + settle)
+    dropped = DROP.search(txt)
+    if dropped is not None:
+        selected &= t < float(dropped.group(1))
+    if selected.sum() < 20:
+        return None
+    mass = me[selected]
+    q1, q3 = np.percentile(mass, [25, 75])
+    return dict(dropped=dropped is not None,
+                n=int(selected.sum()), med=float(np.median(mass)),
+                iqr=float(q3 - q1), mmin=float(mass.min()),
+                bias_pct=float((np.median(mass) / M_TRUE - 1) * 100),
+                pos_err=float(np.median(pe[selected])),
+                clipped=bool(mass.min() <= M_MIN + 0.0005),
+                failed=txt.count('solve failed'))
 
 DELTA = 1.0          # 等效边界 [百分点]
 # 默认臂名 = run_prior_ab_4ms.sh 的两臂;--base/--test 可覆盖,供同结构的

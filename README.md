@@ -12,18 +12,15 @@
 src/
 ├── offboard_test/            # 基线:CasADi/IPOPT 版 NMPC + 位置 setpoint 节点
 ├── offboard_test_acados/     # acados 版 NMPC 移植 + MHE + 夹爪/吊挂扩展
-│   ├── config/masschanger/, config/gripper/   # 按场景分文件夹
-│   ├── urdf/masschanger/, worlds/gripper/     # 同上
-│   ├── gz_plugins/mass_changer/, gz_plugins/magnetic_gripper/
+│   ├── config/gripper/, urdf/gripper/, worlds/gripper/
+│   ├── gz_plugins/magnetic_gripper/
 │   └── offboard_test_acados/gripper/          # 夹爪专属节点子包
 └── scripts/                  # 一键启动的 SITL 脚本
-    ├── masschanger/           # wrench 质量突变基线的驱动/分析脚本
-    └── gripper/               # 磁吸夹爪吊挂场景的驱动脚本
+    └── gripper/               # 磁吸夹爪场景的驱动/分析脚本
 ```
 
-> `acados_nmpc_node`/`mhe_node` 这两个共享节点服务两条场景线(靠 `drop_*`/`mass_changer` vs
-> `grip_*`/`attach` 命名前缀区分内部逻辑),没有拆分到子目录里；只有各自专属的资源文件
-> (config/urdf/world/scripts)和专属节点(gripper 的 proximity/flight 节点)按场景分了文件夹。
+> 旧 `masschanger` 实验栈已退役并加入 `.gitignore`。仍被夹爪分析使用的通用
+> 日志解析器和 RViz URDF 已迁入 `scripts/gripper/` 与 `urdf/gripper/`。
 
 ---
 
@@ -58,44 +55,32 @@ src/
 
 **配置 / 资源**(按场景分了文件夹)
 - `config/gripper/gripper_params.yaml`、`config/gripper/gripper_bridge.yaml` — 夹爪参数与 ros_gz 桥接(bridge 现已不需要,保留作参考)
-- `config/masschanger/nmpc_view_acados.rviz` — RViz 视图(仅 `run_sitl_acados.sh` 用)
-- `urdf/masschanger/x500.urdf` — RViz 显示用机体模型
+- `config/gripper/nmpc_view_gripper_hifly.rviz` — 夹爪飞行 RViz 视图
+- `urdf/gripper/x500.urdf` — RViz 显示用机体模型
 - `worlds/gripper/gripper_test.sdf` — 夹爪测试世界
 
 **自定义 Gazebo(gz-sim)系统插件** —— 位于 `gz_plugins/`,需单独 CMake 构建:
-- `mass_changer/` — 通过 ECS 直接改写 `base_link` 的 Inertial 组件实现负载质量阶跃(LOADED 2.5kg ↔ EMPTY 2.0kg),不引入任何额外刚体,专为验证 MHE 能否收敛于在线质量变化而设计
 - `magnetic_gripper/` — 磁吸夹爪(DetachableJoint)插件
 
 ---
 
 ## SITL 启动脚本(`scripts/`)
 
-按场景分了 `masschanger/`(wrench 质量突变基线)和 `gripper/`(磁吸夹爪吊挂)两个子目录；
-两条线互相独立(见各脚本头部注释),不共享 world/config。
+当前支持的夹爪场景入口位于 `gripper/`。
 
 | 脚本 | 用途 |
 |------|------|
-| `run_sitl_nmpc.sh` | 基线:PX4 SITL + MAVROS + NMPC(CasADi 版),与两条场景线均无关 |
-| `gcs_heartbeat.py` | 无头模式下顶替 QGC 的 pymavlink GCS 心跳,两条线的 headless 脚本共用 |
-
-**`masschanger/`**
-
-| 脚本 | 用途 |
-|------|------|
-| `run_sitl_acados.sh` | acados 全栈(GUI):PX4 SITL(gz_x500_payload,含 mass_changer 插件)+ MAVROS + QGC + RViz + `acados_nmpc_node` + `plot_logger_acados` + `mhe_node` + TF/桥接 |
-| `run_sitl_headless.sh` | 同上的无头批量版(无 GUI/QGC/RViz),批量实验用 |
-| `sitl_cem_optimize.py` | 调用 `run_sitl_headless.sh` 做 SITL 在环 CEM 优化(MHE 事件权重时间表) |
-| `parse_m0_logs.py` / `parse_dropwindow_logs.py` | 分别解析 mhe/nmpc 日志的估计层/控制层指标 |
-| `aggregate_m0m1_stats.py` | 汇总多轮统计(依赖上面两个 parse 脚本) |
+| `run_sitl_nmpc.sh` | 基线:PX4 SITL + MAVROS + NMPC(CasADi 版),与夹爪场景无关 |
+| `gcs_heartbeat.py` | 无头模式下顶替 QGC 的 pymavlink GCS 心跳 |
 
 **`gripper/`**
 
 | 脚本 | 用途 |
 |------|------|
 | `run_sitl_gripper.sh` | 磁吸夹爪 attach 演示 SITL(纯位置 setpoint,不接 acados NMPC) |
-| `run_sitl_gripper_acados.sh` | acados 版夹爪场景 SITL(GUI) |
 | `run_gripper_headless.sh` | 同上的无头批量版,吊挂 CEM 学习的批量驱动底座 |
-| `run_gripper_ecc_sweep.sh` | 交互式单点复测:扫横向偏心 ry,验证坏几何下的估计器修复 |
+| `run_sitl_gripper_viz.sh` | 当前主配置的 Gazebo + RViz GUI 入口 |
+| `run_cxy_ecc_sweep.sh` | 横向偏心批量扫描 |
 
 > 各脚本头部有详细的设计说明与注意事项(如 Gazebo headless、负载质量阶跃的实现取舍等),运行前建议先阅读。
 
@@ -123,7 +108,7 @@ source install/setup.bash
 
 # 另需单独构建 gz 自定义插件(见 gz_plugins/*/ 内的 build/)
 # 然后运行对应的 SITL 脚本,例如:
-./src/scripts/masschanger/run_sitl_acados.sh
+./src/scripts/gripper/run_sitl_gripper_viz.sh
 ```
 
 ---

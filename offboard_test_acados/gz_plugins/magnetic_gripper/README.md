@@ -13,7 +13,9 @@
 - `../../config/gripper/gripper_bridge.yaml` —— ros_gz_bridge 配置(**现已不需要**,保留作参考;见 §4.2)。
 - `../../worlds/gripper/gripper_test.sdf` —— 含 x500 spawn 位 + 一个 box + 全套 PX4 system 插件的测试 world。
 - `../../../scripts/gripper/run_sitl_gripper.sh` —— 一键跑"裸 MAVROS 控制 + 夹爪"完整演示。
-- `../../../scripts/gripper/run_sitl_gripper_acados.sh` —— 一键跑"acados NMPC + MHE + 夹爪"重载实验(`acados_nmpc_node` 的 `gripper_mode`)。
+- `../../../scripts/gripper/run_sitl_gripper_viz.sh` —— 一键跑当前主配置的
+  "acados NMPC + MHE + 夹爪" GUI 实验。
+- `../../../scripts/gripper/run_gripper_headless.sh` —— 同一飞行栈的无头/批量入口。
 
 > **先看结论**:100g 载荷下整套 pick→carry→hover→drop 完全跑通、飞行稳定;
 > **0.3kg 及以上,acados NMPC + MHE 也压不住会发散**——原因不是质量,是吊挂的
@@ -36,7 +38,7 @@
 2. **它是 model 级插件,parent 永远是宿主模型**:一个实例只能服务一对
    (parent, child)。表达不了"一个夹爪按需换目标"。
 
-还有一条更重要的、来自本栈的历史教训(见 `run_sitl_acados.sh` 注释):自带
+还有一条更重要的、来自旧实验栈的历史教训:自带
 system 在 **Configure(加载即)** 阶段就把 child 焊上去。**一个从 t=0 就存在
 的 fixed joint,会把无人机焊到一个搁在地面/远处的物体上**,起飞时控制器去对
 抗这个"把机体拽向接地点"的约束 → 进入 ~5.6s 周期、roll/pitch 20–37°、推力饱
@@ -228,7 +230,7 @@ gz topic -t /gripper/detach -m gz.msgs.StringMsg \
 
 ## 7. 一键演示脚本
 
-两个脚本都在仓库根目录,都自带**启动前清理**(杀掉上一次残留的 gz/px4/节点 ——
+上述脚本都自带**启动前清理**(杀掉上一次残留的 gz/px4/节点 ——
 不清会踩两个坑:① px4-rc.gzsim 检测到"已有 world 在跑"直接接旧 gz 服务器,新
 PX4 的 EKF 和实际 gz 无人机脱节;② 残留的旧飞行/接近节点和新节点抢同一架无人机
 的 setpoint / 反复 enable-disable 把 box churn 得吸了又松)。
@@ -245,7 +247,7 @@ takeoff → 飞到 box 上方 → 接近节点吸附 → 平滑抬升带载悬�
 - DROP 阶段发 `enable=False`(不是发一次 `/gripper/release`)——飞行节点持续发
   `enable=True` 会把单次 release 顶掉、box 立刻被重抓。
 
-### 7.2 `run_sitl_gripper_acados.sh` —— acados NMPC + MHE + 夹爪(重载实验)
+### 7.2 `run_sitl_gripper_viz.sh` / `run_gripper_headless.sh` —— acados NMPC + MHE + 夹爪
 
 空机 `gz_x500` 由 `acados_nmpc_node`(姿态+推力控制)飞,`gripper_mode:=true`:
 空机起飞 → 低空悬停到 box 上方 → 吸附 → 定时抬升离地 → MHE 用电机转速反算真实

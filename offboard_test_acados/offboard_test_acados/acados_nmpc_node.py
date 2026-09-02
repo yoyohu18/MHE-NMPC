@@ -2338,10 +2338,9 @@ class AcadosNMPCNode(Node):
 
         # gripper 版事件段逐帧记录:门槛用 self.attach_time(_grip_mass_step 记
         # 下的 nmpc_time 浮点秒,不是 ROS Time,不用转纳秒)。字段与 [drop-window]
-        # 完全一致,parse_dropwindow_logs.py 用同一份正则解析两种 tag。窗口时长
-        # 用 attach_window_sec 参数(默认 40s),不复用 [drop-window] 的 8.0s——
-        # gripper attach 瞬态更长。供离线分析脚本(aggregate_b4_matrix.py /
-        # aggregate_alpha_only.py)的控制层指标解析用。
+        # 完全一致,便于离线工具用同一正则解析两种 tag。窗口时长用
+        # attach_window_sec 参数(默认 40s),不复用 [drop-window] 的 8.0s——
+        # gripper attach 瞬态更长。
         # (原文写"供 CEM 学习脚本 grip_cem_optimize.py 用",该脚本已于 2026-07-31
         #  随 CEM 删除;这段 [attach-window] 日志本身仍是所有 A/B 分析的数据源。)
         if self.gripper_mode and self.attach_time is not None:

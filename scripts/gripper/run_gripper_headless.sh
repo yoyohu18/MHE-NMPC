@@ -1,22 +1,28 @@
 #!/bin/bash
-# 吊挂夹爪场景的全无头启动器(2026-07-07):跟 masschanger/run_sitl_headless.sh 是同一套
-# 无头模式(不开任何 gnome-terminal/QGC,GCS 心跳用 gcs_heartbeat.py 顶替),
+# 吊挂夹爪场景的全无头启动器(2026-07-07):不开任何
+# gnome-terminal/QGC,GCS 心跳用 gcs_heartbeat.py 顶替,
 # 但载具换成 gripper/attach(空机 gz_x500 + magnetic_gripper + DetachableJoint
 # 真刚体),不是 wrench(mass_changer)。这是给吊挂 CEM 学习(长期计划 §阶段B
 # 步骤2)准备的批量驱动底座——今天(坏几何复测)已经验证过 dJ/c_xy + 棘轮修复
 # 在物理可行偏心范围内(~0.05-0.12m)稳定可靠,可以放心当训练场用。
 #
-# 接口跟 masschanger/run_sitl_headless.sh 保持一致(环境变量,不是位置参数),方便以后
-# 写 CEM 驱动脚本时直接复用同一种 subprocess.Popen(env=...) 调用方式:
+# 对外接口统一使用环境变量(不是位置参数),方便批量驱动脚本用
+# subprocess.Popen(env=...) 调用:
 #   GRIP_PAYLOAD_KG    载荷质量 kg (默认 0.3)
 #   GRIP_ECC_Y         横向偏心 m,即 grip_y (默认 0.05)——box 固定在世界系
 #                      (1.0,0.0),grip_y 是悬停目标,两者之差就是 attach 偏心
-#                      (方法见 run_gripper_ecc_sweep.sh 文件头)
+#                      (扫描入口见 run_cxy_ecc_sweep.sh)
 #   MHE_EVENT_TRIGGER  事件触发开关 (默认 true)
 #   MHE_SCHEDULE_THETA 权重时间表 5 维 (默认 M0 规则版)
 #   MHE_CONFIRM_THRESH 确认阈值 [N] (默认 1.5——⚠️这个值是给 wrench 的 gz CLI
 #                      冷启动延迟调的,gripper attach 物理瞬时生效,不能直接沿用,
 #                      需要针对 gripper 重新标定,这里只是占位默认值)
+#
+# 默认事件链与 run_sitl_gripper_viz.sh 的无信号主线一致:
+#   DROP_PUBLISH_MASS_EVENT=false  NMPC_GEOM_RELEASE_MODE=event
+#   MHE_SIGNAL_MODE=residual       MHE_GEOM_RELEASE_MODE=self
+#   MHE_CXY_MASS_RELEASE_MP=0.03
+# 需要复现旧的外部事件档时仍可通过同名环境变量显式覆盖。
 #
 # 高机动消融(2026-07-29 新增,默认值全部保持历史行为、老批次逐字节复现):
 #   GRIP_DYN_R/W       带载 8 字的半径与角速率 (默认 0.8/0.25,峰值速度仅
@@ -50,8 +56,7 @@
 #      0.79 早已超阈)。提速不改变这个机制,c_xy 仍在 lift 后的悬停窗口收敛并
 #      EMA 冻结——但论文里"在线估计"的表述要写准。
 #
-# 与 run_gripper_ecc_sweep.sh 的差异:那个是交互式单点复测(GUI+QGC,慢但直观);
-# 这个是无头批量驱动(零桌面渲染负担),CEM/批量对比实验用这个。
+# GUI 可视化请用 run_sitl_gripper_viz.sh；批量对比实验用本脚本。
 set -e
 
 GRIP_PAYLOAD_KG="${GRIP_PAYLOAD_KG:-0.3}"
@@ -292,7 +297,7 @@ nohup ros2 run offboard_test_acados acados_nmpc_node --ros-args \
     -p grip_lift_hold_dz:=$GRIP_LIFT_HOLD_DZ_D \
     -p grip_lift_hold_sec:=$GRIP_LIFT_HOLD_SEC_D \
     -p dj_track_mest:=$(_b "${DJ_TRACK_MEST:-true}") \
-    -p drop_publish_mass_event:=$(_b "${DROP_PUBLISH_MASS_EVENT:-true}") \
+    -p drop_publish_mass_event:=$(_b "${DROP_PUBLISH_MASS_EVENT:-false}") \
     -p grip_mp_cap:=$GRIP_MP_CAP_D \
     -p grip_dj_floor_mp:=$GRIP_DJ_FLOOR_MP_D \
     -p dj_ratchet_enable:=$(_b "${DJ_RATCHET:-false}") \
@@ -410,15 +415,15 @@ fi
 nohup ros2 run offboard_test_acados mhe_node --ros-args \
     "${RESID_ARG[@]}" \
     -p motor_speed_topic:=/x500_0/command/motor_speed \
-    -p event_signal_mode:=${MHE_SIGNAL_MODE:-external} \
+    -p event_signal_mode:=${MHE_SIGNAL_MODE:-residual} \
     -p event_trigger_enable:=${MHE_EVENT_TRIGGER:-true} \
     -p schedule_theta:="${MHE_SCHEDULE_THETA:-[-4.0,0.0,0.0,0.0]}" \
     -p event_confirm_thresh_n:=$MHE_CONFIRM_THRESH_D \
     -p confirm_thresh_alpha:=${MHE_CONFIRM_ALPHA:--1.0} \
     -p grip_payload_envelope:=$MHE_PAYLOAD_ENVELOPE_D \
     -p eval_true_payload_mass:=$EVAL_TRUE_PAYLOAD_D \
-    -p geom_release_mode:=${MHE_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-event}} \
-    -p c_xy_mass_release_mp:=${MHE_CXY_MASS_RELEASE_MP:-0.0} \
+    -p geom_release_mode:=${MHE_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-self}} \
+    -p c_xy_mass_release_mp:=${MHE_CXY_MASS_RELEASE_MP:-0.03} \
     -p c_xy_mass_release_persist:=${MHE_CXY_MASS_RELEASE_PERSIST:-20} \
     -p c_xy_mass_arm_ratio:=${MHE_CXY_MASS_ARM_RATIO:-3.0} \
     -p c_xy_mass_arm_persist:=${MHE_CXY_MASS_ARM_PERSIST:-20} \
@@ -452,5 +457,7 @@ nohup ros2 run offboard_test_acados mhe_node --ros-args \
 
 echo "gripper headless stack up: nmpc=$NODE_LOG mhe=$MHE_LOG"
 echo "  payload=${GRIP_PAYLOAD_KG}kg ecc_y=${GRIP_ECC_Y}m r_xy=$R_XY"
-echo "  event=${MHE_EVENT_TRIGGER:-true} theta=${MHE_SCHEDULE_THETA:-M0} confirm_thresh=${MHE_CONFIRM_THRESH:-1.5}"
+echo "  event_trigger=${MHE_EVENT_TRIGGER:-true} signal=${MHE_SIGNAL_MODE:-residual} drop_publish=${DROP_PUBLISH_MASS_EVENT:-false}"
+echo "  geom_release: NMPC=${NMPC_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-event}} MHE=${MHE_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-self}} cxy_release_mp=${MHE_CXY_MASS_RELEASE_MP:-0.03}"
+echo "  theta=${MHE_SCHEDULE_THETA:-M0} confirm_thresh=${MHE_CONFIRM_THRESH:-1.5}"
 echo "  payload_envelope=${GRIP_PAYLOAD_ENVELOPE:-0.5}kg (机架规格; 任务信息型质量先验已于 2026-08-26 全部删除)"
