@@ -9,6 +9,20 @@
 # 大 8 字会顶出原配置那个 ±5m 默认网格、Distance:12 也框不住,故单独一份
 # (网格 24m、Distance 26、焦点挪到 attach 中心 x=1),masschanger 共用那份不动。
 #
+# ★★ 2026-09-02:默认工作点整体换成**无信号主线 = 演示视频 20260901_141240 那轮**
+#    (原样照抄 run_cxy_mass_repeat.sh 的环境变量)。改了两组东西:
+#      工况   0.15kg/包线 0.3 / r=10 w=0.283 z=6.0 lift 8.4 ramp 9.36  (4m/s 工作点)
+#      机制   事件不发(DROP_PUBLISH_MASS_EVENT=false) + MHE residual +
+#             MHE 几何 self 档 + 质量域卸载判据 0.03kg + α=1.5(阈值 4.4N)
+#    语义 = 三条给估计器的信息通道全堵死,drop 只由质量域判据检出(实测 +3.35s)。
+#    ⚠️ r 与 z 必须配套:r=10 在 z=2.5 会必然发散坠毁(记忆 high-maneuver-ablation),
+#       只改一个是危险的。
+#    回到 2026-09-01 之前的旧默认(2m/s 工作点 + 有信号 event 主线),整行覆盖:
+#      GRIP_PAYLOAD_KG=0.3 GRIP_PAYLOAD_ENVELOPE=0.5 GRIP_DYN_R=5.0 GRIP_DYN_RAMP=3.0 \
+#      GRIP_Z_HIGH=2.5 GRIP_LIFT_DUR=3.0 DROP_PUBLISH_MASS_EVENT=true \
+#      MHE_SIGNAL_MODE=external MHE_GEOM_RELEASE_MODE=event MHE_CXY_MASS_RELEASE_MP=0 \
+#      MHE_CONFIRM_ALPHA=-1 bash src/scripts/gripper/run_sitl_gripper_viz.sh
+#
 # 用法:  [GRIP_PAYLOAD_KG=0.3 GRIP_ECC_Y=0.10 METHOD=thetastar GRIP_DYN_R=5.0 \
 #          GRIP_DYN_W=0.283 GRIP_DYN_DZ=0.8 GRIP_DROP_AFTER=55.0 \
 #          GRIP_DROP_AT_TIP=true GRIP_DYNAMIC=true \
@@ -17,7 +31,7 @@
 #        GRIP_DYN_DZ=0 可退回原来的平面 8 字。
 # 收栈:关掉各 gnome-terminal 窗口即可;或 pkill -9 -f 'px4_sitl|gz sim|mhe_node|...'。
 
-PAYLOAD_KG="${GRIP_PAYLOAD_KG:-0.3}"
+PAYLOAD_KG="${GRIP_PAYLOAD_KG:-0.15}"   # 09-02: 0.3 -> 0.15(演示轮载荷)
 ECC_Y="${GRIP_ECC_Y:-0.10}"
 METHOD="${METHOD:-M0}"                 # M0 | thetastar
 # ⚠️2026-07-31:默认从 thetastar 改为 M0。M0 才是主线部署配置
@@ -38,9 +52,11 @@ METHOD="${METHOD:-M0}"                 # M0 | thetastar
 # 只有高速档(w≥0.663)才该用 -1,且那时真正生效的是 auto 里 base=4.0 的下限。
 # ⚠️ 改 RAMP **不影响** drop 的 tip 相位:8 字相位 a=w·tc 从 hover 结束就推进,
 # alpha 只缩放幅值不改相位(下面 DROP_AFTER 的推导因此不含 ramp 项)。
-DYN_R="${GRIP_DYN_R:-5.0}"
+DYN_R="${GRIP_DYN_R:-10.0}"    # 09-02: 5.0 -> 10.0(4m/s 工作点,必配 Z_HIGH=6.0)
 DYN_W="${GRIP_DYN_W:-0.283}"
-DYN_RAMP="${GRIP_DYN_RAMP:-3.0}"
+# ★ 09-02: 3.0 -> 9.36 —— r 翻倍后 v_peak 到 4m/s,起振冲击也翻倍,取 auto 在
+# w=0.283 下要的那个值(上面算过 9.37s),与演示轮/run_cxy_mass_repeat 一致。
+DYN_RAMP="${GRIP_DYN_RAMP:-9.36}"
 # 立体 8 字的高度起伏 dz[m](2026-07-30):右叶抬高 dz、左叶压低 dz,交叉点等高
 # (裸机 fig8 一直是 dz=0.5,带载这条原来写死平面 dz=0.0)。**节点默认仍是 0.0**
 # 保历史批次不变,只有这个可视化脚本默认开成 0.8。
@@ -76,12 +92,20 @@ DJ_TRACK=$(_b "${DJ_TRACK_MEST:-true}")
 # 载荷**意外**脱落看门狗(2026-08-30,与 headless 同名同默认)。演示视频用
 # MHE_PAYLOAD_LOST_WATCH=1 打开;计划内 drop 不走这条路,见 payload-lost-watchdog。
 PL_WATCH=$(_b "${MHE_PAYLOAD_LOST_WATCH:-false}")
-# 模型 dJ 的下界载荷质量 kg。棘轮从 0 起步而 attach 时 dJ 按包线算,第一步必然
-# 往下打一次;地板保证它不掉到空机惯量附近。设 0 = 裸棘轮(旧行为)。
-DJ_FLOOR_MP_D=$(_f2dv "${GRIP_DJ_FLOOR_MP:-0.15}")
+# 模型 dJ 的下界载荷质量 kg。attach 时 dJ 从 0 起步,地板保证它不掉到空机惯量
+# 附近。★ 2026-09-02 默认 0.15 → 0.05,与 DJ_RATCHET 默认翻 false 配套(见下)
+# ——0.15 和最小实验载荷同量级,会把 0.15kg 工况的 m_p_model 整个钉死在地板上。
+DJ_FLOOR_MP_D=$(_f2dv "${GRIP_DJ_FLOOR_MP:-0.05}")
+# 模型 dJ 走棘轮(只增不减)还是双向跟随 m_est。★ 2026-09-02 默认 true → false:
+# run_dj_ratchet_ab.sh 的 n=7 配对 A/B 判棘轮在带载段是不受控的正偏差补偿器,
+# 关掉后 dJ 稳态误差 +26.9% → +5.5%,7/7 同向 p=.0156(记忆 mass-domain-
+# payload-release)。代价 = dJ 跟着 m_est 抖,小载荷下差分放大 ~7.9×。
+# 增益侧不受影响,永远用棘轮峰值("必须够大"语义)。
+DJ_RATCHET_D=$(_b "${DJ_RATCHET:-false}")
 # drop 时是否把 mass_event 发给 MHE。false = 让 MHE 自己从 T_phys 残差看出来
 # (须配 MHE_SIGNAL_MODE=residual)。默认 true = 历史行为。
-DROP_PUB_EVENT=$(_b "${DROP_PUBLISH_MASS_EVENT:-true}")
+# ★ 09-02 默认 true -> false:无信号主线不给 MHE 发 drop 事件。
+DROP_PUB_EVENT=$(_b "${DROP_PUBLISH_MASS_EVENT:-false}")
 MP_CAP_D=$(_f2dv "${GRIP_MP_CAP:-0.6}")
 # ===== 几何-质量耦合档(2026-08-31 起默认开)=====
 # MHE 的几何槽从 [dJ,cx,cy](窗外算好的常参数,∂(J,c)/∂m≡0)换成可测杆臂
@@ -119,8 +143,9 @@ MG_VEL_D=$(_f2dv "${MHE_MG_VEL:-0.20}")
 MG_CAP_D=$(_f2dv "${MHE_MG_CAP:-10000.0}")
 MG_EXP_D=$(_f2dv "${MHE_MG_EXP:-2.0}")
 
-Z_HIGH="${GRIP_Z_HIGH:-2.5}"
-LIFT_DUR="${GRIP_LIFT_DUR:-3.0}"
+# ★ 09-02: z 2.5 -> 6.0、lift_dur 3.0 -> 8.4(4m/s 工作点;r=10 在 z=2.5 必发散)
+Z_HIGH="${GRIP_Z_HIGH:-6.0}"
+LIFT_DUR="${GRIP_LIFT_DUR:-8.4}"
 
 # drop 时机(2026-07-15 立、07-30 随 w 重算):grip_drop_after_sec 是"lift 完成后
 # 最早可丢"的门槛,真正丢的时刻由 acados_nmpc_node._grip_drop_phase 的
@@ -159,7 +184,7 @@ ECC_Y_D=$(_f2d "$ECC_Y"); PAYLOAD_KG_D=$(_f2d "$PAYLOAD_KG")
 #   cap 5.0),数值精度从未被使用。
 #   ⚠️ 轻载(0.15/0.2kg)裸 ratio 只有 3.18/3.84 不在 cap 里,换包线是**真的**改
 #      整定,必须实测过增益/高频振荡才能采信。
-PAYLOAD_ENVELOPE_D=$(_f2d "${GRIP_PAYLOAD_ENVELOPE:-0.5}")
+PAYLOAD_ENVELOPE_D=$(_f2d "${GRIP_PAYLOAD_ENVELOPE:-0.3}")   # 09-02: 0.5 -> 0.3
 ATTACH_WINDOW_SEC_D=$(_f2d "${ATTACH_WINDOW_SEC:-40.0}")
 BOX_I=$(python3 -c "print(f'{$PAYLOAD_KG * 0.00375:.6f}')")
 # 抓取偏心上限 [m] = 设计偏心 ECC_Y + 容差。**不是**"够得着"的判据,而是
@@ -178,7 +203,11 @@ R_XY=$(python3 -c "print(f'{$ECC_Y + $GRIP_ATTACH_TOL:.3f}')")
 if [ "$METHOD" = thetastar ]; then
   THETA="[-4.8038,-1.2080,0.4930,-0.9602,0.9875]"; CALPHA="0.9875"
 else
-  THETA="[-4.0,0.0,0.0,0.0]"; CALPHA="-1.0"
+  # ★ 09-02: CALPHA -1.0(固定 1.5N) -> 1.5(= α·g·envelope = 4.4N @0.3kg 包线)。
+  # 抬高阈值是**故意**的:0.15kg 卸载才 ~1.47N,4.4N 等于把残差检测这条路堵死,
+  # 逼 drop 只能由质量域判据检出 —— 这正是无信号主线要展示的东西。
+  # ⚠️ 阈值随 GRIP_PAYLOAD_ENVELOPE 联动:覆盖成 0.5 时阈值变 7.36N。
+  THETA="[-4.0,0.0,0.0,0.0]"; CALPHA="1.5"
 fi
 # 确认阈值 = α·g·grip_payload_envelope(CALPHA<0 时走固定 event_confirm_thresh_n)。
 # 2026-08-26 前这里是 MHE_CONFIRM_PRIOR(默认回落到 $PAYLOAD_KG = box 真值)。
@@ -335,7 +364,7 @@ nohup bash -c "source /opt/ros/jazzy/setup.bash && source '$WS/install/setup.bas
     -p grip_lift_hold_dz:=$LIFT_HOLD_DZ_D -p grip_lift_hold_sec:=$LIFT_HOLD_SEC_D \
     -p dj_track_mest:=$DJ_TRACK -p grip_mp_cap:=$MP_CAP_D \
     -p grip_dj_floor_mp:=$DJ_FLOOR_MP_D \
-    -p dj_ratchet_enable:=$(_b "${DJ_RATCHET:-true}") \
+    -p dj_ratchet_enable:=$DJ_RATCHET_D \
     -p drop_publish_mass_event:=$DROP_PUB_EVENT \
     -p geom_source:=online -p grip_payload_envelope:=$PAYLOAD_ENVELOPE_D \
     -p geom_release_mode:=${NMPC_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-event}} \
@@ -373,8 +402,8 @@ nohup bash -c "source /opt/ros/jazzy/setup.bash && source '$WS/install/setup.bas
     -p grip_payload_envelope:=$PAYLOAD_ENVELOPE_D -p c_xy_est_enable:=true \
     -p c_xy_from_moment:=$C_XY_FROM_MOMENT \
     -p eval_true_payload_mass:=$PAYLOAD_KG_D \
-    -p geom_release_mode:=${MHE_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-event}} \
-    -p c_xy_mass_release_mp:=${MHE_CXY_MASS_RELEASE_MP:-0.0} -p c_xy_mass_release_persist:=${MHE_CXY_MASS_RELEASE_PERSIST:-20} -p c_xy_mass_arm_ratio:=${MHE_CXY_MASS_ARM_RATIO:-3.0} -p c_xy_mass_arm_persist:=${MHE_CXY_MASS_ARM_PERSIST:-20} -p event_signal_mode:=${MHE_SIGNAL_MODE:-external}" \
+    -p geom_release_mode:=${MHE_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-self}} \
+    -p c_xy_mass_release_mp:=${MHE_CXY_MASS_RELEASE_MP:-0.03} -p c_xy_mass_release_persist:=${MHE_CXY_MASS_RELEASE_PERSIST:-20} -p c_xy_mass_arm_ratio:=${MHE_CXY_MASS_ARM_RATIO:-3.0} -p c_xy_mass_arm_persist:=${MHE_CXY_MASS_ARM_PERSIST:-20} -p event_signal_mode:=${MHE_SIGNAL_MODE:-residual}" \
   > "$MHE_LOG" 2>&1 &
 
 echo "All components up. Gazebo GUI = 物理飞行; RViz = 控制端跟踪。"

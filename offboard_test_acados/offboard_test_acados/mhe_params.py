@@ -227,6 +227,28 @@ class MHEParams:
     # r_z 弱先验 [m](载荷挂在机体下方的深度)。只进 μ·r_z² 与非对角项,实测
     # ±33% 误差对质量估计零影响,所以给个档位标称值就够,不需要测。
     rz_prior = float(os.environ.get('MHE_RZ_PRIOR', '-0.47'))
+    # --- A 项(μ·r_z² 对角惯量增量)的质量依赖开关(2026-09-02)---
+    # 动机(离线实测):moment 档把 c_xy 从 m 解耦之后,幽灵几何**还留着第二个杠杆**
+    # —— A=μ·r_z²=(m_B·m_P/m_T)·r_z² 仍以 m_P 为线性因子。drop 后模型里残留杆臂
+    # 产生的幽灵滚转角加速度 ≈ c_y·T/J_xx(m):分子有界(|c_xy|≤r_xy),分母随 m_P
+    # 线性涨(r_z²=0.22 是 J_xx=0.0142 的 15 倍量级),于是**抬高 m 能把幽灵力矩
+    # 稀释掉**。离线 0.3kg self 档实测 drop 后 m̂ 爬到 3.17kg(+53%)并停住,宁可
+    # 吃平动通路 −3.4m/s² 的矛盾也要压 ω 残差 —— 与 SITL 里往下撞 m_min 是同一
+    # 个病的两个出口:m 被拿去当几何旋钮。
+    #   'coupled'(默认,历史行为):A 随被估 m_P 变化。
+    #   'const' :A 由**载荷包线上界**算成常数(与 2026-08-26 去先验改造同一口径
+    #            ——包线是机架规格,不是任务信息),∂A/∂m≡0,杠杆消失。
+    #   'zero'  :A≡0(纯诊断用,量"A 项到底贡献多少")。
+    #   'frozen':A 由**上一窗口解出的 m̂**(经 geom[0] 当参数喂进来)现算。窗口内
+    #            ∂A/∂m≡0 → 杠杆同样断掉,但 A 的**数值**仍跟着真实质量走,不像
+    #            'const' 那样被包线钉死(0.15kg 载荷配 0.3kg 包线 = A 过估 2×)。
+    #            动机:coupled 档 94% 的质量信息来自转动通路,'const' 把 A 冻在
+    #            错误值上,SITL smoke 实测带载 m̂ 偏到 −3.58%(现状 +0.4%),还连带
+    #            把质量域释放判据推成误触发(早于真 drop 50s)。
+    moment_a_mode = os.environ.get('MHE_MOMENT_A_MODE', 'coupled')
+    # 载荷质量包线上界 [kg](机架规格,非任务信息)。只在 moment_a_mode='const'
+    # 下用来算那个常数 A;口径与 gripper 侧 grip_payload_envelope 一致。
+    mp_envelope = float(os.environ.get('MHE_MP_ENVELOPE', '0.5'))
     # s 的箱约束:|s| <= m_P_max * r_max。给宽松值,只防优化器跑飞。
     s_abs_max = float(os.environ.get('MHE_S_ABS_MAX', '1.5'))
     # O(r_xy²) 项分母的正则化 [kg],防 m_P→0 时 0/0。
@@ -284,9 +306,15 @@ class MHEParams:
         (1e-6 if no_mass_prior else 0.1),
     ])
     if estimate_moment:
-        # s 的到达代价:σ_s=0.1 kg·m → 权重 100。带载典型值 m_P·r_y≈0.3*0.14=0.042,
-        # 所以 0.1 已是"很弱的锚"(2.4 倍典型值),drop 后不拖累 s 归零。
-        Q0 = np.diag(np.concatenate([np.diag(Q0), [1/0.1**2, 1/0.1**2]]))
+        # s 的到达代价 σ_s [kg·m]。默认 0.1 = 很弱的锚。
+        # ⚠️ 2026-09-02 n=8 A/B 实测:0.15kg/ecc0.10 工况下带载 |s| 真值只有
+        # 0.0060,σ_s=0.1 是它的 17 倍 = 实质无先验,结果 s 估到 0.0236(**高估 4×**)
+        # —— s 在吸收本不属于它的残差(未建模力矩/推力标定),顺带把 m̂ 拖低 3.83%
+        # (8/8 同向 p=0.0078)。收紧它是想把被 s 抢走的信息还给 m。
+        # ⚠️ 收太紧的风险在另一头:drop 后 s 要能自由归零,锚太强会拖慢熄灭
+        #    → 触界可能回来。这是本旋钮的取舍两端,要一起看。
+        sigma_s0 = float(os.environ.get('MHE_SIGMA_S0', '0.1'))
+        Q0 = np.diag(np.concatenate([np.diag(Q0), [1/sigma_s0**2, 1/sigma_s0**2]]))
 
     nx_aug = nx + nm + ns   # 14(仅估质量) 或 16(+一阶质量矩)
     nw = nx + (nm + ns if param_noise else 0)

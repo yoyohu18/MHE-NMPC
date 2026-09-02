@@ -32,7 +32,8 @@ from .mhe_params import p as mhe_p
 # codegen 目录/json 名都由 MODEL_NAME 派生(见 mhe_solver_builder),耦合档必须
 # 带后缀,否则两档共用一份生成代码 → 互相覆盖(与 MHE_N 已知的并发坑同类)。
 _SUF = '_pnoise' if mhe_p.param_noise else ''
-MODEL_NAME = (('offboard_test_acados_mhe_moment' + _SUF) if mhe_p.estimate_moment
+_AM = ('' if mhe_p.moment_a_mode == 'coupled' else '_a' + mhe_p.moment_a_mode)
+MODEL_NAME = (('offboard_test_acados_mhe_moment' + _AM + _SUF) if mhe_p.estimate_moment
               else ('offboard_test_acados_mhe_coupled' + _SUF) if mhe_p.geom_coupled
               else ('offboard_test_acados_mhe' + _SUF))
 
@@ -92,7 +93,31 @@ def build_mhe_model() -> AcadosModel:
         dm = m_ - mhe_p.m_B
         m_p = 0.5 * (dm + cs.sqrt(dm * dm + mhe_p.mp_pos_eps ** 2))
         c_sym = s_ / m_                       # 复合质心水平偏移
-        A = (mhe_p.m_B * m_p / m_) * rz ** 2                    # μ·r_z²
+        # A=μ·r_z²。三档见 mhe_params.moment_a_mode:'coupled' 保持历史行为
+        # (随被估 m_P);'const' 用包线上界算成常数,切掉"抬高 m 稀释幽灵力矩"
+        # 这条杠杆;'zero' 纯诊断。
+        if mhe_p.moment_a_mode == 'zero':
+            A = cs.MX.zeros(1)
+        elif mhe_p.moment_a_mode == 'frozen':
+            # geom[0] 在 moment 档是空闲槽(O(r_xy²) 项已丢弃,模型不用 r_x),
+            # 借来传上一窗口的 m̂。窗口内它是常参数 → 优化器动不了 A,
+            # 但每帧刷新 → A 的数值跟着质量走。m̂ 尚未就绪(=0)时退回 m_B。
+            m_frz = cs.if_else(geom[0] > 0.1, geom[0], mhe_p.m_B)
+            _dmf = m_frz - mhe_p.m_B
+            m_p_frz = 0.5 * (_dmf + cs.sqrt(_dmf * _dmf + mhe_p.mp_pos_eps ** 2))
+            A = cs.if_else(cs.fabs(rz_ext) > 1e-6,
+                           (mhe_p.m_B * m_p_frz / m_frz) * rz ** 2, 0.0)
+        elif mhe_p.moment_a_mode == 'const':
+            # 幅值由包线定,**存在性**仍由 geom 槽的 r_z 门控:attach 之前几何槽
+            # 恒为零(那是合法的已知信息,不违反 'self' 的"不被告知 drop"语义),
+            # 此时不该凭空背一份常数惯量。drop 之后槽里留着 r_p_last,A 保持常数
+            # —— 这正是要的:让 s 去表达"载荷没了",不再借道 m。
+            _mpe = mhe_p.mp_envelope
+            A = cs.if_else(cs.fabs(rz_ext) > 1e-6,
+                           (mhe_p.m_B * _mpe / (mhe_p.m_B + _mpe)) * rz ** 2,
+                           0.0)
+        else:
+            A = (mhe_p.m_B * m_p / m_) * rz ** 2                # μ·r_z²
         Bx = (mhe_p.m_B / m_) * s_[0] * rz                      # μ·r_x·r_z
         By = (mhe_p.m_B / m_) * s_[1] * rz                      # μ·r_y·r_z
         # O(r_xy²) 项(μr_x²、μr_y²、μr_xr_y)**故意丢弃**,置零。

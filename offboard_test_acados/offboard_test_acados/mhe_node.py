@@ -1663,20 +1663,32 @@ class MHENode(Node):
             # 本来就是"缺了 ∂(J,c)/∂m 这条导数通路"的补丁,用来稳住那条外层
             # 不动点迭代;它们已于 2026-08-26 全部删除)。
             geom = self._model_r_p()
+            r_p_log = geom            # 日志/几何存在性判据一律看原始杆臂
             # ⚠️ 仅供日志/诊断,**不是模型用的值**:模型内部按每次求解的被估质量
             # 现算 J(m)/c(m);这里是拿"上一次的 m_est"代入同一套代数,好让日志有个
             # 可读的当量。attach 那一帧 m_est 还≈m_B,所以会显示 dJ=0/c=0——那不
             # 代表几何没生效,只代表此刻的质量估计还没涨上来。
             dJ, c_xy = self._geometry_from_m(self.m_est, geom)
+            if mhe_p.estimate_moment and mhe_p.moment_a_mode == 'frozen':
+                # A=μr_z² 用**上一窗口的 m̂** 现算(见 mhe_params.moment_a_mode)。
+                # geom[0] 在 moment 档是空闲槽:模型丢弃了 O(r_xy²) 项,用不到 r_x。
+                # 借它传 m̂ → 窗口内 ∂A/∂m≡0(优化器不能拿 m 当惯量旋钮),但 A 的
+                # 数值每帧跟着质量刷新,不必被包线钉死。
+                geom = np.asarray(geom, dtype=float).copy()
+                geom[0] = float(self.m_est)
+                # ⚠️ 借槽之后 geom[0] 恒非零,不能再拿它判"几何在不在"(会恒 True),
+                # 日志与 _geom_on 都改看原始杆臂。
+                r_p_log = self._model_r_p()
         else:
             if self._payload_attached and self.attach_offset is not None:
                 dJ, c_xy = self._payload_geometry(self.attach_offset)
             else:
                 dJ, c_xy = 0.0, np.zeros(2)
             geom = np.array([dJ, c_xy[0], c_xy[1]])
+            r_p_log = geom
         # 几何归零可验证性(B.5 验收要"drop 后一个 MHE 周期内 dJ/c_xy 归零"):
         # 状态翻转时打一条,便于从日志直接判定释放时刻。
-        _geom_on = (bool(np.any(geom != 0.0)) if mhe_p.geom_coupled
+        _geom_on = (bool(np.any(np.asarray(r_p_log) != 0.0)) if mhe_p.geom_coupled
                     else self._payload_attached)
         if getattr(self, '_geom_active_prev', None) != _geom_on:
             self.get_logger().info(
@@ -1684,7 +1696,7 @@ class MHENode(Node):
                 f'(release_mode={self.geom_release_mode}, '
                 f'truth_attached={self._payload_attached}) '
                 f'mode={"coupled(r_p)" if mhe_p.geom_coupled else "legacy(dJ,c)"} '
-                f'-> geom={np.array2string(geom, precision=4)} '
+                f'-> geom={np.array2string(np.asarray(r_p_log), precision=4)} '
                 f'dJ={dJ:.4f} c_xy=[{c_xy[0]:+.4f},{c_xy[1]:+.4f}]'
                 + (' (dJ/c 为按当前 m_est 折算的诊断当量,模型内部随 m 实时生成)'
                    if mhe_p.geom_coupled else ''))

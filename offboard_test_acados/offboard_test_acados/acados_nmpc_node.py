@@ -477,9 +477,15 @@ class AcadosNMPCNode(Node):
         # 只需覆盖这一段。取值与 MHE 侧 grip_geom_mp_floor 同口径(0.15)。
         # 设 0.0 = 无地板(棘轮裸跑);设 = grip_payload_envelope 则 dJ 退回"只增
         # 不减且不低于包线",在主线 0.3kg 工况上等价于不变。
-        self.declare_parameter('grip_dj_floor_mp', 0.15)
-        # 模型 dJ 是否走棘轮(2026-08-28)。默认 True = 既有行为。
-        # False = **双向跟随** m_p_now,每帧贴着当前 m_est 走。
+        # ★ 2026-09-02 默认 0.15 → 0.05:0.15 与最小实验载荷同量级,会把 0.15kg
+        # 工况的 m_p_model 整个钉死在地板上(dJ 永远等于真值,估计器等于没跑),
+        # 小载荷实验因此不可用。0.05 仍覆盖 attach→收敛那 ~0.6s 的风险窗口
+        # (该窗口要防的是 m_p→0 把 dJ 打到空机惯量,不是精确取值)。必须与
+        # dj_ratchet_enable=False 配套改:棘轮关掉后地板是唯一的下界,留 0.15
+        # 等于换了个东西继续钉死小载荷。
+        self.declare_parameter('grip_dj_floor_mp', 0.05)
+        # 模型 dJ 是否走棘轮(2026-08-28)。**默认 2026-09-02 起 = False**
+        # (双向跟随 m_p_now,每帧贴着当前 m_est 走);True = 08-28~09-01 的旧行为。
         # 为什么这条现在敢开(07-28 撤销双向跟随时它是不敢的):棘轮当初担的两个
         # 职责已经分别被两个**静态界**接管 —— 高估无界跟涨归 grip_mp_cap,
         # LIFT 段合法低值归 grip_dj_floor_mp(那次撤销时这两个界都还不存在)。
@@ -488,7 +494,30 @@ class AcadosNMPCNode(Node):
         # 代价:失去单调性 = 失去"m_est→dJ→u→飞行→m_est 这个环不能自激"的保证。
         # 环仍被 [floor, cap] 限界,但界内可能振荡。**判负条件是 SITL,不是推理。**
         # ⚠️ 增益侧**永远**用棘轮(峰值)语义,与这个开关无关:"必须够大"天然要峰值。
-        self.declare_parameter('dj_ratchet_enable', True)
+        # ★ 2026-09-02 默认翻成 False:run_dj_ratchet_ab.sh 的 n=7 配对 A/B 判了
+        # 棘轮在带载段实际是个**不受控的正偏差补偿器**(m_est 每一次向上过冲都被
+        # 永久记住)——关掉后 dJ 稳态误差 +26.9% → +5.5%,7/7 同向,符号检验
+        # p=.0156。上面那条"判负条件是 SITL 不是推理"的预设已经跑完并判正。
+        # 代价确认在案:失去单调性,dJ 跟着 m_est 抖(小载荷下 m_p=m_est-m_B 的
+        # 差分放大 ~7.9×,0.15kg 工况实测 dJ 逐 5s 摆 ±20%),但界内未见自激。
+        self.declare_parameter('dj_ratchet_enable', False)
+        # ---- 指令兑现交叉检查(2026-09-02,**只告警、不动控制**)----
+        # 覆盖当前完全没人管的那个方向:控制器是**开环相信自己的夹爪指令**的
+        # (计划内 drop 见 _grip_drop_phase:发 enable=false 就当货没了)。
+        # 反方向的故障——"发了 release 但夹爪没松"/"发了 enable 但没抓上"——
+        # 自身指令察觉不到,payload_lost 看门狗管的又是"没指令货掉了",正好漏掉。
+        # 判据只用 m̂ 与空机质量的差 m_p=(m̂−m_B)⁺,不含任何载荷质量信息
+        # (原则见记忆 dj-prior-removal:不能知道包裹多重)。margin 与 MHE 侧质量
+        # 域判据同口径 0.03kg。
+        # ⚠️ **故意不接任何控制动作**:m̂ 在 drop 后会触下界(m_min),触界值是约束
+        # 截断值不是估计值,而 NMPC 这一侧看不到触界/solve-failed 标志。拿它做
+        # 控制判据 = 在噪声上建判据,还会重建 07-19 那个 m̂→几何 的自举耦合
+        # (见 mhe-geom-mest-decoupling)。先收误报率,再谈要不要接动作。
+        self.declare_parameter('cmd_verify_enable', True)
+        self.declare_parameter('cmd_verify_margin_mp', 0.03)
+        # 宽限期:attach 侧还要等 box 离地(lift_after+lift_dur)后 m̂ 才谈得上涨,
+        # 所以下面按 lift 时长自适应取大;drop 侧实测 ~8s 回落到空机附近。
+        self.declare_parameter('cmd_verify_grace_sec', 15.0)
         # 增益重缩放的滞回:棘轮相对上次缩放至少涨 dmp[kg],或涨够 (ratio-1)
         # 的相对量,取两者较大。⚠️ 纯比例滞回不行 —— 从 m_p≈0 起步时基数太小,
         # 0→0.3kg 会触发十几次(单测实测 14 次);绝对增量才是这里的主约束。
@@ -562,9 +591,15 @@ class AcadosNMPCNode(Node):
         # "够不够大"被用到,而"够大"正是包线的语义。
         # ⚠️ 轻载格子(0.15/0.2kg)裸 ratio 只有 3.18/3.84,**不在 cap 里**:换成
         #    包线会把增益一路提到 5.0,那是真的改了内环整定,需实测复核。
-        # ⚠️ 模型侧 dJ 初值由包线算出会**过估**(0.5 包线 vs 0.3 真值 → dJ 高
-        #    1.54×)。过估比低估安全(规划更保守,不会力矩饱和),且 dj_track_mest
-        #    打开时 _update_online_geometry 会用在线 m_est 棘轮精修。
+        # ⚠️ 包线进模型侧 dJ **只发生在 dj_track_mest=False 那一档**:该档模型
+        #    dJ 全程等于这个常值,对真值过估(0.5 包线 vs 0.3 真值 → dJ 高
+        #    1.54×),而过估比低估安全(规划更保守,不会力矩饱和)。
+        #    dj_track_mest=True(默认)时**没有包线初值**:初值取 grip_dj_floor_mp
+        #    的地板(棘轮起点为 0),再由 _update_online_geometry 随 m_est
+        #    **由下往上**逼近真值 —— 不存在"从包线过估精修下来"这条路径。
+        #    (2026-08-30 分流;此前这里恒写包线,但下一拍即被覆盖=死代码+日志
+        #     说谎,详见 _grip_mass_step 里 geom_source=='online' 分支那段 ⚠️。
+        #     哪个方向的 dJ 误差对 NMPC 更糟至今没有实验支撑。)
         self.declare_parameter('grip_payload_envelope', 0.5)
         # box 正上方的安全接近高度:两段式接近的第一段目标高度。先在这个高度
         # 把水平位置对齐、悬停稳,再垂直下降到 grip_z_low——避免在 grip_z_low
@@ -648,6 +683,12 @@ class AcadosNMPCNode(Node):
                 self.get_parameter('grip_dj_floor_mp').value)
             self.dj_ratchet_enable = bool(
                 self.get_parameter('dj_ratchet_enable').value)
+            self.cmd_verify_enable = bool(
+                self.get_parameter('cmd_verify_enable').value)
+            self.cmd_verify_margin_mp = float(
+                self.get_parameter('cmd_verify_margin_mp').value)
+            self.cmd_verify_grace_sec = float(
+                self.get_parameter('cmd_verify_grace_sec').value)
             self.dj_gain_rescale_dmp = float(
                 self.get_parameter('dj_gain_rescale_dmp').value)
             self.dj_gain_rescale_ratio = float(
@@ -658,6 +699,8 @@ class AcadosNMPCNode(Node):
             self._lift_hold_done = False
             # dJ 棘轮状态
             self._mp_ratchet = 0.0         # 见过的最大载荷质量(只增不减)
+            self.drop_time = None          # drop 时刻(指令兑现检查的起点)
+            self._cmd_verify_warned = {'attach': False, 'release': False}
             self._mp_gain_applied = 0.0    # 上次用来缩增益的 m_p(滞回基准)
             self._geom_log_count = 0       # [dJ_online] 低频日志的帧计数
             self.grip_drop_at_fig8_tip = bool(
@@ -1154,6 +1197,62 @@ class AcadosNMPCNode(Node):
                     f' -> m_p_model={m_p_model:.3f}({_src}) dJ={self.dJ_est:.4f} '
                     f'| gain_base={self._mp_gain_applied:.3f} '
                     f'c_xy=[{self.c_est[0]*100:+.2f},{self.c_est[1]*100:+.2f}]cm')
+
+    def _verify_command_effect(self, nmpc_time):
+        """指令兑现交叉检查:比对"我发过的夹爪指令"与"MHE 估出来的质量",
+        不一致就告警。**只打日志,不改任何控制量**(理由见 cmd_verify_enable
+        参数声明处)。每个方向只报一次,不刷屏。
+
+        两个方向:
+          attach 未兑现 — enable=true 且过了宽限期,m_p 仍 < margin
+                          ⇒ 可能压根没抓上,而模型已按带载几何在飞。
+          release 未兑现 — enable=false 且过了宽限期,m_p 仍 > margin
+                          ⇒ 夹爪可能没松开,而模型已归零成空机、增益也复位了,
+                             这是带着货按空机模型飞,比前者危险。
+        """
+        if not self.gripper_mode or not getattr(self, 'cmd_verify_enable', False):
+            return
+        # m̂ 没被消费的两档不做检查:use_mhe=False 与 control_mode='l1' 下
+        # mhe_mass_cb 直接 return,self.m_est 是固定标称值,比对必然误报。
+        if not self.use_mhe or self.control_mode == 'l1':
+            return
+        m_p = max(float(self.m_est) - p.m, 0.0)
+        margin = self.cmd_verify_margin_mp
+        if self.grip_dropped:
+            # drop_time is None = 看门狗路径(payload_lost_cb):那是 MHE 判"货掉了"
+            # 反过来通知控制器,并没有发过 release 指令,"指令兑现"无从谈起,跳过。
+            if self.drop_time is None or self._cmd_verify_warned['release']:
+                return
+            if nmpc_time - self.drop_time < self.cmd_verify_grace_sec:
+                return
+            if m_p > margin:
+                self._cmd_verify_warned['release'] = True
+                self.get_logger().warn(
+                    f't={nmpc_time:.1f}s | [cmd-verify] RELEASE 未兑现?: '
+                    f'发 enable=false 已 {nmpc_time - self.drop_time:.1f}s,'
+                    f'm_p={m_p:.3f}kg 仍 > {margin:.3f} (m̂={self.m_est:.3f}, '
+                    f'm_B={p.m:.3f})。夹爪可能没松开 —— 模型几何已归零、内环'
+                    f'增益已复位,若货还在就是**带着载荷按空机模型飞**。'
+                    '本检查只告警不动控制。')
+            return
+        if not self.grip_mass_stepped or self._cmd_verify_warned['attach']:
+            return
+        # attach 侧宽限期要盖住 box 离地:在地上时载荷由地面支撑,m̂ 合法地
+        # 低于空机(见 mhe-geom-mest-decoupling"第一跤不是错误"),此时判"没抓上"
+        # 必然误报。所以取 max(参数, lift_after+lift_dur+5s 收敛余量)。
+        grace = max(self.cmd_verify_grace_sec,
+                    self.grip_lift_after_sec + self.grip_lift_dur + 5.0)
+        if nmpc_time - self.attach_time < grace:
+            return
+        if m_p < margin:
+            self._cmd_verify_warned['attach'] = True
+            self.get_logger().warn(
+                f't={nmpc_time:.1f}s | [cmd-verify] ATTACH 未兑现?: '
+                f'attach 后已 {nmpc_time - self.attach_time:.1f}s,'
+                f'm_p={m_p:.3f}kg 仍 < {margin:.3f} (m̂={self.m_est:.3f}, '
+                f'm_B={p.m:.3f})。可能没抓上/中途掉了,而模型仍按带载几何飞。'
+                '⚠️ m̂ 触下界时这里也会报(触界是约束截断值),'
+                '看 MHE 日志确认是真没货还是估计器撞界。本检查只告警不动控制。')
 
     def mhe_mass_cb(self, msg):
         # use_mhe=False 时:MHE 只当诊断,不把估计喂回 NMPC(m_est 保持固定)。
@@ -2004,6 +2103,7 @@ class AcadosNMPCNode(Node):
                 return
         self.grip_drop_done = True
         self.grip_dropped = True
+        self.drop_time = nmpc_time                 # 指令兑现检查的起点
         self.enable_pub.publish(Bool(data=False))  # 拉低 → proximity 释放 box
         # --- 是否把 drop 告诉 MHE(2026-08-25)---
         # False = **不发**:MHE 必须自己从 T_phys 残差看出载荷没了。drop 是外部
@@ -2194,6 +2294,9 @@ class AcadosNMPCNode(Node):
         self._lift_phase(nmpc_time)
         self._grip_dynamic_phase(nmpc_time)
         self._grip_drop_phase(nmpc_time)
+        # 指令兑现交叉检查:只告警不动控制,放相位链末尾(这里才有真 nmpc_time;
+        # solve_nmpc 里只有 t_ref,hover_test_mode 下恒 0、时基对不上)
+        self._verify_command_effect(nmpc_time)
         t_ref = 0.0 if self.hover_test_mode else nmpc_time
 
         u_opt, omega_cmd, solve_time = self.solve_nmpc(self.x_cur, t_ref)

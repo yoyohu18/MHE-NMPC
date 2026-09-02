@@ -29,12 +29,13 @@ from offboard_test_acados.mhe_params import p as mhe_p          # noqa: E402
 from offboard_test_acados.mhe_solver_builder import (            # noqa: E402
     ensure_mhe_ocp_solver)
 
-np.random.seed(7)
+np.random.seed(int(os.environ.get('SEED', '7')))
 
 M_B = mhe_p.m_B
 G = mhe_p.g
 R_P = np.array([0.0, 0.05, -0.47])     # 载荷相对机体原点的偏移(rz<0)
-M_P = 0.3
+# 载荷质量。0.15kg 是 self 档触界现象最重的工况(2026-09-02),故可配。
+M_P = float(os.environ.get('PAYLOAD_KG', '0.3'))
 T_ATTACH, T_DROP, T_END = 5.0, 15.0, 20.0
 DT = mhe_p.dt
 # legacy 档的几何来源:'ideal'=操作先验给真值;'ratchet'=从 m_est 反推+棘轮+地板
@@ -46,7 +47,13 @@ RP_XY_SCALE = float(os.environ.get('RP_XY_SCALE', '1.0'))
 RP_Z_SCALE = float(os.environ.get('RP_Z_SCALE', '1.0'))
 # 'event'(默认)=drop 时把模型几何清零;'self'=模型不被告知 drop,
 # 载荷特征必须靠估计自己归零(耦合档靠 m_P⁺,moment 档靠 s)。
+# 'sgate'=仍不被告知 drop,但用 **|s| 自己的衰减** 当判据去清模型杆臂:
+#   s 有独立观测(τ/T 通路)、drop 后 2s 内衰减 ~90%,不像 m 那样身兼二职。
+#   杆臂一清,幽灵几何不复存在 → A=μr_z² 可以继续随 m 走,转动通路的质量信息
+#   全部保留(那是 coupled 档 94% 的质量信息来源)。
 RELEASE = os.environ.get('RELEASE_MODE', 'event')
+S_REL_THRESH = float(os.environ.get('S_REL_THRESH', '0.003'))   # kg·m
+S_REL_PERSIST = int(os.environ.get('S_REL_PERSIST', '10'))      # 帧
 
 
 # ---------------- 真值 plant(完整 3x3 惯量,含非对角项) ----------------
@@ -128,6 +135,7 @@ def run(verbose=True):
     applied = [False]             # 遗忘因子权重只设一次
     ratchet = [0.0]               # legacy ratchet 路径的状态(只增不减)
     r_p_last = np.zeros(3)        # 'self' 释放模式下模型只认它(drop 不清)
+    s_low = [0]                   # 'sgate' 的连续低于阈值帧数
     y_buf, u_buf = [], []
     x0_bar = x_guess = None
     m_est = M_B
@@ -141,6 +149,15 @@ def run(verbose=True):
         attached = T_ATTACH <= t < T_DROP
         if attached:
             r_p_last = R_P
+        if RELEASE == 'sgate' and mhe_p.ns and np.any(r_p_last):
+            # 判据只看 s(估计器自己的量),不看 attached —— 与 'self' 一样零外部信号
+            if float(np.linalg.norm(s_est)) < S_REL_THRESH:
+                s_low[0] += 1
+                if s_low[0] >= S_REL_PERSIST:
+                    r_p_last = np.zeros(3)
+                    s_low[0] = 0
+            else:
+                s_low[0] = 0
         if not attached:
             ratchet[0] = 0.0      # drop 释放几何(与 mhe_node.mass_event_cb 一致)
         m_t = M_B + (M_P if attached else 0.0)
@@ -161,9 +178,13 @@ def run(verbose=True):
                 x_guess = [_aug(y_buf[min(i, N)], M_B) for i in range(N+1)]
             # geom 槛位:两档语义不同(见 mhe_params.n_geom)
             if mhe_p.geom_coupled:
-                r_model = r_p_last if RELEASE == 'self' else r_p
+                r_model = r_p_last if RELEASE in ('self', 'sgate') else r_p
                 geom = np.asarray(r_model, dtype=float) * np.array(
                     [RP_XY_SCALE, RP_XY_SCALE, RP_Z_SCALE])
+                if mhe_p.estimate_moment and mhe_p.moment_a_mode == 'frozen':
+                    # geom[0] 在 moment 档空闲,借来传上一窗口的 m̂(见 mhe_model)
+                    geom = geom.copy()
+                    geom[0] = m_est
             else:
                 # legacy 有两条几何来源(见 mhe_node._payload_geometry):
                 #   LEGACY_GEOM=ideal  操作先验=真值(grip_geom_mp_prior 完全解耦路径)
@@ -258,6 +279,20 @@ if __name__ == '__main__':
     print(f'  attach 入带(±2%)={band_time(rec, T_ATTACH, T_DROP, M_B+M_P):.2f}s   '
           f'drop 入带(±2%)={band_time(rec, T_DROP, T_END, M_B):.2f}s')
     print(f'  attach 过冲={over:+.4f}kg')
+    # 触界占空比:m_est 贴在 lbx 硬下界 m_min 上的采样比例。self 档下这是
+    # "几何靠压低质量来熄灭"的直接读数 —— 贴界样本是约束截断值,不是估计值。
+    def pin(a):
+        return (100.0 * float(np.mean(a[:, 2] <= mhe_p.m_min + 1e-4))
+                if len(a) else float('nan'))
+    print(f'  触界占空比(m<=m_min={mhe_p.m_min:.3f}): 带载={pin(ld):.1f}%  '
+          f'drop后={pin(ul):.1f}%  全程={pin(rec):.1f}%')
+    if mhe_p.ns:
+        s_true = M_P * R_P[1]
+        s_ld = rec[(rec[:, 0] > T_ATTACH+2.5) & (rec[:, 0] < T_DROP), 3:5]
+        s_ul = rec[rec[:, 0] > T_DROP+2.5, 3:5]
+        print(f'  s_y: 带载均值={np.mean(s_ld[:, 1]):+.4f} (真值 {s_true:+.4f}, '
+              f'{100*(np.mean(s_ld[:, 1])-s_true)/s_true:+.1f}%)  '
+              f'drop后|s|均值={np.mean(np.abs(s_ul)):.5f} kg·m')
     out = f'/tmp/claude-1000/mhe_geom_{lab}.csv'
     np.savetxt(out, rec, delimiter=',', header='t,m_true,m_est,s_x,s_y', comments='')
     print(f'  逐帧数据 -> {out}')

@@ -142,10 +142,18 @@ GRIP_LIFT_DUR_D=$(_f2d "${GRIP_LIFT_DUR:-3.0}")
 # (实测 m_est 反而从 2.064 下漂到 2.023),真正该给的时间在**离地之后**。
 # GRIP_LIFT_HOLD=1   抬升 GRIP_LIFT_HOLD_DZ 米后把斜坡冻结 GRIP_LIFT_HOLD_SEC 秒
 # DJ_TRACK_MEST=1    让模型侧 dJ 跟着 m_est 棘轮走(只增不减 + 上界 cap + 下界地板)
-# GRIP_DJ_FLOOR_MP=  模型 dJ 的下界载荷质量 kg(默认 0.15)。棘轮从 0 起步,而 attach
-#                    时 dJ 是按包线上界算的,所以第一步必然把 dJ 往下打一次——地板
-#                    保证它不会掉到空机惯量附近(dJ→0 会力矩饱和级联发散)。设 0 =
-#                    无地板(裸棘轮,复现 08-25 旧行为)。
+# GRIP_DJ_FLOOR_MP=  模型 dJ 的下界载荷质量 kg(★ 2026-09-02 默认 0.15 → 0.05)。
+#                    attach 时 dJ 从 0 起步,地板保证它不会掉到空机惯量附近
+#                    (dJ→0 会力矩饱和级联发散)。设 0 = 无地板。改小的理由:0.15 和
+#                    最小实验载荷同量级,会把 0.15kg 工况的 m_p_model 整个钉死在
+#                    地板上,估计器等于没跑;0.05 仍覆盖 attach→收敛那 ~0.6s。
+# DJ_RATCHET=        模型 dJ 走棘轮(只增不减)还是双向跟随 m_est。★ 2026-09-02
+#                    默认 true → false:run_dj_ratchet_ab.sh 的 n=7 配对 A/B 判
+#                    棘轮在带载段是不受控的正偏差补偿器(m_est 每次向上过冲都被
+#                    永久记住),关掉后 dJ 稳态误差 +26.9% → +5.5%,7/7 同向
+#                    p=.0156。代价 = dJ 跟着 m_est 抖(小载荷差分放大 ~7.9×)。
+#                    必须与地板 0.05 配套:棘轮关掉后地板是唯一下界,留 0.15 等于
+#                    换个东西继续钉死小载荷。增益侧不受影响,永远用棘轮峰值。
 # ⚠️ DJ_TRACK_MEST 只在 geom_source=online 下生效(_update_online_geometry 是
 #    唯一的刷新点);legacy 几何档不走那条路。
 # ⚠️ PX4 内环增益**不跟着棘轮下调**:它在 attach 时按包线整定一次,只有棘轮涨过
@@ -173,7 +181,7 @@ GRIP_LIFT_DUR_D=$(_f2d "${GRIP_LIFT_DUR:-3.0}")
 GRIP_LIFT_HOLD_DZ_D=$(_f2d "${GRIP_LIFT_HOLD_DZ:-0.35}")
 GRIP_LIFT_HOLD_SEC_D=$(_f2d "${GRIP_LIFT_HOLD_SEC:-3.0}")
 GRIP_MP_CAP_D=$(_f2d "${GRIP_MP_CAP:-0.6}")
-GRIP_DJ_FLOOR_MP_D=$(_f2d "${GRIP_DJ_FLOOR_MP:-0.15}")
+GRIP_DJ_FLOOR_MP_D=$(_f2d "${GRIP_DJ_FLOOR_MP:-0.05}")
 
 WS="/home/clear/ros2_ws_HJH"
 PX4_DIR="/home/clear/PX4-Autopilot"
@@ -287,7 +295,7 @@ nohup ros2 run offboard_test_acados acados_nmpc_node --ros-args \
     -p drop_publish_mass_event:=$(_b "${DROP_PUBLISH_MASS_EVENT:-true}") \
     -p grip_mp_cap:=$GRIP_MP_CAP_D \
     -p grip_dj_floor_mp:=$GRIP_DJ_FLOOR_MP_D \
-    -p dj_ratchet_enable:=$(_b "${DJ_RATCHET:-true}") \
+    -p dj_ratchet_enable:=$(_b "${DJ_RATCHET:-false}") \
     -p use_mhe:=$USE_MHE \
     -p decouple_publish:=${DECOUPLE_PUB:-true} -p publish_hz:=$PUBLISH_HZ_D \
     -p geom_source:=${NMPC_GEOM_SOURCE:-online} \
@@ -362,9 +370,28 @@ MHE_LOG="$RUNDIR/grip_mhe_$STAMP.log"
 #       (MODEL_NAME 带 _coupled 后缀,与 legacy 目录隔离,不互相覆盖)。
 # ⚠️ 只改**这一侧**:NMPC_GEOM_COUPLED 保持关(可用边界 r_y≲0.05m,而本场景
 #    ecc=0.10 远在禁区外);推荐组合是 MHE coupled + NMPC 几何走 online。
-# ⚠️ 未覆盖:4m/s 工作点、一阶质量矩(MHE_ESTIMATE_MOMENT)仍默认关。
+# ⚠️ 未覆盖:4m/s 工作点。一阶质量矩见下面的 MHE_ESTIMATE_MOMENT 段。
 # 回退:MHE_GEOM_COUPLED=0
 export MHE_GEOM_COUPLED="${MHE_GEOM_COUPLED:-1}"
+# ===== 一阶质量矩增广 2b(2026-09-02,默认关)=====
+# MHE_ESTIMATE_MOMENT=1:把 s=m_P·r_xy [kg·m] 增广成被估状态。载荷的"在不在/
+#   偏多少"由 s 独立承担,c_xy=s/m_T 里 m_P 恰好约掉 —— 解掉 self 释放档下
+#   "几何只能靠压低 m̂ 来熄灭"这个耦合(那正是 m̂ 撞 m_min 硬下界的来源)。
+#   需配 MHE_C_XY_FROM_MOMENT=true,否则对外发布的 c_xy 仍走窗外 EMA(机动中不更新)。
+# MHE_MOMENT_A_MODE=const:把 A=μ·r_z² 的幅值改成由**载荷包线上界**算的常数
+#   (存在性仍由 geom 槽 r_z 门控)。⚠️ 只开 ESTIMATE_MOMENT 不改 A 是不够的:
+#   A 仍以 m_P 为线性因子,给优化器留了"抬高 m 稀释幽灵力矩"的第二条杠杆。
+# 离线证据(test_mhe_geom_coupled_standalone.py,self 档 0.15kg,5 个 seed 全一致):
+#   现状 coupled      带载 +4.45% / drop 后 +34.8% / drop 不入带 / fails 2~4
+#   moment+A=const    带载 −0.04% / drop 后 +0.28% / drop 入带 1.3~1.4s / fails 0
+#   s_y 带载估计误差 −0.1%(真值 0.0075 kg·m)
+# ⚠️ 尚无 SITL 闭环证据,故默认关(证据门槛见记忆 evidence-bar-before-default-change)。
+# MHE_MP_ENVELOPE 要与 GRIP_PAYLOAD_ENVELOPE 对齐(同一条包线,两侧各读各的)。
+export MHE_ESTIMATE_MOMENT="${MHE_ESTIMATE_MOMENT:-0}"
+export MHE_MOMENT_A_MODE="${MHE_MOMENT_A_MODE:-coupled}"
+export MHE_MP_ENVELOPE="${MHE_MP_ENVELOPE:-${GRIP_PAYLOAD_ENVELOPE:-0.5}}"
+# s 的到达代价 σ_s [kg·m](只在 moment 档有意义)。默认 0.1 实质无先验。
+export MHE_SIGMA_S0="${MHE_SIGMA_S0:-0.1}"
 # --- 机动门控(2026-08-25,默认关)---
 # MHE_MANEUVER_GATE=1:机动期(|ω|或|v_xy| 超阈)按 lvl^exp 锚紧 Q0 的质量维,
 #   悬停期用名义权重。动机:m_est 静态准 -0.17% 但机动中系统性低估 8%;机动期
