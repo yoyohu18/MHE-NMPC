@@ -89,11 +89,23 @@ PY
 # LAYOUT=pip  :Gazebo 铺满 + RViz 右上角画中画(单屏录制用)
 LAYOUT="${LAYOUT:-pip}"
 if [ "$LAYOUT" = split ]; then
-  [ -n "${MAIN_CROP:-}" ] && [ -n "${PIP_CROP:-}" ] || {
-    echo "split 版面需要同时给 MAIN_CROP(Gazebo) 和 PIP_CROP(RViz)"; exit 1; }
-  LW="${SPLIT_LEFT_W:-1050}"; RW=$((W - LW))
-  FILTER="[0:v]crop=${MAIN_CROP},scale=${LW}:${MAIN_H}[L];\
-[0:v]crop=${PIP_CROP},scale=${RW}:${MAIN_H}[R];\
+  if [ -z "${MAIN_CROP:-}" ] || [ -z "${PIP_CROP:-}" ]; then
+    echo "split 版面需要同时给 MAIN_CROP(Gazebo) 和 PIP_CROP(RViz)"
+    exit 1
+  fi
+  # 双屏录制的左右两窗通常同为 16:9，默认平分宽度才能让
+  # Gazebo/RViz 使用同一视觉尺度。仍可用 SPLIT_LEFT_W 显式改变。
+  LW="${SPLIT_LEFT_W:-960}"; RW=$((W - LW))
+  # 默认等比缩放 + 补边，禁止把 16:9 原图硬塞进约 960x740 后
+  # 将飞机与轨迹拉伸。仅为复现历史版才显式设 SPLIT_KEEP_AR=0。
+  if [ "${SPLIT_KEEP_AR:-1}" = "1" ]; then
+    _SL="scale=${LW}:${MAIN_H}:force_original_aspect_ratio=decrease,pad=${LW}:${MAIN_H}:(ow-iw)/2:(oh-ih)/2:color=0x101014"
+    _SR="scale=${RW}:${MAIN_H}:force_original_aspect_ratio=decrease,pad=${RW}:${MAIN_H}:(ow-iw)/2:(oh-ih)/2:color=0x101014"
+  else
+    _SL="scale=${LW}:${MAIN_H}"; _SR="scale=${RW}:${MAIN_H}"
+  fi
+  FILTER="[0:v]crop=${MAIN_CROP},${_SL}[L];\
+[0:v]crop=${PIP_CROP},${_SR}[R];\
 [L][R]hstack=inputs=2[top];\
 [top]${SUBS}[main];\
 [main]pad=${W}:${H}:0:0:color=0x101014[v0];\

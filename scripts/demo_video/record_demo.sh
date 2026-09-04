@@ -63,7 +63,8 @@ touch "$MARKER"
 # 改成文件名快照对比:只认快照里没有的**新文件名**。
 ls "$LOGDIR"/gviz_nmpc_*.log 2>/dev/null | xargs -r -n1 basename > "$OUTDIR/.logs_before"
 echo ">>> 启动 run_sitl_gripper_viz.sh ..."
-bash "$WS/src/scripts/gripper/run_sitl_gripper_viz.sh" > "$OUTDIR/viz_launch.log" 2>&1 &
+LAUNCH_LOG="$OUTDIR/viz_launch.log"
+bash "$WS/src/scripts/gripper/run_sitl_gripper_viz.sh" > "$LAUNCH_LOG" 2>&1 &
 LAUNCH_PID=$!
 
 echo ""
@@ -95,6 +96,9 @@ if [ -z "$STAMP" ]; then
   exit 1
 fi
 echo ">>> 本次 stamp=$STAMP (日志 $NMPC_LOG)"
+# viz_launch.log 会被下一轮覆盖。立即留一份带 stamp 的启动配置，
+# 使后续或历史重生成可以自动获取 payload/ecc，不再误用默认值。
+cp "$LAUNCH_LOG" "$OUTDIR/viz_launch_$STAMP.log"
 
 # 3. 存全量窗口树供 compose 裁剪参考(标题不固定,存全量比 grep 可靠)
 xwininfo -root -tree 2>/dev/null > "$OUTDIR/windows_$STAMP.txt" || true
