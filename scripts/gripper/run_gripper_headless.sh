@@ -8,7 +8,7 @@
 #
 # 对外接口统一使用环境变量(不是位置参数),方便批量驱动脚本用
 # subprocess.Popen(env=...) 调用:
-#   GRIP_PAYLOAD_KG    载荷质量 kg (默认 0.3)
+#   GRIP_PAYLOAD_KG    实际载荷质量 kg (默认 0.15；安全包线仍为 0.3)
 #   GRIP_ECC_Y         横向偏心 m,即 grip_y (默认 0.05)——box 固定在世界系
 #                      (1.0,0.0),grip_y 是悬停目标,两者之差就是 attach 偏心
 #                      (扫描入口见 run_cxy_ecc_sweep.sh)
@@ -59,7 +59,7 @@
 # GUI 可视化请用 run_sitl_gripper_viz.sh；批量对比实验用本脚本。
 set -e
 
-GRIP_PAYLOAD_KG="${GRIP_PAYLOAD_KG:-0.3}"
+GRIP_PAYLOAD_KG="${GRIP_PAYLOAD_KG:-0.15}"
 GRIP_ECC_Y="${GRIP_ECC_Y:-0.05}"
 BOX_I=$(python3 -c "print(f'{$GRIP_PAYLOAD_KG * 0.00375:.6f}')")
 # 抓取偏心上限 [m] = 设计偏心 ECC_Y + 容差。**不是**"够得着"的判据,而是
@@ -116,12 +116,12 @@ PUBLISH_HZ_D=$(_f2d "${PUBLISH_HZ:-50.0}")
 # 哪一趟无关 —— 拿它做几何标度和内环整定不算"知道载荷质量"。
 # ⚠️ m_p>=0.2937kg 时 ratio 撞 cap 5.0,故 0.3kg 主线工况下包线与旧点估计先验
 #    给出**逐位相同**的 MC_*RATE_K;轻载(0.15/0.2)不在 cap 里,是真的改了整定。
-GRIP_PAYLOAD_ENVELOPE_D=$(_f2d "${GRIP_PAYLOAD_ENVELOPE:-0.5}")
+GRIP_PAYLOAD_ENVELOPE_D=$(_f2d "${GRIP_PAYLOAD_ENVELOPE:-0.3}")
 # MHE 侧几何标度的**独立覆盖**(2026-08-28)。默认回落到 GRIP_PAYLOAD_ENVELOPE,
 # 逐位兼容。拆开的理由:08-28 排查 m_est 带载低估时发现,同一个变量同时喂 NMPC
 # (模型 dJ 初值 + PX4 增益)和 MHE(转动通路几何标度),扫它无法区分是哪一侧起
 # 作用。要检验"MHE 几何过估经 quat 间接压低质量"必须只动 MHE 这一侧。
-MHE_PAYLOAD_ENVELOPE_D=$(_f2d "${MHE_PAYLOAD_ENVELOPE:-${GRIP_PAYLOAD_ENVELOPE:-0.5}}")
+MHE_PAYLOAD_ENVELOPE_D=$(_f2d "${MHE_PAYLOAD_ENVELOPE:-${GRIP_PAYLOAD_ENVELOPE:-0.3}}")
 EVAL_TRUE_PAYLOAD_D=$(_f2d "${EVAL_TRUE_PAYLOAD_MASS:-$GRIP_PAYLOAD_KG}")
 L1_A_GAIN_D=$(_f2d "${L1_A_GAIN:-10.0}")
 L1_OMEGA_C_D=$(_f2d "${L1_OMEGA_C:-0.5}")
@@ -302,10 +302,12 @@ nohup ros2 run offboard_test_acados acados_nmpc_node --ros-args \
     -p grip_dj_floor_mp:=$GRIP_DJ_FLOOR_MP_D \
     -p dj_ratchet_enable:=$(_b "${DJ_RATCHET:-false}") \
     -p use_mhe:=$USE_MHE \
+    -p continuous_payload_estimates:=${CONTINUOUS_PAYLOAD_ESTIMATES:-true} \
     -p decouple_publish:=${DECOUPLE_PUB:-true} -p publish_hz:=$PUBLISH_HZ_D \
-    -p geom_source:=${NMPC_GEOM_SOURCE:-online} \
+    -p geom_source:=${NMPC_GEOM_SOURCE:-estimate} \
     -p geom_release_mode:=${NMPC_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-event}} \
     -p grip_payload_envelope:=$GRIP_PAYLOAD_ENVELOPE_D \
+    -p attach_j_bootstrap_enable:=${ATTACH_J_BOOTSTRAP:-true} \
     -p control_mode:=${NMPC_CONTROL_MODE:-mhe} \
     -p l1_a_gain:=$L1_A_GAIN_D \
     -p l1_omega_c:=$L1_OMEGA_C_D \
@@ -319,8 +321,8 @@ nohup ros2 run offboard_test_acados acados_nmpc_node --ros-args \
     -p attach_window_sec:=$ATTACH_WINDOW_SEC_D \
     -p tau_lumped_enable:=${NMPC_TAU_LUMPED:-false} \
     -p xi_max:=$XI_MAX_D -p xi_omega_c:=$XI_OMEGA_C_D \
-    -p omega_scale_enable:=${NMPC_OMEGA_SCALE:-false} \
-    -p omega_scale_source:=${OMEGA_SCALE_SRC:-thrust} \
+    -p omega_scale_enable:=${NMPC_OMEGA_SCALE:-true} \
+    -p omega_scale_source:=${OMEGA_SCALE_SRC:-djest} \
     -p omega_scale_tau:=$OMEGA_SCALE_TAU_D -p omega_scale_cap:=$OMEGA_SCALE_CAP_D \
     > "$NODE_LOG" 2>&1 &
 
@@ -378,23 +380,20 @@ MHE_LOG="$RUNDIR/grip_mhe_$STAMP.log"
 # ⚠️ 未覆盖:4m/s 工作点。一阶质量矩见下面的 MHE_ESTIMATE_MOMENT 段。
 # 回退:MHE_GEOM_COUPLED=0
 export MHE_GEOM_COUPLED="${MHE_GEOM_COUPLED:-1}"
-# ===== 一阶质量矩增广 2b(2026-09-02,默认关)=====
+# ===== 一阶质量矩增广 2b(2026-09-02,无事件主线默认开)=====
 # MHE_ESTIMATE_MOMENT=1:把 s=m_P·r_xy [kg·m] 增广成被估状态。载荷的"在不在/
 #   偏多少"由 s 独立承担,c_xy=s/m_T 里 m_P 恰好约掉 —— 解掉 self 释放档下
 #   "几何只能靠压低 m̂ 来熄灭"这个耦合(那正是 m̂ 撞 m_min 硬下界的来源)。
 #   需配 MHE_C_XY_FROM_MOMENT=true,否则对外发布的 c_xy 仍走窗外 EMA(机动中不更新)。
-# MHE_MOMENT_A_MODE=const:把 A=μ·r_z² 的幅值改成由**载荷包线上界**算的常数
-#   (存在性仍由 geom 槽 r_z 门控)。⚠️ 只开 ESTIMATE_MOMENT 不改 A 是不够的:
-#   A 仍以 m_P 为线性因子,给优化器留了"抬高 m 稀释幽灵力矩"的第二条杠杆。
-# 离线证据(test_mhe_geom_coupled_standalone.py,self 档 0.15kg,5 个 seed 全一致):
-#   现状 coupled      带载 +4.45% / drop 后 +34.8% / drop 不入带 / fails 2~4
-#   moment+A=const    带载 −0.04% / drop 后 +0.28% / drop 入带 1.3~1.4s / fails 0
-#   s_y 带载估计误差 −0.1%(真值 0.0075 kg·m)
-# ⚠️ 尚无 SITL 闭环证据,故默认关(证据门槛见记忆 evidence-bar-before-default-change)。
+# MHE_MOMENT_A_MODE=frozen:每个窗口内用上一拍 m_est 冻结 A=μ·r_z²，切断
+#   优化器把 m 当作瞬时“惯量旋钮”的通路；窗口之间 A 仍随估计连续更新。
+# 离线 attach/drop 回放:coupled 档 drop 后质量偏高 +53%；frozen 回到空机
+#   −0.34%，s/dJ 同步衰减、无质量下界触碰、solve fails=0。
+# ⚠️ 尚无 SITL 闭环证据；默认启用是为了让主线接口结构正确，闭环放飞仍需 smoke。
 # MHE_MP_ENVELOPE 要与 GRIP_PAYLOAD_ENVELOPE 对齐(同一条包线,两侧各读各的)。
-export MHE_ESTIMATE_MOMENT="${MHE_ESTIMATE_MOMENT:-0}"
-export MHE_MOMENT_A_MODE="${MHE_MOMENT_A_MODE:-coupled}"
-export MHE_MP_ENVELOPE="${MHE_MP_ENVELOPE:-${GRIP_PAYLOAD_ENVELOPE:-0.5}}"
+export MHE_ESTIMATE_MOMENT="${MHE_ESTIMATE_MOMENT:-1}"
+export MHE_MOMENT_A_MODE="${MHE_MOMENT_A_MODE:-frozen}"
+export MHE_MP_ENVELOPE="${MHE_MP_ENVELOPE:-${GRIP_PAYLOAD_ENVELOPE:-0.3}}"
 # s 的到达代价 σ_s [kg·m](只在 moment 档有意义)。默认 0.1 实质无先验。
 export MHE_SIGMA_S0="${MHE_SIGMA_S0:-0.1}"
 # --- 机动门控(2026-08-25,默认关)---
@@ -415,6 +414,7 @@ fi
 nohup ros2 run offboard_test_acados mhe_node --ros-args \
     "${RESID_ARG[@]}" \
     -p motor_speed_topic:=/x500_0/command/motor_speed \
+    -p external_event_inputs:=$(_b "${MHE_EXTERNAL_EVENTS:-false}") \
     -p event_signal_mode:=${MHE_SIGNAL_MODE:-residual} \
     -p event_trigger_enable:=${MHE_EVENT_TRIGGER:-true} \
     -p schedule_theta:="${MHE_SCHEDULE_THETA:-[-4.0,0.0,0.0,0.0]}" \
@@ -428,7 +428,7 @@ nohup ros2 run offboard_test_acados mhe_node --ros-args \
     -p c_xy_mass_arm_ratio:=${MHE_CXY_MASS_ARM_RATIO:-3.0} \
     -p c_xy_mass_arm_persist:=${MHE_CXY_MASS_ARM_PERSIST:-20} \
     -p c_xy_est_enable:=${MHE_C_XY_EST:-false} \
-    -p c_xy_from_moment:=$(_b "${MHE_C_XY_FROM_MOMENT:-false}") \
+    -p c_xy_from_moment:=$(_b "${MHE_C_XY_FROM_MOMENT:-true}") \
     -p maneuver_gate_enable:=$(_b "${MHE_MANEUVER_GATE:-false}") \
     -p resid_release_geom:=$(_b "${MHE_RESID_RELEASE_GEOM:-true}") \
     -p resid_step_enable:=$(_b "${MHE_RESID_STEP:-false}") \
@@ -460,4 +460,4 @@ echo "  payload=${GRIP_PAYLOAD_KG}kg ecc_y=${GRIP_ECC_Y}m r_xy=$R_XY"
 echo "  event_trigger=${MHE_EVENT_TRIGGER:-true} signal=${MHE_SIGNAL_MODE:-residual} drop_publish=${DROP_PUBLISH_MASS_EVENT:-false}"
 echo "  geom_release: NMPC=${NMPC_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-event}} MHE=${MHE_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-self}} cxy_release_mp=${MHE_CXY_MASS_RELEASE_MP:-0.03}"
 echo "  theta=${MHE_SCHEDULE_THETA:-M0} confirm_thresh=${MHE_CONFIRM_THRESH:-1.5}"
-echo "  payload_envelope=${GRIP_PAYLOAD_ENVELOPE:-0.5}kg (机架规格; 任务信息型质量先验已于 2026-08-26 全部删除)"
+echo "  payload_envelope=${GRIP_PAYLOAD_ENVELOPE:-0.3}kg (机架规格; attach 仅用它引导 J,m/s 仍来自 MHE)"

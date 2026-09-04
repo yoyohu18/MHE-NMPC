@@ -311,6 +311,28 @@ def _replay_real(step_on, T, att=None, release_thresh=2.0):
     s.frames = 0
     s.scheduler = _Sched()
     s._payload_attached = bool(att[0]) if att is not None else True
+    # 2026-09-04:释放门控换成估计器自主判定的 _payload_present。回放里
+    # att[] 描述的就是"载荷physically在不在",所以自主状态跟它同步起步。
+    s._payload_present = s._payload_attached
+    s._load_armed = s._payload_attached
+    s.x_meas = np.zeros(13)
+    s.payload_exit_steady_omega = 0.15
+    s.payload_exit_steady_vel = 0.20
+    s.s_decay_log_frames = 0
+    s._s_decay_n = 0
+    s._s_out_prev = np.zeros(2)
+    s.m_est = mhe_p.m_B + 0.30
+    s.payload_present_enter_mp = 0.09
+    s.payload_present_enter_persist = 20
+    s.payload_present_exit_mp = 0.03
+    s.payload_present_exit_persist = 20
+    s._present_hi = 0; s._present_lo = 0
+    s._s_release_latched = False; s._s_peak = 0.0; s._s_low = 0
+    s.c_xy_est = np.zeros(2); s._c_xy_inited = True
+    s.c_xy_est_pub = type('_P', (), {'publish': lambda self, m: None})()
+    s._release_payload = mn.MHENode._release_payload.__get__(s)
+    s._update_payload_presence = mn.MHENode._update_payload_presence.__get__(s)
+    s._mass_observable = mn.MHENode._mass_observable.__get__(s)
     s.attach_offset = np.array([0.006, -0.093, -0.516])
     s.resid_release_geom = True
     s.resid_step_enable = step_on
@@ -330,6 +352,8 @@ def _replay_real(step_on, T, att=None, release_thresh=2.0):
         # attach 上升沿:模拟 attach_event_cb 把物理状态置真
         if att is not None and i > 0 and att[i] and not att[i-1]:
             s._payload_attached = True
+            s._payload_present = True
+            s._load_armed = True
             s.attach_offset = np.array([0.006, -0.093, -0.516])
         s.thrust_phys = float(Ti); s.frames += 1
         was = s._payload_attached

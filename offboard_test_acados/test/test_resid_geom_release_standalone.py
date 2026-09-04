@@ -10,6 +10,7 @@
 
 import numpy as np
 from offboard_test_acados import mhe_node as mn
+from offboard_test_acados.mhe_params import p as mhe_p
 
 
 class _Sched:
@@ -49,8 +50,43 @@ class _S:
         self.resid_step_release_thresh = 2.0
         self._tphys_hist = []
         self._step_pending = 0
+        # 2026-09-04:释放门控从 _payload_attached(外部通知)换成
+        # _payload_present(估计器自主判定)。stub 要带上状态机那套字段,
+        # 否则跑不到释放分支 —— 这个模块此前就是卡在这里从没真跑通过。
+        self._payload_present = True
+        # 释放门控 2026-09-04 起用 armed latch(本轮曾可靠进入过 LOADED),
+        # 不用瞬时 present —— 见 mhe_node._load_armed 的注释。
+        self._load_armed = True
+        self.x_meas = np.zeros(13)       # 静止 = 低机动窗口
+        self.payload_exit_steady_omega = 0.15
+        self.payload_exit_steady_vel = 0.20
+        self.s_decay_log_frames = 0
+        self._s_decay_n = 0
+        self._s_out_prev = np.zeros(2)
+        self.m_est = mhe_p.m_B + 0.30
+        self.payload_present_enter_mp = 0.09
+        self.payload_present_enter_persist = 20
+        self.payload_present_exit_mp = 0.03
+        self.payload_present_exit_persist = 20
+        self._present_hi = 0
+        self._present_lo = 0
+        self._s_release_latched = False
+        self._s_peak = 0.0
+        self._s_low = 0
+        self.c_xy_est = np.zeros(2)
+        self._c_xy_inited = True
         self.logs = []
         self.__dict__.update(kw)
+
+    _release_payload = mn.MHENode._release_payload
+    _update_payload_presence = mn.MHENode._update_payload_presence
+    _mass_observable = mn.MHENode._mass_observable
+
+    @property
+    def c_xy_est_pub(self):
+        class _P:
+            def publish(self, msg): pass
+        return _P()
 
     def get_logger(self):
         stub = self
@@ -109,7 +145,8 @@ def test_switch_off_keeps_legacy():
 
 def test_no_release_when_already_empty():
     """空载时的推力扰动不该反复"释放"(幂等):_payload_attached 已 False 就跳过。"""
-    s = _S(_payload_attached=False, attach_offset=None)
+    s = _S(_payload_attached=False, _payload_present=False,
+           _load_armed=False, attach_offset=None, _c_xy_inited=False)
     _warm(s, T=20.3)
     for _ in range(4):
         s.thrust_phys = 17.0; s.frames += 1; _det(s)

@@ -105,8 +105,9 @@ def _run_mhe(Y, U, m_init_guess):
     n_total = Y.shape[0]
     m_est_seq = np.full(n_total, np.nan)
 
-    x0_bar = np.concatenate([Y[0], [m_init_guess]])
-    x_guess = [np.concatenate([Y[min(i, n_total-1)], [m_init_guess]])
+    extra0 = np.zeros(mhe_p.ns)
+    x0_bar = np.concatenate([Y[0], [m_init_guess], extra0])
+    x_guess = [np.concatenate([Y[min(i, n_total-1)], [m_init_guess], extra0])
                for i in range(N+1)]
 
     for k in range(N, n_total):

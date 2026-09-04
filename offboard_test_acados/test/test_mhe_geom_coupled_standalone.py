@@ -120,8 +120,9 @@ def controller(x, m_cmd, z_ref=3.0):
 
 
 def _aug(y13, m_seed):
-    """13 维量测 -> MHE 增广状态初值(14 或 16 维);s 一律从 0 起。"""
-    return np.concatenate([y13, [m_seed], np.zeros(mhe_p.ns)])
+    """13 维量测 -> MHE 增广状态初值;s/dJ 一律从 0 起。"""
+    return np.concatenate([
+        y13, [m_seed], np.zeros(mhe_p.ns)])
 
 
 # ---------------- 跑一轮 ----------------
@@ -230,15 +231,18 @@ def run(verbose=True):
                     s_est = np.array(xs[N][nx+1:nx+1+mhe_p.ns], dtype=float)
                 x0_bar = xs[1].copy()
                 x_guess = [xs[min(i+1, N)].copy() for i in range(N+1)]
+            mp_hat = max(m_est - M_B, 0.0)
+            dj_hat = M_B * mp_hat / max(m_est, 1e-6) * R_P[2] ** 2
             rec.append((t, m_t, m_est, attached,
                         float(s_est[0]) if mhe_p.ns else 0.0,
-                        float(s_est[1]) if mhe_p.ns else 0.0))
+                        float(s_est[1]) if mhe_p.ns else 0.0,
+                        dj_hat))
 
         x = plant_step(x, u, m_t, r_p, DT)
         if not np.all(np.isfinite(x)):
             print('plant diverged'); break
 
-    return np.array([(r[0], r[1], r[2], r[4], r[5]) for r in rec]), fails
+    return np.array([(r[0], r[1], r[2], r[4], r[5], r[6]) for r in rec]), fails
 
 
 def band_time(rec, t_evt, t_end, m_target, tol=0.02):
@@ -260,7 +264,8 @@ if __name__ == '__main__':
     rec, fails = run()
     lab = (('moment' if mhe_p.estimate_moment else
             f'coupled-rxy{RP_XY_SCALE:g}-rz{RP_Z_SCALE:g}')
-           if mhe_p.geom_coupled else f'legacy-{LEGACY_GEOM}') + f'-{RELEASE}'
+           if (mhe_p.geom_coupled or mhe_p.estimate_moment)
+           else f'legacy-{LEGACY_GEOM}') + f'-{RELEASE}'
     if mhe_p.forgetting_lambda < 1.0:
         lab += f'-lam{mhe_p.forgetting_lambda:g}'
     ld = rec[(rec[:, 0] > T_ATTACH+2.5) & (rec[:, 0] < T_DROP)]
@@ -293,6 +298,11 @@ if __name__ == '__main__':
         print(f'  s_y: 带载均值={np.mean(s_ld[:, 1]):+.4f} (真值 {s_true:+.4f}, '
               f'{100*(np.mean(s_ld[:, 1])-s_true)/s_true:+.1f}%)  '
               f'drop后|s|均值={np.mean(np.abs(s_ul)):.5f} kg·m')
+        mu_true = M_B * M_P / (M_B + M_P)
+        dj_true = mu_true * R_P[2] ** 2
+        print(f'  dJ: 带载均值={np.mean(ld[:, 5]):.5f} (真值 {dj_true:.5f})  '
+              f'drop后均值={np.mean(ul[:, 5]):.5f} kg·m²')
+        assert np.mean(ul[:, 5]) < 0.15 * dj_true, 'drop 后 dJ 未连续衰减到零附近'
     out = f'/tmp/claude-1000/mhe_geom_{lab}.csv'
-    np.savetxt(out, rec, delimiter=',', header='t,m_true,m_est,s_x,s_y', comments='')
+    np.savetxt(out, rec, delimiter=',', header='t,m_true,m_est,s_x,s_y,dJ', comments='')
     print(f'  逐帧数据 -> {out}')

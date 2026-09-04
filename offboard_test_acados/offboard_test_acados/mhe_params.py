@@ -222,7 +222,9 @@ class MHEParams:
     #     ——现在那个乘积本身就是被估量,不需要先验。
     # s 的动力学 ṡ=0(窗口内常数,与 m 同待遇),不加过程噪声;要不要给它/给 m 加
     # 随机游走(文献 NeuroMHE/DMHE 的做法)是**另一件事**(2a),不在这里做。
-    estimate_moment = os.environ.get('MHE_ESTIMATE_MOMENT', '0') not in ('0', '', 'false', 'False')
+    # 一阶质量矩是无事件主线的必要状态:没有它,优化器只能通过把 m 压到下界来
+    # 消除 drop 后的幽灵偏心。显式设 0 仍可复现实验旧档。
+    estimate_moment = os.environ.get('MHE_ESTIMATE_MOMENT', '1') not in ('0', '', 'false', 'False')
     ns = 2 if estimate_moment else 0     # 一阶质量矩 s=[s_x,s_y]
     # r_z 弱先验 [m](载荷挂在机体下方的深度)。只进 μ·r_z² 与非对角项,实测
     # ±33% 误差对质量估计零影响,所以给个档位标称值就够,不需要测。
@@ -245,10 +247,13 @@ class MHEParams:
     #            动机:coupled 档 94% 的质量信息来自转动通路,'const' 把 A 冻在
     #            错误值上,SITL smoke 实测带载 m̂ 偏到 −3.58%(现状 +0.4%),还连带
     #            把质量域释放判据推成误触发(早于真 drop 50s)。
-    moment_a_mode = os.environ.get('MHE_MOMENT_A_MODE', 'coupled')
+    # 无事件主线默认 frozen:窗口内切断 m->A 的“惯量旋钮”,窗口间仍用上一拍
+    # m_est 连续刷新 A。合成 attach/drop 回放中 coupled 会在 drop 后把 m 推高
+    # 53%,frozen 则回到空机 -0.34%、s/dJ 同步衰减且无触界。
+    moment_a_mode = os.environ.get('MHE_MOMENT_A_MODE', 'frozen')
     # 载荷质量包线上界 [kg](机架规格,非任务信息)。只在 moment_a_mode='const'
     # 下用来算那个常数 A;口径与 gripper 侧 grip_payload_envelope 一致。
-    mp_envelope = float(os.environ.get('MHE_MP_ENVELOPE', '0.5'))
+    mp_envelope = float(os.environ.get('MHE_MP_ENVELOPE', '0.3'))
     # s 的箱约束:|s| <= m_P_max * r_max。给宽松值,只防优化器跑飞。
     s_abs_max = float(os.environ.get('MHE_S_ABS_MAX', '1.5'))
     # O(r_xy²) 项分母的正则化 [kg],防 m_P→0 时 0/0。
@@ -314,9 +319,10 @@ class MHEParams:
         # ⚠️ 收太紧的风险在另一头:drop 后 s 要能自由归零,锚太强会拖慢熄灭
         #    → 触界可能回来。这是本旋钮的取舍两端,要一起看。
         sigma_s0 = float(os.environ.get('MHE_SIGMA_S0', '0.1'))
-        Q0 = np.diag(np.concatenate([np.diag(Q0), [1/sigma_s0**2, 1/sigma_s0**2]]))
+        Q0 = np.diag(np.concatenate([
+            np.diag(Q0), [1/sigma_s0**2, 1/sigma_s0**2]]))
 
-    nx_aug = nx + nm + ns   # 14(仅估质量) 或 16(+一阶质量矩)
+    nx_aug = nx + nm + ns   # 14(legacy) 或 16(+s_xy)
     nw = nx + (nm + ns if param_noise else 0)
     if param_noise:
         # 参数随机游走的强度。1/σ² 形式:σ_m 是"每秒允许的质量漂移量"[kg/s],

@@ -14,6 +14,8 @@ import sys
 
 import numpy as np
 
+from offboard_test_acados.payload_estimate import headroom_limited_scale
+
 J_A = 0.0142                    # 空机 Jxx
 M_B, G = 2.0643, 9.81
 ARM = 0.47
@@ -86,15 +88,20 @@ def main():
     print(f'  末态收敛到目标: {"OK" if good else "**FAIL**"};'
           f'  全程单调无过冲: {"OK" if mono else "**FAIL**"}')
 
-    # --- 4) 限幅:多大的 setpoint 误差会撞 omega_cmd_max ---
-    print('\n=== 4) 撞限幅门槛(omega_cmd_max=2.0 rad/s) ===')
+    # --- 4) headroom guard:调度补偿不能把 raw command 推进硬限幅 ---
+    print('\n=== 4) headroom guard(omega_cmd_max=2.0 rad/s) ===')
     WMAX = 2.0
     for m_p in (0.15, 0.3, 0.5):
         s = np.clip((J_A + dJ_from_prior(m_p)) / J_A, 1.0, 5.0)
-        # ω_now=0 时,原始 ω_cmd 超过多少就会在缩放后撞限幅
-        thr = WMAX / s
-        print(f'  m_p={m_p:.2f} s={s:.2f} → 原始 |ω_cmd| > {thr:.3f} rad/s 即被截断'
-              f'{"   ← 比常见机动值还低,注意" if thr < 0.5 else ""}')
+        w_now = np.array([0.25, 1.50])
+        w_raw = np.array([0.80, 0.20])
+        s_eff = headroom_limited_scale(w_now, w_raw, s, 0.95 * WMAX)
+        w_scaled = w_now + s_eff * (w_raw - w_now)
+        good = np.max(np.abs(w_scaled)) <= 0.95 * WMAX + 1e-12
+        ok &= good
+        print(f'  m_p={m_p:.2f} s_req={s:.2f} s_eff={s_eff:.2f} '
+              f'max|ω|={np.max(np.abs(w_scaled)):.3f} '
+              f'{"OK" if good else "**FAIL**"}')
 
     print('\n' + ('全部通过' if ok else '** 有失败项 **'))
     print('注:本文件只验证代数等价与低通行为,**闭环稳定性必须由 SITL 判定**。')

@@ -27,6 +27,12 @@ from offboard_test.nmpc_node import quat_to_rotmat
 from .mhe_params import p as mhe_p
 from .mhe_solver_builder import ensure_mhe_ocp_solver
 from .mhe_weight_learning import M0_THETA, ParametricWeightSchedule
+from .payload_estimate import (
+    PayloadEstimate,
+    inertia_from_mass_moment,
+    no_payload_confidence,
+    relative_error_percent,
+)
 from .residual_logger import ResidualLogger
 
 
@@ -109,6 +115,12 @@ class MHENode(Node):
             f'm_min={mhe_p.m_min:.3f}, m_B={mhe_p.m_B:.4f})')
         self.solver = ensure_mhe_ocp_solver()
 
+        # 默认部署链路只允许 motor speed + odometry 进入估计器。旧的 attach/drop
+        # 订阅保留为显式消融开关,但不再是主线的一部分。
+        self.declare_parameter('external_event_inputs', False)
+        self.external_event_inputs = bool(
+            self.get_parameter('external_event_inputs').value)
+
         self.x_meas = None
         self.u_known = None
         self.thrust_phys = None  # 电机转速反算的真实总推力(见 MOTOR_CONSTANT 注释)
@@ -123,6 +135,22 @@ class MHENode(Node):
         # 才是真实冲量;先平均再平方会系统性低估(Jensen)。
         self._motor_f_acc = np.zeros(4)
         self._motor_n = 0
+        # Payload-frame health must describe estimator data age, not publisher
+        # heartbeat age.  A failed solve still publishes held last-good values,
+        # while stopped odometry/motor streams otherwise leave cached inputs in
+        # place indefinitely.
+        self.declare_parameter('payload_input_fresh_sec', 0.30)
+        self.declare_parameter('payload_solution_fresh_sec', 0.30)
+        self.payload_input_fresh_sec = max(
+            float(self.get_parameter('payload_input_fresh_sec').value), mhe_p.dt)
+        self.payload_solution_fresh_sec = max(
+            float(self.get_parameter('payload_solution_fresh_sec').value), mhe_p.dt)
+        self._last_odom_rx_sec = None
+        self._last_motor_rx_sec = None
+        self._last_u_rx_sec = None
+        self._last_solve_success_sec = None
+        self._last_solve_ok = False
+        self._payload_inputs_were_fresh = False
         # attach 实测几何 [rx,ry,rz](box-drone,机体系,rz<0),来自
         # /gripper/attach_offset;喂 _payload_geometry 算 dJ/c_xy 给 MHE 自己的
         # om_dot 用(2026-07-07 坏几何复测发现的修复,见 mhe_params.py n_geom
@@ -167,7 +195,7 @@ class MHENode(Node):
         #    floor 关闭、n=8 → 下垂塌陷 0/8,m_est 仍收敛到 2.357(真值 2.364,
         #    误差 0.3%)。即**几何只需量级大致对以避免模型结构性失配,精确质量
         #    由 MHE 独立负责** —— 这条实测结论正是本次改造敢用常数包线的依据。
-        self.declare_parameter('grip_payload_envelope', 0.5)
+        self.declare_parameter('grip_payload_envelope', 0.3)
         self.grip_payload_envelope = float(
             self.get_parameter('grip_payload_envelope').value)
 
@@ -252,10 +280,10 @@ class MHENode(Node):
         # 既有实验的输入,属于重大静默行为改变。本仓惯例:没有 n>=8 的实测
         # 不改默认值(2026-08-25 dJ 先验去除刚栽在这条上)。先当显式 opt-in,
         # 用来验 2026-08-24 那条"准但混叠"假说;验过再谈默认。
-        self.declare_parameter('motor_window_avg', False)
+        self.declare_parameter('motor_window_avg', True)
         self.motor_window_avg = bool(
             self.get_parameter('motor_window_avg').value)
-        self.declare_parameter('mhe_tau_source', 'command')
+        self.declare_parameter('mhe_tau_source', 'phys_full')
         self.tau_source = str(
             self.get_parameter('mhe_tau_source').value).lower()
         if self.tau_source not in ('command', 'phys', 'phys_full'):
@@ -355,6 +383,28 @@ class MHENode(Node):
         self.m_est = mhe_p.m_nominal
         # 一阶质量矩估计 s=m_P·r_xy [kg·m](estimate_moment 档才有;否则恒为空数组)
         self.s_est = np.zeros(mhe_p.ns)
+        # 对外发布的是连续、物理可消费的载荷状态。m_payload 与 s 经同一个一阶
+        # 平滑器后再派生 c/J,因此 drop 时不会出现任何事件清零阶跃。
+        self.declare_parameter('payload_output_tau_sec', 0.25)
+        self.payload_output_tau = max(
+            float(self.get_parameter('payload_output_tau_sec').value), 1e-3)
+        self.declare_parameter('no_payload_mass_full', 0.015)
+        self.declare_parameter('no_payload_mass_zero', 0.060)
+        self.declare_parameter('no_payload_moment_full', 0.0015)
+        self.declare_parameter('no_payload_moment_zero', 0.0060)
+        self.declare_parameter('no_payload_inertia_full', 0.0020)
+        self.declare_parameter('no_payload_inertia_zero', 0.0100)
+        self._payload_conf_args = {
+            'mass_full': float(self.get_parameter('no_payload_mass_full').value),
+            'mass_zero': float(self.get_parameter('no_payload_mass_zero').value),
+            'moment_full': float(self.get_parameter('no_payload_moment_full').value),
+            'moment_zero': float(self.get_parameter('no_payload_moment_zero').value),
+            'inertia_full': float(self.get_parameter('no_payload_inertia_full').value),
+            'inertia_zero': float(self.get_parameter('no_payload_inertia_zero').value),
+        }
+        self._m_payload_out = 0.0
+        self._s_out = np.zeros(2)
+        self._no_payload_confidence = 1.0
         # 连续 solve 失败计数。失败时 x0_bar/x_guess 不更新而 y_buf/u_buf 照常
         # 滑动,先验会越滞后越矛盾 → status=2 自锁死循环(2026-07-06 吊挂
         # LIFT 暂态实测:一次硬失败后 2000+ 窗口连败、m_est 冻结)。连败达
@@ -570,6 +620,82 @@ class MHENode(Node):
         self._c_xy_mass_low = 0
         self._c_xy_mass_high = 0
         self._c_xy_mass_armed = False
+
+        # ---- 一阶质量矩的释放(2026-09-04)----
+        # 96 架次主线批次坐实的阻塞缺陷:_release_payload 只归零 c_xy_est,
+        # **不动 s**,而 _publish_payload_estimate 的 s_target 直接取 self.s_est
+        # —— drop 后 m 已正确回到空机、s 却停在 8~13mm 的幽灵偏心上,
+        # no_payload_confidence 的乘积判据被 s 项一票否决(conf 恒 0.000),
+        # NMPC 的 drop 因此永远 complete 不了(7/48 轮,全在机动工况)。
+        # 修法是把**目标**切零而不是放宽阈值:放宽只是绕过幽灵 s,模型照样
+        # 吃着残余偏心飞。对外的 _s_out 仍走原来的 LPF 连续衰减到零,接口上
+        # 没有阶跃。
+        self._s_release_latched = False
+
+        # ---- 载荷存在状态机(2026-09-04)----
+        # EMPTY ──自主检测 ATTACH / 持续载荷证据──> LOADED
+        # LOADED ──自主检测 DROP  / 持续空载证据──> EMPTY
+        #
+        # 为什么必须独立于 _payload_attached:后者的语义是"收到过外部 attach
+        # 通知",而连续主线的前提正是**不发**这个通知 —— 三条自主释放路径
+        # (step-detect / no-signal 残差 / 质量域)全都写着 and self._payload_attached,
+        # 于是在主线档下一条都进不去,_release_payload 从未被调用过(2026-09-04
+        # 第二轮批次第 2 架次坐实:no-signal 明明检出了 DROP,却被这个门挡下)。
+        # 这里给出估计器**自己**判定的存在状态,两个状态不混用:_payload_attached
+        # 继续只表示外部事件,_payload_present 才是释放路径的门控。外部通知不再是
+        # 进入这些路径的必要条件 —— 也不作为充分条件,免得又把两者绑在一起。
+        self.declare_parameter('payload_present_enter_mp', 0.09)   # kg
+        self.declare_parameter('payload_present_enter_persist', 20)  # 帧,10Hz->2s
+        # 退出是**慢兜底**,不是主力:主力是残差 DROP 快速通道。0.02kg/5s 比进入
+        # 严得多,且只在低机动窗口累计(见 _mass_observable)——4m/s figure8 段 m_p
+        # 会周期性探底到 −0.10kg(机动低估,见记忆 mest-maneuver-underestimate),
+        # 拿绝对阈值在机动中判空载必然误判。09-04 首次 smoke 实测:2s 窗口下
+        # figure8 段误退 3 次,EMPTY 窗口占比 9.7%。
+        self.declare_parameter('payload_present_exit_mp', 0.02)    # kg
+        self.declare_parameter('payload_present_exit_persist', 50)  # 帧,10Hz->5s
+        # 质量可观测窗口的门槛(与 c_xy_steady_* 同量纲但**独立**:那两个管的是
+        # "力矩采样干不干净",这两个管的是"质量估计可不可信",不该一起调)。
+        self.declare_parameter('payload_exit_steady_omega', 0.15)  # rad/s
+        self.declare_parameter('payload_exit_steady_vel', 0.20)    # m/s
+        self.payload_present_enter_mp = float(
+            self.get_parameter('payload_present_enter_mp').value)
+        self.payload_present_enter_persist = max(
+            1, int(self.get_parameter('payload_present_enter_persist').value))
+        self.payload_present_exit_mp = float(
+            self.get_parameter('payload_present_exit_mp').value)
+        self.payload_present_exit_persist = max(
+            1, int(self.get_parameter('payload_present_exit_persist').value))
+        self.payload_exit_steady_omega = float(
+            self.get_parameter('payload_exit_steady_omega').value)
+        self.payload_exit_steady_vel = float(
+            self.get_parameter('payload_exit_steady_vel').value)
+        self._payload_present = False      # False=EMPTY, True=LOADED(瞬时判定)
+        # ★ "本轮曾可靠进入过 LOADED" 的 latch。释放路径的门控用**它**,不用瞬时
+        # _payload_present:机动中质量探底会让后者临时翻回 EMPTY,若拿它当门控,
+        # 真 drop 恰好落在那个窗口时,残差明明检出了 DROP 也会被自己的门挡住
+        # (09-04 smoke 实测该窗口占 figure8 段的 9.7%)。armed 只在**真实释放
+        # 完成**时清除,所以临时 EMPTY 不会挡住随后的真 drop。
+        self._load_armed = False
+        # [s-decay] 日志:释放后逐帧记 s 的衰减,用来回答"对外是否连续、有没有阶跃"
+        # (_s_out 原先只发布不落日志,SITL 里看不到时序)。10Hz × 100 帧 = 10s,
+        # 足够覆盖 payload_output_tau=0.3s 的 LPF 全过程。
+        self.declare_parameter('s_decay_log_frames', 100)
+        self.s_decay_log_frames = max(
+            0, int(self.get_parameter('s_decay_log_frames').value))
+        self._s_decay_n = 0
+        self._s_out_prev = np.zeros(2)
+        self._present_hi = 0
+        self._present_lo = 0
+        # 辅助(非主力)判据:武装期间记 |s| 峰值,衰减到 ratio×峰值并持续若干帧
+        # 也算释放。给"m̂ 卡住但 s 已经回零"这类情形留一条路;主力仍是质量域。
+        # ratio<=0 关闭。
+        self.declare_parameter('s_release_ratio', 0.10)
+        self.declare_parameter('s_release_persist', 20)   # 帧,10Hz->2s
+        self.s_release_ratio = float(self.get_parameter('s_release_ratio').value)
+        self.s_release_persist = max(
+            1, int(self.get_parameter('s_release_persist').value))
+        self._s_peak = 0.0
+        self._s_low = 0
         if self.c_xy_mass_release_mp > 0.0 and self.geom_release_mode != 'self':
             self.get_logger().error(
                 "c_xy_mass_release_mp 只在 geom_release_mode='self' 下可用"
@@ -600,7 +726,7 @@ class MHENode(Node):
         # 这条路打通后 NMPC 才谈得上"自己发现载荷没了" —— 在此之前它手里的偏心
         # 是个冻结的常数,谈不上估计。
         # ⚠️ 只在 ns>0(MHE_ESTIMATE_MOMENT=1)时可用;默认关,保持既有行为。
-        self.declare_parameter('c_xy_from_moment', False)
+        self.declare_parameter('c_xy_from_moment', bool(mhe_p.ns))
         self.c_xy_from_moment = bool(
             self.get_parameter('c_xy_from_moment').value)
         if self.c_xy_from_moment and not mhe_p.ns:
@@ -717,8 +843,11 @@ class MHENode(Node):
         self.odom_sub = self.create_subscription(
             Odometry, '/mavros/local_position/odom',
             self.odom_cb, mavros_sensor_qos)
-        self.u_opt_sub = self.create_subscription(
-            Float64MultiArray, '/acados_nmpc/u_opt', self.u_opt_cb, 10)
+        # sensor-only 主线不读取 NMPC 意图输入;motor_speed_cb 直接提供完整的
+        # [T,tau]。打开 external_event_inputs 才恢复旧的 command/event 接线。
+        if self.external_event_inputs:
+            self.u_opt_sub = self.create_subscription(
+                Float64MultiArray, '/acados_nmpc/u_opt', self.u_opt_cb, 10)
         # PX4 发给 Gazebo 电机模型的转速指令(经 ros_gz_bridge 桥接,跟
         # prop_joint_state_publisher 用的是同一个话题/同一套 QoS=depth10)。
         # 话题名做成参数:mass_changer 场景是 x500_payload_0,夹爪场景是空机
@@ -735,11 +864,12 @@ class MHENode(Node):
         # - gripper 场景:proximity 节点 attach 瞬间发 /gripper/attach_offset。
         #   注意发布方是 TRANSIENT_LOCAL latched,这里故意用默认 VOLATILE 订阅
         #   ——只收活消息,MHE 重启时不会把旧的 latched attach 当成新事件。
-        self.mass_event_sub = self.create_subscription(
-            Empty, '/acados_nmpc/mass_event', self.mass_event_cb, 10)
-        self.attach_event_sub = self.create_subscription(
-            Float64MultiArray, '/gripper/attach_offset',
-            self.attach_event_cb, 10)
+        if self.external_event_inputs:
+            self.mass_event_sub = self.create_subscription(
+                Empty, '/acados_nmpc/mass_event', self.mass_event_cb, 10)
+            self.attach_event_sub = self.create_subscription(
+                Float64MultiArray, '/gripper/attach_offset',
+                self.attach_event_cb, 10)
 
         self.mass_pub = self.create_publisher(
             Float64, '/acados_nmpc/mhe_mass_estimate', 10)
@@ -750,6 +880,10 @@ class MHENode(Node):
         # attach 真值反推的几何(Phase1 只发+记录,NMPC 暂不吃)
         self.c_xy_est_pub = self.create_publisher(
             Float64MultiArray, '/acados_nmpc/c_xy_est', 10)
+        # 原子化连续估计帧。字段顺序由 payload_estimate.FIELDS 唯一定义;
+        # NMPC 主线只订阅这一条,不会混用不同 MHE 周期的 m/s/J。
+        self.payload_estimate_pub = self.create_publisher(
+            Float64MultiArray, '/mhe/payload_estimate', 10)
         # 载荷意外脱落告警(见 payload_lost_watch_enable):MHE→NMPC 的唯一一条
         # 反向通路,收方复位内环增益 + 归零几何。RELIABLE 默认 QoS 即可(单次事件)。
         self.payload_lost_pub = self.create_publisher(
@@ -833,6 +967,7 @@ class MHENode(Node):
         if not np.all(np.isfinite(x)):
             return
         self.x_meas = x
+        self._last_odom_rx_sec = self.get_clock().now().nanoseconds * 1e-9
 
     def motor_speed_cb(self, msg):
         if len(msg.velocity) >= 4:
@@ -853,15 +988,81 @@ class MHENode(Node):
                 tau_yaw = YAW_TORQUE_SIGN * MOMENT_CONSTANT * float(
                     np.sum(YAW_DIR * f))
                 self.tau_phys = np.array([tau_roll, tau_pitch, tau_yaw])
+                _now = self.get_clock().now().nanoseconds * 1e-9
+                self._last_motor_rx_sec = _now
                 self.resid_log.log_motor(msg, w, self.tau_phys,
                                          self.thrust_phys)
                 # pre-offboard 冷启动:NMPC 还没接管时,用纯电机反算值合成
                 # u_known,让 timer_cb 的 `u_known is None` 那道门放行。
                 # 一旦 u_opt 到达(_u_from_nmpc=True)就永久让位给 u_opt_cb。
-                if (self.pre_offboard_estimate and not self._u_from_nmpc
+                if ((not self.external_event_inputs
+                     or (self.pre_offboard_estimate and not self._u_from_nmpc))
                         and self._pre_offboard_gate_ok()):
                     self.u_known = np.array(
                         [self.thrust_phys, tau_roll, tau_pitch, tau_yaw])
+                    self._last_u_rx_sec = _now
+
+    def _mass_observable(self):
+        """质量估计当前是否可信到能用来判"空载"(低机动窗口)。
+
+        机动中 m_p 周期性探底到负值,任何正阈值都拦不住,所以 figure8 这类高动态
+        段**不累计**退出计数(而不是放宽阈值——放宽只是把误判推迟)。进入 LOADED
+        不受此门控:m_p 高于入阈是正证据,机动只会让它偏低、不会凭空造出载荷。
+        """
+        if self.x_meas is None:
+            return False
+        om = float(np.linalg.norm(self.x_meas[10:13]))
+        v_xy = float(np.linalg.norm(self.x_meas[3:5]))
+        return (om <= self.payload_exit_steady_omega
+                and v_xy <= self.payload_exit_steady_vel)
+
+    def _update_payload_presence(self, event=None):
+        """更新自主载荷存在状态(见 __init__ 里 _payload_present)。
+
+        两条入口:
+          event='attach'/'drop' —— 残差检测器自己看出来的质量突变,快速通道;
+          event=None            —— 逐帧的持续证据,用 m_p 的双阈值+持续帧数。
+        双阈值(进 0.09kg / 出 0.03kg)是迟滞,不是随手取的两个数:attach 收敛期
+        m_p 天然偏小,单阈值会在 LIFT 刚开始就来回翻(质量域判据第一版就是这么
+        栽的,见 c_xy_mass_arm_ratio 的注释)。
+
+        进入 LOADED 时解除 s 的释放闩:重新带载后 s 的发布目标必须回到估计值。
+        """
+        prev = self._payload_present
+        if event == 'attach':
+            self._payload_present = True
+            self._present_hi = self._present_lo = 0
+        elif event == 'drop':
+            self._payload_present = False
+            self._present_hi = self._present_lo = 0
+        else:
+            m_p = float(self.m_est) - mhe_p.m_B
+            if not self._payload_present:
+                if m_p > self.payload_present_enter_mp:
+                    self._present_hi += 1
+                    if self._present_hi >= self.payload_present_enter_persist:
+                        self._payload_present = True
+                        self._present_hi = 0
+                else:
+                    self._present_hi = 0
+            else:
+                if not self._mass_observable():
+                    self._present_lo = 0      # 高动态:清除退出计数,不冻结
+                elif m_p < self.payload_present_exit_mp:
+                    self._present_lo += 1
+                    if self._present_lo >= self.payload_present_exit_persist:
+                        self._payload_present = False
+                        self._present_lo = 0
+                else:
+                    self._present_lo = 0
+        if self._payload_present != prev:
+            src = event if event else 'sustained m_p evidence'
+            self.get_logger().info(
+                f'[payload-state] {"EMPTY->LOADED" if self._payload_present else "LOADED->EMPTY"}'
+                f' ({src}, m_p={float(self.m_est) - mhe_p.m_B:+.3f}kg)')
+            if self._payload_present:
+                self._load_armed = True       # 本轮确实带上过载荷
+                self._s_release_latched = False
 
     def _release_payload(self, src):
         """载荷卸载时的**对称释放**:三条触发路径(外部 mass_event / 残差慢基线
@@ -880,6 +1081,19 @@ class MHENode(Node):
         不必从带载旧值慢慢 EMA 爬回来。"""
         self._payload_attached = False
         self.attach_offset = None
+        # s 的目标切零(见 __init__ 里 _s_release_latched)。清的是**发布目标**,
+        # 不是 self.s_est ——后者是窗口解出来的状态,下一帧照样会算出残值来;
+        # 真正要断的是它到 _s_out 的那条链。_s_out 自己按 LPF 连续衰减。
+        self._s_release_latched = True
+        # 释放真的发生了,才清"本轮曾加载"的 latch。清早了(比如临时 EMPTY 就清)
+        # 就会把随后的真 drop 挡在门外。
+        self._load_armed = False
+        self._s_decay_n = 0            # 开始记 [s-decay]
+        self._payload_present = False
+        self._present_hi = 0
+        self._present_lo = 0
+        self._s_peak = 0.0
+        self._s_low = 0
         if self._c_xy_inited or bool(np.any(self.c_xy_est)):
             self.c_xy_est = np.zeros(2)
             self._c_xy_inited = False
@@ -993,7 +1207,9 @@ class MHENode(Node):
         if data.shape[0] == 3 and np.all(np.isfinite(data)):
             self.attach_offset = data
             self._r_p_last = data.copy()   # 'self' 释放模式下模型只认它
-            self._payload_attached = True   # 载荷上机,开放几何修正
+            self._payload_attached = True   # 载荷上机(**外部**通知,legacy 档用)
+            # s 的释放闩由自主状态机负责解除(见 _update_payload_presence),
+            # 这里不碰 —— 外部事件状态与估计器自主状态不混用。
         self._on_mass_event('attach (gripper)')
 
     def _payload_geometry(self, r_p):
@@ -1130,7 +1346,7 @@ class MHENode(Node):
 
     @staticmethod
     def _aug(y13, m_seed):
-        """把 13 维量测拼成 MHE 的增广状态初值(14 或 16 维)。s 一律从 0 起——
+        """把 13 维量测拼成 MHE 的增广状态初值。s/dJ 一律从 0 起——
         它是"载荷的转动特征",没证据之前默认没有载荷。"""
         return np.concatenate([y13, [m_seed], np.zeros(mhe_p.ns)])
 
@@ -1162,6 +1378,79 @@ class MHENode(Node):
         mu = m_b * m_p / m_t
         return J + mu * (float(r_p @ r_p) * np.eye(3) - np.outer(r_p, r_p))
 
+    def _payload_inputs_fresh(self, now=None):
+        """Whether all physical/known-input streams are recent enough."""
+        if now is None:
+            now = self.get_clock().now().nanoseconds * 1e-9
+        stamps = (self._last_odom_rx_sec, self._last_motor_rx_sec,
+                  self._last_u_rx_sec)
+        return all(
+            stamp is not None and 0.0 <= now - stamp <= self.payload_input_fresh_sec
+            for stamp in stamps)
+
+    def _payload_frame_health(self):
+        """Return ``(healthy, solution_age)`` for the atomic output frame."""
+        now = self.get_clock().now().nanoseconds * 1e-9
+        inputs_fresh = self._payload_inputs_fresh(now)
+        solution_age = (1.0e6 if self._last_solve_success_sec is None else
+                        max(0.0, now - self._last_solve_success_sec))
+        healthy = (self._last_solve_ok and inputs_fresh
+                   and solution_age <= self.payload_solution_fresh_sec)
+        return bool(healthy), float(solution_age)
+
+    def _publish_payload_estimate(self):
+        """Publish one coherent, continuous m/s/c/J/confidence estimate frame."""
+        healthy, solution_age = self._payload_frame_health()
+        if healthy:
+            alpha = 1.0 - math.exp(-mhe_p.dt / self.payload_output_tau)
+            mp_target = max(float(self.m_est) - mhe_p.m_B, 0.0)
+            if self._s_release_latched:
+                # 载荷已释放:目标零。_s_out 的 LPF 负责把残值连续带下去。
+                s_target = np.zeros(2)
+            elif mhe_p.ns:
+                s_target = np.asarray(self.s_est, dtype=float)
+            else:
+                # Legacy fallback only; the default moment model always takes
+                # this first branch.
+                s_target = max(float(self.m_est), 1e-6) * np.asarray(
+                    self.c_xy_est, dtype=float)
+            self._m_payload_out += alpha * (mp_target - self._m_payload_out)
+            self._s_out += alpha * (s_target - self._s_out)
+        m_out = mhe_p.m_B + self._m_payload_out
+        c_xy, dJ_diag, J_diag = inertia_from_mass_moment(
+            m_out, self._s_out, mhe_p.m_B,
+            [mhe_p.Jxx, mhe_p.Jyy, mhe_p.Jzz], mhe_p.rz_prior,
+            payload_ki=mhe_p.payload_ki)
+        if healthy:
+            conf_target = no_payload_confidence(
+                self._m_payload_out, self._s_out, dJ_diag,
+                **self._payload_conf_args)
+            self._no_payload_confidence += alpha * (
+                conf_target - self._no_payload_confidence)
+        estimate = PayloadEstimate(
+            m_total=m_out, s_xy=self._s_out.copy(), c_xy=c_xy,
+            dJ_diag=dJ_diag, J_diag=J_diag,
+            no_payload_confidence=self._no_payload_confidence,
+            healthy=healthy, solution_age_sec=solution_age)
+        self.payload_estimate_pub.publish(
+            Float64MultiArray(data=estimate.as_array().tolist()))
+        if self._s_release_latched and self._s_decay_n < self.s_decay_log_frames:
+            self._s_decay_n += 1
+            s_est_n = (float(np.linalg.norm(self.s_est)) if mhe_p.ns else
+                       float(np.linalg.norm(np.asarray(self.c_xy_est)
+                                            * max(float(self.m_est), 1e-6))))
+            s_out_n = float(np.linalg.norm(self._s_out))
+            self.get_logger().info(
+                f'[s-decay] n={self._s_decay_n} |s_est|={s_est_n:.5f} '
+                f'|s_target|=0.00000 |s_out|={s_out_n:.5f} '
+                f'd_s_out={s_out_n - float(np.linalg.norm(self._s_out_prev)):+.5f} '
+                f'conf={self._no_payload_confidence:.3f} '
+                f'present={int(self._payload_present)} '
+                f'armed={int(self._load_armed)} '
+                f'latched={int(self._s_release_latched)} '
+                f'health={int(bool(healthy))}')
+        self._s_out_prev = self._s_out.copy()
+
     def _apply_forgetting(self):
         """逐 stage 按年龄给 R/Q 打折(见 mhe_params.forgetting_lambda)。
         stage j 的年龄 = N-1-j(j=0 最老),权重乘 λ^年龄。stage 0 额外带到达
@@ -1190,6 +1479,11 @@ class MHENode(Node):
         'self' :永不被告知 drop,保持最后一次 attach 的杆臂;载荷贡献靠
                 m_P=(m−m_B)⁺ 随质量估计自行熄灭(见 __init__ 里该参数注释)。
         两种模式在 attach **之前**都是零(那时确实还没有任何杆臂信息)。"""
+        if not self.external_event_inputs and mhe_p.estimate_moment:
+            # s_xy carries all lateral geometry.  Only the rack's weak vertical
+            # arm prior is needed for inertia, and it is present continuously;
+            # neither attach nor drop changes this parameter slot.
+            return np.array([0.0, 0.0, mhe_p.rz_prior])
         if self.geom_release_mode == 'self':
             return (np.zeros(3) if self._r_p_last is None
                     else np.asarray(self._r_p_last, dtype=float))
@@ -1333,7 +1627,7 @@ class MHENode(Node):
                     # 释放几何用**更高**的门槛:轨迹切换与质量突变在推力通道上
                     # 不可分,误降权只是慢一点,误释放几何会让模型丢掉还挂着的载荷。
                     if (_dropped and self.resid_release_geom
-                            and self._payload_attached
+                            and self._load_armed
                             and -_d >= self.resid_step_release_thresh):
                         # 只释放几何状态。棘轮 _m_p_hat_ratchet 已随 2026-08-26
                         # 去先验改造移除(几何标度改用常数包线,不再读 m_est,
@@ -1405,10 +1699,15 @@ class MHENode(Node):
                 # mass_event_cb 的理由:让估计器自己连续收敛回空机,才验证得了
                 # "模型正确后它能回归"。
                 if (dropped and self.resid_release_geom
-                        and self._payload_attached):
+                        and self._load_armed):
+                    self._update_payload_presence('drop')
                     self._release_payload('no-signal residual')
                     self.get_logger().info(
                         '[no-signal] → 自主释放载荷几何(无外部 drop 信号)')
+                elif not dropped:
+                    # 检出的是 ATTACH 方向:快速通道进 LOADED,不必等 m_p 攒够
+                    # 持续帧 —— 残差看见的承重比质量收敛早得多。
+                    self._update_payload_presence('attach')
                 self._resid_pending = 0
             return
         # 未越阈(或阵风脉冲已回落):清持续计数,慢基线继续低通跟踪长期缓漂
@@ -1449,6 +1748,7 @@ class MHENode(Node):
                     u[3] = float(self.tau_phys[2])
                 # 'phys' 档:u[3] 仍是 NMPC 意图值(legacy,实测比真实大 3 倍)
             self.u_known = u
+            self._last_u_rx_sec = self.get_clock().now().nanoseconds * 1e-9
 
     def _drain_motor_avg(self):
         """取出上一个 MHE 采样区间内电机推力的**平均**,并清空累加器。
@@ -1475,6 +1775,28 @@ class MHENode(Node):
         # 这段时间没有意义的输入,直接跳过,不往缓冲区塞假数据。
         if self.x_meas is None or self.u_known is None:
             return
+        # Do not duplicate cached odometry/control into the MHE window.  Keep a
+        # heartbeat alive so NMPC immediately sees ``healthy=0`` and holds the
+        # last safe model instead of interpreting publication as freshness.
+        now = self.get_clock().now().nanoseconds * 1e-9
+        inputs_fresh = self._payload_inputs_fresh(now)
+        if not inputs_fresh:
+            if self._payload_inputs_were_fresh:
+                # A temporal hole invalidates the fixed-dt window.  Rebuild it
+                # entirely from fresh samples instead of solving across the gap.
+                self.y_buf.clear()
+                self.u_buf.clear()
+                self.x0_bar = None
+                self.x_guess = None
+                self._last_solve_ok = False
+                self.get_logger().warn(
+                    '[payload-health] input stream stale; MHE window cleared, '
+                    'publishing held estimate as unhealthy')
+            self._payload_inputs_were_fresh = False
+            if self._mass_publish_allowed():
+                self._publish_payload_estimate()
+            return
+        self._payload_inputs_were_fresh = True
         # internal 流:MHE 自身状态,供离线诊断做分桶(空载/带载)与几何真值对照
         self.resid_log.log_internal(self.m_est, self._payload_attached,
                                     self.attach_offset, self.thrust_phys,
@@ -1500,6 +1822,9 @@ class MHENode(Node):
         if len(self.u_buf) > mhe_p.N:
             self.u_buf.pop(0)
         self.frames += 1
+        # 先更新自主存在状态:下面的检测器和质量域判据都以它为门控,必须先于
+        # 它们跑,否则本帧的释放会用上一帧的状态。
+        self._update_payload_presence()
         if self.payload_lost_watch:
             self._payload_lost_watch()
         if self.event_enabled and self.signal_mode == 'residual':
@@ -1511,9 +1836,16 @@ class MHENode(Node):
             self._update_c_xy_est()
 
         if len(self.y_buf) < mhe_p.N + 1:
+            if self._mass_publish_allowed():
+                self._publish_payload_estimate()
             return  # 窗口还没攒满
 
         self._solve_window()
+        # Publish every estimator tick, including a held last-good state after a
+        # failed solve.  Consumers can therefore use freshness independently of
+        # solver status and never need an event fallback.
+        if self._mass_publish_allowed():
+            self._publish_payload_estimate()
 
     def _update_c_xy_est(self):
         """强闭环 c_xy 在线估计(B.3 Phase1,只记录不闭环)。稳态悬停时从电机
@@ -1522,7 +1854,7 @@ class MHENode(Node):
         # 质量域卸载判据(见 __init__ 里 c_xy_mass_release_mp)。**必须放在最前**:
         # 下面的稳态门控在机动中直接 return,放它后面就永远轮不到 —— 而"机动中
         # 也要能熄灭"正是它存在的理由。
-        if self.c_xy_mass_release_mp > 0.0 and self._payload_attached:
+        if self.c_xy_mass_release_mp > 0.0 and self._load_armed:
             _m_p = float(self.m_est) - mhe_p.m_B
             if not self._c_xy_mass_armed:
                 # 未武装:只等 m_p 爬过高水位,期间**不判释放**(attach 收敛期
@@ -1537,18 +1869,39 @@ class MHENode(Node):
                 else:
                     self._c_xy_mass_high = 0
                 self._c_xy_mass_low = 0
+            elif not self._mass_observable():
+                self._c_xy_mass_low = 0   # 高动态:质量不可观测,不累计释放计数
             elif _m_p < self.c_xy_mass_release_mp:
                 self._c_xy_mass_low += 1
                 if self._c_xy_mass_low >= self.c_xy_mass_release_persist:
                     self._c_xy_mass_low = 0
                     self._c_xy_mass_high = 0
                     self._c_xy_mass_armed = False
+                    self._update_payload_presence('drop')
                     self._release_payload(
                         f'mass-based m_p<{self.c_xy_mass_release_mp:.3f}kg'
                         f' x{self.c_xy_mass_release_persist}帧')
                     return
             else:
                 self._c_xy_mass_low = 0
+            # 辅助判据(见 __init__ 里 s_release_ratio)。质量域是主力,这条只在
+            # 已武装、且 |s| 相对**自己的峰值**塌下去时补一刀,覆盖"m̂ 卡在带载值
+            # 但 s 已经回零"这类质量域看不见的情形。用相对量而不是绝对阈值:
+            # 残余 |s| 的量级随载荷和力臂变,固定阈值要么太松要么太紧。
+            if (self._c_xy_mass_armed and self.s_release_ratio > 0.0
+                    and mhe_p.ns and self._load_armed):
+                s_norm = float(np.linalg.norm(self.s_est))
+                self._s_peak = max(self._s_peak, s_norm)
+                if (self._s_peak > 0.0
+                        and s_norm < self.s_release_ratio * self._s_peak):
+                    self._s_low += 1
+                    if self._s_low >= self.s_release_persist:
+                        self._release_payload(
+                            f'|s|={s_norm:.4f} < {self.s_release_ratio:.2f}x'
+                            f' peak {self._s_peak:.4f}')
+                        return
+                else:
+                    self._s_low = 0
         # --- 一阶质量矩驱动(见 __init__ 里 c_xy_from_moment 注释)---
         # 放在最前:这条路不依赖 tau_phys/稳态,s 本身就是窗口解算出来的。
         if self.c_xy_from_moment and mhe_p.ns:
@@ -1656,7 +2009,7 @@ class MHENode(Node):
         # 逐帧历史值语义不同。没有 attach(wrench 场景/attach 前)则为全零。
         # 门控用物理状态 _payload_attached(不是 attach_offset is None——后者
         # 保留最后几何、表达不了"货已卸";见 __init__ 注释)。
-        if mhe_p.geom_coupled:
+        if mhe_p.geom_coupled or mhe_p.estimate_moment:
             # 耦合档:geom 槛位装**载荷几何偏移 r_p**,dJ/c 由模型内部按被估质量
             # 现算(见 mhe_model.py)。这里不再需要任何 m_p_hat ——
             # grip_payload_envelope 在这一档**不参与**(历史上的先验/地板/棘轮
@@ -1743,6 +2096,7 @@ class MHENode(Node):
         status = self.solver.solve()
         self._solve_ms.append((time.time() - _t_solve0) * 1000.0)
         if status != 0:
+            self._last_solve_ok = False
             self._fail_streak += 1
             self.get_logger().warn(
                 f'MHE solve failed [status={status}], skipping this window '
@@ -1779,13 +2133,22 @@ class MHENode(Node):
                 self.m_est = m_seed
                 self._fail_streak = 0
             return
-        self._fail_streak = 0
-
         x_sol = [self.solver.get(i, 'x') for i in range(N + 1)]
+        if not all(np.all(np.isfinite(x)) for x in x_sol):
+            self._last_solve_ok = False
+            self._fail_streak += 1
+            self.get_logger().warn(
+                'MHE returned non-finite state with success status; '
+                f'holding last payload estimate (streak {self._fail_streak})')
+            return
         self.m_est = float(x_sol[N][nx])
         if mhe_p.ns:
             self.s_est = np.array(x_sol[N][nx + mhe_p.nm:nx + mhe_p.nm + mhe_p.ns],
                                   dtype=float)
+        self._last_solve_ok = True
+        self._last_solve_success_sec = (
+            self.get_clock().now().nanoseconds * 1e-9)
+        self._fail_streak = 0
 
         # 事件后逐帧打日志(平时 2s 一条太粗,量不出亚秒级收敛)。窗口由
         # _on_mass_event 设定、与调度开关解耦——对照组(触发关)也照打,
@@ -1865,13 +2228,17 @@ class MHENode(Node):
                     _c = float(np.clip(_c, 1e-3, 1.0))
                     _mq = self.thrust_phys * _c / mhe_p.g       # 准静态质量
                     _vz = float(self.x_meas[5])
+                    # Ground/pre-arm diagnostics can legitimately have T=0.
+                    # Never let a log-only percentage divide by zero take down
+                    # the estimator node.
+                    _bias_pct = relative_error_percent(self.m_est, _mq)
                     self.get_logger().info(
                         f'[mass-diag] m_est={self.m_est:.4f} T={self.thrust_phys:.3f}N '
                         f'tilt={math.degrees(math.acos(_c)):.2f}deg cos={_c:.5f} '
                         f'| T/g={self.thrust_phys / mhe_p.g:.4f} '
                         f'T*cos/g={_mq:.4f} '
                         f'| m_est-T*cos/g={self.m_est - _mq:+.4f}kg '
-                        f'({(self.m_est - _mq) / _mq * 100:+.2f}%) vz={_vz:+.3f}')
+                        f'({_bias_pct:+.2f}%) vz={_vz:+.3f}')
             # B.3 Phase1 验证行:在线 c_xy 估计 vs attach 真值反推的 c_xy。质量
             # 因子用 eval_true_payload_mass(**纯评估**真值,不通往模型),否则退回
             # m_est 反推 —— 后者只是个标签近似,不是真值(见记忆 cxy-truth-label-defect:

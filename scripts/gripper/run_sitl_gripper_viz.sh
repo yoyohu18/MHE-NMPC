@@ -18,12 +18,12 @@
 #    ⚠️ r 与 z 必须配套:r=10 在 z=2.5 会必然发散坠毁(记忆 high-maneuver-ablation),
 #       只改一个是危险的。
 #    回到 2026-09-01 之前的旧默认(2m/s 工作点 + 有信号 event 主线),整行覆盖:
-#      GRIP_PAYLOAD_KG=0.3 GRIP_PAYLOAD_ENVELOPE=0.5 GRIP_DYN_R=5.0 GRIP_DYN_RAMP=3.0 \
+#      GRIP_PAYLOAD_KG=0.15 GRIP_PAYLOAD_ENVELOPE=0.3 GRIP_DYN_R=5.0 GRIP_DYN_RAMP=3.0 \
 #      GRIP_Z_HIGH=2.5 GRIP_LIFT_DUR=3.0 DROP_PUBLISH_MASS_EVENT=true \
 #      MHE_SIGNAL_MODE=external MHE_GEOM_RELEASE_MODE=event MHE_CXY_MASS_RELEASE_MP=0 \
 #      MHE_CONFIRM_ALPHA=-1 bash src/scripts/gripper/run_sitl_gripper_viz.sh
 #
-# 用法:  [GRIP_PAYLOAD_KG=0.3 GRIP_ECC_Y=0.10 METHOD=thetastar GRIP_DYN_R=5.0 \
+# 用法:  [GRIP_PAYLOAD_KG=0.15 GRIP_ECC_Y=0.10 METHOD=thetastar GRIP_DYN_R=5.0 \
 #          GRIP_DYN_W=0.283 GRIP_DYN_DZ=0.8 GRIP_DROP_AFTER=55.0 \
 #          GRIP_DROP_AT_TIP=true GRIP_DYNAMIC=true \
 #          GRIP_PAYLOAD_ENVELOPE=0.5 MHE_CONFIRM_ALPHA=0.9875] \
@@ -121,9 +121,12 @@ MP_CAP_D=$(_f2dv "${GRIP_MP_CAP:-0.6}")
 #       (MODEL_NAME 带 _coupled 后缀,与 legacy 目录隔离,不互相覆盖)。
 # ⚠️ 只改**这一侧**:NMPC_GEOM_COUPLED 保持关(可用边界 r_y≲0.05m,而本场景
 #    ecc=0.10 远在禁区外);推荐组合是 MHE coupled + NMPC 几何走 online。
-# ⚠️ 未覆盖:4m/s 工作点、一阶质量矩(MHE_ESTIMATE_MOMENT)仍默认关。
+# ⚠️ 未覆盖:4m/s 工作点；一阶质量矩在无事件主线默认开启。
 # 回退:MHE_GEOM_COUPLED=0
 export MHE_GEOM_COUPLED="${MHE_GEOM_COUPLED:-1}"
+export MHE_ESTIMATE_MOMENT="${MHE_ESTIMATE_MOMENT:-1}"
+export MHE_MOMENT_A_MODE="${MHE_MOMENT_A_MODE:-frozen}"
+export MHE_SIGMA_S0="${MHE_SIGMA_S0:-0.1}"
 MANEUVER_GATE=$(_b "${MHE_MANEUVER_GATE:-false}")
 RESID_RELEASE_GEOM=$(_b "${MHE_RESID_RELEASE_GEOM:-true}")
 # 并行阶跃判据(2026-08-26,默认关):短窗前后均值差,不需慢基线因而没有预热失效面。
@@ -133,7 +136,7 @@ RESID_RELEASE_GEOM=$(_b "${MHE_RESID_RELEASE_GEOM:-true}")
 RESID_STEP=$(_b "${MHE_RESID_STEP:-false}")
 # c_xy 来源:1 = 用一阶质量矩 s/m_T(窗口内估计,无稳态门控,机动中也更新);
 # 0 = 窗外 EMA + 稳态门控(现状,figure-8 中一次都不更新)。需 MHE_ESTIMATE_MOMENT=1。
-C_XY_FROM_MOMENT=$(_b "${MHE_C_XY_FROM_MOMENT:-false}")
+C_XY_FROM_MOMENT=$(_b "${MHE_C_XY_FROM_MOMENT:-true}")
 RESID_STEP_HALF="${MHE_RESID_STEP_HALF:-3}"
 RESID_STEP_PERSIST="${MHE_RESID_STEP_PERSIST:-2}"
 RESID_STEP_TH_D=$(_f2dv "${MHE_RESID_STEP_TH:-1.0}")
@@ -172,6 +175,11 @@ PL_VZ_D=$(_f2d "${MHE_PL_VZ_GATE:-0.30}")
 DYN_R_D=$(_f2d "$DYN_R"); DYN_W_D=$(_f2d "$DYN_W"); DYN_RAMP_D=$(_f2d "$DYN_RAMP")
 DYN_DZ_D=$(_f2d "$DYN_DZ")
 Z_HIGH_D=$(_f2d "$Z_HIGH"); LIFT_DUR_D=$(_f2d "$LIFT_DUR")
+# attach 命令到 LIFT 之间的等待(2026-09-04 补透传,原先硬编码 1.5)。加大它
+# 给吸附更多稳定时间:d_xy 收不进 r_xy=0.13 时 box 吸不上,而 NMPC 的 J
+# bootstrap 已按包线放大内环 -> 空机吃带载增益,LIFT 段发散(实测两次)。
+# 只影响抓取等待,不碰 drop 机制/figure8/任何进论文的量。
+LIFT_AFTER_D=$(_f2d "${GRIP_LIFT_AFTER:-1.5}")
 DROP_AFTER_D=$(_f2d "$DROP_AFTER")
 ECC_Y_D=$(_f2d "$ECC_Y"); PAYLOAD_KG_D=$(_f2d "$PAYLOAD_KG")
 # 载荷质量信息的**唯一**入口(2026-08-26 去先验改造,与 run_gripper_headless.sh 对齐)。
@@ -356,14 +364,17 @@ nohup bash -c "source /opt/ros/jazzy/setup.bash && source '$WS/install/setup.bas
     -p gripper_mode:=true -p grip_x:=1.0 -p grip_y:=$ECC_Y_D \
     -p grip_z_low:=0.55 -p grip_z_high:=$Z_HIGH_D \
     -p grip_mass_step_sec:=0.0 -p grip_payload_mass:=$PAYLOAD_KG_D -p grip_arm_d:=0.47 \
-    -p grip_lift_after_sec:=1.5 -p grip_lift_dur:=$LIFT_DUR_D -p use_mhe:=true \
+    -p grip_lift_after_sec:=$LIFT_AFTER_D -p grip_lift_dur:=$LIFT_DUR_D -p use_mhe:=true \
+    -p continuous_payload_estimates:=${CONTINUOUS_PAYLOAD_ESTIMATES:-true} \
     -p grip_lift_hold_enable:=$LIFT_HOLD \
     -p grip_lift_hold_dz:=$LIFT_HOLD_DZ_D -p grip_lift_hold_sec:=$LIFT_HOLD_SEC_D \
     -p dj_track_mest:=$DJ_TRACK -p grip_mp_cap:=$MP_CAP_D \
     -p grip_dj_floor_mp:=$DJ_FLOOR_MP_D \
     -p dj_ratchet_enable:=$DJ_RATCHET_D \
     -p drop_publish_mass_event:=$DROP_PUB_EVENT \
-    -p geom_source:=online -p grip_payload_envelope:=$PAYLOAD_ENVELOPE_D \
+    -p geom_source:=estimate -p grip_payload_envelope:=$PAYLOAD_ENVELOPE_D \
+    -p attach_j_bootstrap_enable:=${ATTACH_J_BOOTSTRAP:-true} \
+    -p omega_scale_enable:=${NMPC_OMEGA_SCALE:-true} -p omega_scale_source:=djest \
     -p geom_release_mode:=${NMPC_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-event}} \
     -p grip_drop_after_sec:=$DROP_AFTER_D \
     -p grip_dynamic_after_lift:=$DYNAMIC \
@@ -394,6 +405,7 @@ nohup bash -c "source /opt/ros/jazzy/setup.bash && source '$WS/install/setup.bas
     -p maneuver_omega_thresh:=$MG_OMEGA_D -p maneuver_vel_thresh:=$MG_VEL_D \
     -p maneuver_q0_cap:=$MG_CAP_D -p maneuver_exponent:=$MG_EXP_D \
     -p motor_speed_topic:=/x500_0/command/motor_speed \
+    -p external_event_inputs:=$(_b "${MHE_EXTERNAL_EVENTS:-false}") \
     -p event_trigger_enable:=true -p schedule_theta:='$THETA' \
     -p confirm_thresh_alpha:=$CALPHA \
     -p grip_payload_envelope:=$PAYLOAD_ENVELOPE_D -p c_xy_est_enable:=true \

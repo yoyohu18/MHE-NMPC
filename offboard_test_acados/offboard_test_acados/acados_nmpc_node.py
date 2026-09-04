@@ -44,11 +44,13 @@ from .straight_reference import (
 from .acados_params import YAW_RATE_K, p, scaled_stage_terminal_W
 from .acados_solver_builder import ensure_acados_ocp_solver
 from .l1_adaptive import L1Augmentation
+from .payload_estimate import PayloadEstimate, headroom_limited_scale, slew
 
 # 转子标定常数。**必须与 mhe_node.py 顶部的同名常数保持一致**——两处各自硬编码
 # 是沿用既有风格(避免 nmpc_node import mhe_node 拖进整个节点类),改一处必须改另
 # 一处。用途:从电机转速反算实测推力 T_phys 与实测体力矩 tau_phys。
 MOTOR_CONSTANT = 8.54858e-06
+MOTOR_OMEGA_MAX = 1000.0   # gz x500 model.sdf 的 maxRotVelocity(rad/s),仅诊断用
 ROTOR_X = np.array([0.174, -0.174,  0.174, -0.174])   # motorNumber 0..3 机体 x
 ROTOR_Y = np.array([-0.174, 0.174,  0.174, -0.174])   # 同上 y
 TORQUE_SIGN = 1.0
@@ -193,6 +195,45 @@ class AcadosNMPCNode(Node):
         # 过冲 +0.27m,就是观察到的"起飞"),直到 MHE 收敛才回落。故初值改回
         # 真实空机 p.m,消掉这段过推。若将来修好 mass_changer 让满载真进 DART,
         # 这里需把 m_est 初值改回 p.m+payload。
+        self.declare_parameter('continuous_payload_estimates', True)
+        self.continuous_payload_estimates = bool(
+            self.get_parameter('continuous_payload_estimates').value)
+        if self.continuous_payload_estimates and p.geom_coupled:
+            raise RuntimeError(
+                'continuous_payload_estimates requires NMPC_GEOM_COUPLED=0: '
+                'the atomic estimate supplies [dJ,c_xy], not attach geometry')
+        self.declare_parameter('payload_model_tau_sec', 0.20)
+        self.declare_parameter('payload_mass_slew_kg_s', 0.60)
+        self.declare_parameter('payload_moment_slew_kgm_s', 0.080)
+        self.declare_parameter('payload_dj_slew_kgm2_s', 0.080)
+        self.declare_parameter('no_payload_confidence_threshold', 0.90)
+        self.declare_parameter('no_payload_confidence_hold_sec', 1.0)
+        self.declare_parameter('payload_estimate_fresh_sec', 0.35)
+        self.payload_model_tau = max(
+            float(self.get_parameter('payload_model_tau_sec').value), 1e-3)
+        self.payload_mass_slew = float(
+            self.get_parameter('payload_mass_slew_kg_s').value)
+        self.payload_moment_slew = float(
+            self.get_parameter('payload_moment_slew_kgm_s').value)
+        self.payload_dj_slew = float(
+            self.get_parameter('payload_dj_slew_kgm2_s').value)
+        self.no_payload_conf_threshold = float(
+            self.get_parameter('no_payload_confidence_threshold').value)
+        self.no_payload_conf_hold_frames = max(1, round(
+            float(self.get_parameter('no_payload_confidence_hold_sec').value) / p.dt))
+        self.payload_estimate_fresh_sec = max(
+            float(self.get_parameter('payload_estimate_fresh_sec').value), p.dt)
+        self._no_payload_conf_frames = 0
+        self._no_payload_latched = True
+        self._payload_estimate_received = False
+        self._payload_estimate_rx_sec = None
+        self._payload_estimate_health_prev = None
+        self._payload_target = PayloadEstimate(
+            m_total=p.m, s_xy=np.zeros(2), c_xy=np.zeros(2),
+            dJ_diag=np.zeros(3), J_diag=np.array([p.Jxx, p.Jyy, p.Jzz]),
+            no_payload_confidence=1.0)
+        self.s_est = np.zeros(2)
+        self.no_payload_confidence = 1.0
         self.m_est = p.m
         # 吊挂载荷惯量增量(model.p 的第 15 维,见 acados_model.py dJ_sym 注释)。
         # mass_changer 场景是 wrench 模拟的纯平动质量变化、无惯量变化,恒 0;
@@ -239,10 +280,13 @@ class AcadosNMPCNode(Node):
                 "⚠️ NMPC geom_release_mode='self':drop 后控制器仍按幽灵偏心载荷"
                 "配平,实测 2/2 坠机。除非在做对照实验,否则请用 'event'。")
 
-        self.declare_parameter('geom_source', 'truth')
+        self.declare_parameter(
+            'geom_source', 'estimate' if self.continuous_payload_estimates else 'truth')
         self.geom_source = str(self.get_parameter('geom_source').value).lower()
-        if self.geom_source not in ('truth', 'online'):
-            self.geom_source = 'truth'
+        if self.geom_source not in ('truth', 'online', 'estimate'):
+            self.geom_source = ('estimate' if self.continuous_payload_estimates else 'truth')
+        if self.continuous_payload_estimates:
+            self.geom_source = 'estimate'
         self.c_xy_online = np.zeros(2)     # 最新在线 c_xy 估计(订阅)
         self.geom_online_active = False    # attach 后 online 几何是否已接管
 
@@ -329,33 +373,65 @@ class AcadosNMPCNode(Node):
         #    避免 setpoint 跳变),所以放大 setpoint 误差只等效放大了 P 和 I,
         #    D 不跟着涨 → 比例越大相对阻尼越低。5× 时这个差异不小,必要时把
         #    MC_*RATE_D 一次性(不是连续)设到匹配值。
-        self.declare_parameter('omega_scale_enable', False)
+        self.declare_parameter('omega_scale_enable', self.continuous_payload_estimates)
         # 缩放因子来源:'thrust' = T_phys/g 反推有效承重(用户要的"跟着承重连续爬",
         # attach 渐进承重期间飞机近悬停,此时 T_phys/g ≈ 有效总质量);
         # 'mest' = 用 MHE 的 m_est。两者都再经同一套几何代数换成惯量比。
-        self.declare_parameter('omega_scale_source', 'thrust')
+        self.declare_parameter(
+            'omega_scale_source', 'djest' if self.continuous_payload_estimates else 'thrust')
         # 一阶低通时间常数 [s]。T_phys 有噪声、机动时还含向心分量,直接喂会让
         # setpoint 抖。0.5s 起步(远慢于速率环、快于 attach 承重过程)。
         self.declare_parameter('omega_scale_tau', 0.5)
         # 比例上限,与 _scale_px4_rate_gains 的 cap 同值同理由(防惯量估计异常时
         # 把内环推成高频震荡)。
         self.declare_parameter('omega_scale_cap', 5.0)
+        # 目标滞回抑制估计噪声,上下行 slew 分开限制;尤其卸载后的恢复不能把
+        # 空机内环从高增益一步砍回 1。全程不写 PX4 参数。
+        self.declare_parameter('omega_scale_hysteresis', 0.08)
+        self.declare_parameter('omega_scale_rise_rate', 4.0)
+        self.declare_parameter('omega_scale_recover_rate', 1.5)
+        self.declare_parameter('omega_scale_headroom_fraction', 0.95)
         self.omega_scale_enable = bool(
             self.get_parameter('omega_scale_enable').value)
         self.omega_scale_source = str(
             self.get_parameter('omega_scale_source').value).lower()
         self.omega_scale_tau = float(self.get_parameter('omega_scale_tau').value)
         self.omega_scale_cap = float(self.get_parameter('omega_scale_cap').value)
+        self.omega_scale_hysteresis = float(
+            self.get_parameter('omega_scale_hysteresis').value)
+        self.omega_scale_rise_rate = float(
+            self.get_parameter('omega_scale_rise_rate').value)
+        self.omega_scale_recover_rate = float(
+            self.get_parameter('omega_scale_recover_rate').value)
+        self.omega_scale_headroom_fraction = float(np.clip(
+            self.get_parameter('omega_scale_headroom_fraction').value,
+            0.5, 1.0))
         self.omega_scale = 1.0              # 当前(已低通)比例,1.0=不缩放
+        self._omega_scale_target = 1.0
         self._omega_scale_stamp = None
         self._omega_scale_clip_warned = False
+
+        # ---- 飞行安全诊断(2026-09-03,连续主线 A/B 验收用)----
+        # 纯只读:逐帧累积窗口极值,每 5s 打一条 [flight-diag]。控制逻辑一律不看
+        # 这些量。5s 摘要行只有 pos_err/T/tau,量不出倾角、角速度、饱和这些安全
+        # 判据,而『B 臂不消费 drop 事件』的验收恰恰要它们。
+        self.declare_parameter('flight_diag_enable', True)
+        self.flight_diag_enable = bool(
+            self.get_parameter('flight_diag_enable').value)
+        self._fd_mot_peak = 0.0     # 电机转速峰值 / MOTOR_OMEGA_MAX
+        self._fd_mot_sat = 0        # 任一电机 >=98% 上限的帧数
+        self._fd_mot_n = 0
+        self._fd_reset()
         if self.omega_scale_enable:
             self.get_logger().info(
                 f'OMEGA SCALE: on (source={self.omega_scale_source}, '
                 f'tau={self.omega_scale_tau:.2f}s, cap={self.omega_scale_cap:.1f}) '
                 '— 增益调度走 setpoint 侧,PX4 参数不动')
 
+        # flight_diag 也要转速(电机饱和是安全判据之一)。omega_scale_source
+        # ='djest' 时本来不订阅,诊断开着就得订——只多一个只读回调。
         _need_motor = (self.control_mode == 'l1' or self.tau_lumped_enable
+                       or self.flight_diag_enable
                        or (self.omega_scale_enable
                            and self.omega_scale_source == 'thrust'))
         if _need_motor:
@@ -410,6 +486,7 @@ class AcadosNMPCNode(Node):
         self.drop_triggered = False
         self.drop_trigger_time = None
         self.drop_done = False
+        self.drop_pending_confirmation = False
 
         # ============ 夹爪吊挂实验模式(默认关;关闭时下面全部不生效,
         # 现有 mass_changer/figure8 行为逐字节不变)============
@@ -566,6 +643,15 @@ class AcadosNMPCNode(Node):
         # (见 acados_model.py dJ_sym)。跟 attach 时的 dz(proximity 日志里)
         # 对齐:当前窗口 h_min/h_max=[0.35,0.60],短臂稳态 dz≈0.47m。
         self.declare_parameter('grip_arm_d', 0.47)
+        # 连续估计链路的 attach 安全引导。夹爪刚闭合而载荷尚由地面承重时，
+        # motor speed + odometry 对新增惯量没有可观信息；若此时仍给 NMPC 空机
+        # 惯量，LIFT 第一拍会按过大的角加速度规划。故只给 J/dJ 一个机架包线
+        # 地板，m 与一阶质量矩 s_xy 仍完全来自 MHE。MHE 给出持续的带载证据后，
+        # 地板权重再连续退到零，由估计 dJ 接管。
+        self.declare_parameter('attach_j_bootstrap_enable', True)
+        self.declare_parameter('attach_j_bootstrap_confirm_sec', 0.5)
+        self.declare_parameter('attach_j_bootstrap_release_sec', 0.5)
+        self.declare_parameter('attach_j_bootstrap_min_dj', 0.010)
         # 载荷**包线上界** [kg] —— 本节点唯一的载荷质量信息来源。
         #
         # 【2026-08-26 去先验改造】原先这里有三个参数:grip_payload_prior(模型侧
@@ -591,16 +677,16 @@ class AcadosNMPCNode(Node):
         # "够不够大"被用到,而"够大"正是包线的语义。
         # ⚠️ 轻载格子(0.15/0.2kg)裸 ratio 只有 3.18/3.84,**不在 cap 里**:换成
         #    包线会把增益一路提到 5.0,那是真的改了内环整定,需实测复核。
-        # ⚠️ 包线进模型侧 dJ **只发生在 dj_track_mest=False 那一档**:该档模型
-        #    dJ 全程等于这个常值,对真值过估(0.5 包线 vs 0.3 真值 → dJ 高
-        #    1.54×),而过估比低估安全(规划更保守,不会力矩饱和)。
+        # ⚠️ legacy online 路径中,包线进模型侧 dJ **只发生在
+        #    dj_track_mest=False 那一档**。连续估计路径另有 attach J bootstrap:
+        #    包线只作短时安全地板，随后平滑交给 MHE。
         #    dj_track_mest=True(默认)时**没有包线初值**:初值取 grip_dj_floor_mp
         #    的地板(棘轮起点为 0),再由 _update_online_geometry 随 m_est
         #    **由下往上**逼近真值 —— 不存在"从包线过估精修下来"这条路径。
         #    (2026-08-30 分流;此前这里恒写包线,但下一拍即被覆盖=死代码+日志
         #     说谎,详见 _grip_mass_step 里 geom_source=='online' 分支那段 ⚠️。
         #     哪个方向的 dJ 误差对 NMPC 更糟至今没有实验支撑。)
-        self.declare_parameter('grip_payload_envelope', 0.5)
+        self.declare_parameter('grip_payload_envelope', 0.3)
         # box 正上方的安全接近高度:两段式接近的第一段目标高度。先在这个高度
         # 把水平位置对齐、悬停稳,再垂直下降到 grip_z_low——避免在 grip_z_low
         # 这种低空做水平平移时高度下冲、起落架把 box 顶出吸附窗口(attach 竞态)。
@@ -643,7 +729,8 @@ class AcadosNMPCNode(Node):
         # 倾覆),跟"力矩饱和"是同一现象的两个面。给 NMPC 建再准的 dJ/质心
         # 模型都救不了这个:失配在"NMPC 规划的是力矩、执行的是 PX4 速率环"
         # 这个接口上,必须让内环自己知道惯量变了。设 False 可做 A/B 对照。
-        self.declare_parameter('scale_px4_rate_gains', True)
+        self.declare_parameter(
+            'scale_px4_rate_gains', not self.continuous_payload_estimates)
         # use_mhe=False:MHE 估计不喂回 NMPC(m_est 固定),用于隔离验证控制器。
         # 默认 True,保持现有闭环行为不变。
         self.declare_parameter('use_mhe', True)
@@ -712,6 +799,21 @@ class AcadosNMPCNode(Node):
             self.grip_arm_d = float(self.get_parameter('grip_arm_d').value)
             self.grip_payload_envelope = float(
                 self.get_parameter('grip_payload_envelope').value)
+            self.attach_j_bootstrap_enable = bool(self.get_parameter(
+                'attach_j_bootstrap_enable').value)
+            self.attach_j_bootstrap_confirm_frames = max(1, round(
+                float(self.get_parameter(
+                    'attach_j_bootstrap_confirm_sec').value) / p.dt))
+            self.attach_j_bootstrap_release_sec = max(
+                float(self.get_parameter(
+                    'attach_j_bootstrap_release_sec').value), p.dt)
+            self.attach_j_bootstrap_min_dj = max(0.0, float(
+                self.get_parameter('attach_j_bootstrap_min_dj').value))
+            self._attach_j_bootstrap_active = False
+            self._attach_j_bootstrap_releasing = False
+            self._attach_j_bootstrap_weight = 0.0
+            self._attach_j_bootstrap_dj = 0.0
+            self._attach_j_bootstrap_confirm_frames = 0
             self.grip_approach_z = float(
                 self.get_parameter('grip_approach_z').value)
             self.grip_settle_sec = float(
@@ -769,6 +871,7 @@ class AcadosNMPCNode(Node):
             self.z_hover = self.grip_approach_z
             self.grip_lift_started = False
             self.grip_drop_done = False   # gripper drop 是否已触发(一次)
+            self.grip_drop_pending = False  # 已发 release,等待 MHE 无载荷置信度确认
             self.grip_dropped = False     # box 已释放(online 几何归零标志)
             self.grip_dynamic_active = False  # 是否已切到 figure8 动态跟踪(B.5)
             self.grip_dyn_t0 = None       # figure8 起始 nmpc_time
@@ -784,7 +887,9 @@ class AcadosNMPCNode(Node):
             self.get_logger().info(
                 f'GRIPPER MODE: hover over box ({self.grip_x},{self.grip_y}) '
                 f'z {self.grip_z_low}->{self.grip_z_high}m, lift after '
-                f'{self.grip_lift_after_sec}s, empty m_est={self.m_est:.2f}kg')
+                f'{self.grip_lift_after_sec}s, empty m_est={self.m_est:.2f}kg, '
+                f'attach J bootstrap={self.attach_j_bootstrap_enable} '
+                f'({self.grip_payload_envelope:.2f}kg envelope)')
 
         # ---- 轨迹尺度联动权重(必须放在 gripper 分支之后)----
         # 实际要飞的 8 字是哪一组 (r,w) 取决于模式:gripper 动态用 grip_dyn_*,
@@ -833,24 +938,25 @@ class AcadosNMPCNode(Node):
             Odometry, '/mavros/local_position/odom',
             self.odom_cb, mavros_sensor_qos)
 
-        # mhe_node 的质量估计,闭环喂回 NMPC 动力学(见 self.m_est 用法)
-        self.mhe_mass_sub = self.create_subscription(
-            Float64, '/acados_nmpc/mhe_mass_estimate', self.mhe_mass_cb, 10)
-        # 在线 c_xy 估计(B.3 Phase2,geom_source='online' 时喂 model.p 的 c_est)
-        self.c_xy_online_sub = self.create_subscription(
-            Float64MultiArray, '/acados_nmpc/c_xy_est', self.c_xy_online_cb, 10)
-        # 载荷**意外**脱落告警(mhe_node._payload_lost_watch)。MHE→NMPC 唯一
-        # 一条反向通路,收到就复位内环增益 + 归零几何,见 payload_lost_cb。
-        self.payload_lost_sub = self.create_subscription(
-            Empty, '/mhe/payload_lost', self.payload_lost_cb, 10)
-
-        # proximity 节点在 attach 瞬间发布的真实几何偏移(TRANSIENT_LOCAL,
-        # 订阅方必须同 QoS 才能收到 latched 消息)
-        self.attach_offset_sub = self.create_subscription(
-            Float64MultiArray, '/gripper/attach_offset',
-            self.attach_offset_cb,
-            QoSProfile(depth=1,
-                       durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        if self.continuous_payload_estimates:
+            # 唯一的载荷认知输入。attach/drop 通知、夹爪真值和 payload_lost
+            # 事件均不进入 NMPC 模型或复位逻辑。
+            self.payload_estimate_sub = self.create_subscription(
+                Float64MultiArray, '/mhe/payload_estimate',
+                self.payload_estimate_cb, 10)
+        else:
+            # 旧实验接口,仅供显式回放/消融。
+            self.mhe_mass_sub = self.create_subscription(
+                Float64, '/acados_nmpc/mhe_mass_estimate', self.mhe_mass_cb, 10)
+            self.c_xy_online_sub = self.create_subscription(
+                Float64MultiArray, '/acados_nmpc/c_xy_est', self.c_xy_online_cb, 10)
+            self.payload_lost_sub = self.create_subscription(
+                Empty, '/mhe/payload_lost', self.payload_lost_cb, 10)
+            self.attach_offset_sub = self.create_subscription(
+                Float64MultiArray, '/gripper/attach_offset',
+                self.attach_offset_cb,
+                QoSProfile(depth=1,
+                           durability=DurabilityPolicy.TRANSIENT_LOCAL))
 
         self.att_pub = self.create_publisher(
             AttitudeTarget,
@@ -956,6 +1062,12 @@ class AcadosNMPCNode(Node):
         if len(msg.velocity) >= 4:
             w = np.asarray(msg.velocity[:4], dtype=float)
             if np.all(np.isfinite(w)):
+                if self.flight_diag_enable:
+                    wn = float(np.max(np.abs(w))) / MOTOR_OMEGA_MAX
+                    self._fd_mot_peak = max(self._fd_mot_peak, wn)
+                    self._fd_mot_n += 1
+                    if wn >= 0.98:
+                        self._fd_mot_sat += 1
                 w2 = w * w
                 self._l1_T_phys = float(MOTOR_CONSTANT * np.sum(w2))
                 # 体力矩反算,与 mhe_node 逐字同源(B.3 Phase0):F_i=k_f·ω_i²,
@@ -1130,6 +1242,199 @@ class AcadosNMPCNode(Node):
         if d.shape == (2,) and np.all(np.isfinite(d)):
             self.c_xy_online = d
 
+    def payload_estimate_cb(self, msg):
+        """Receive the sole MHE->NMPC payload state (one coherent MHE frame)."""
+        try:
+            estimate = PayloadEstimate.from_array(msg.data)
+        except ValueError as exc:
+            self.get_logger().warn(f'ignoring invalid payload estimate: {exc}')
+            return
+        self._payload_target = estimate
+        self._payload_estimate_received = True
+        self._payload_estimate_rx_sec = (
+            self.get_clock().now().nanoseconds * 1e-9)
+        self.no_payload_confidence = estimate.no_payload_confidence
+        # Re-arm empty detection only after positive multi-state payload evidence.
+        # A mass-bound hit alone cannot do this because confidence also contains s/J.
+        if (estimate.healthy and estimate.solution_age_sec
+                <= self.payload_estimate_fresh_sec
+                and estimate.no_payload_confidence < max(
+                    0.0, self.no_payload_conf_threshold - 0.15)):
+            self._no_payload_latched = False
+            self._no_payload_conf_frames = 0
+
+    def _payload_estimate_is_fresh(self):
+        """True only for a healthy MHE solution and a fresh ROS delivery."""
+        if (not self._payload_estimate_received
+                or self._payload_estimate_rx_sec is None
+                or not self._payload_target.healthy):
+            fresh = False
+            rx_age = float('inf')
+        else:
+            now = self.get_clock().now().nanoseconds * 1e-9
+            rx_age = max(0.0, now - self._payload_estimate_rx_sec)
+            fresh = (rx_age <= self.payload_estimate_fresh_sec
+                     and self._payload_target.solution_age_sec
+                     <= self.payload_estimate_fresh_sec)
+        if (self._payload_estimate_received
+                and fresh != self._payload_estimate_health_prev):
+            # ⚠️ rclpy 按**调用点**缓存 severity:同一行先 info 后 warn 会抛
+            # ValueError('Logger severity cannot be changed between calls.'),
+            # 而这里在定时器回调里,异常直接把整个 NMPC 节点带走(2026-09-03
+            # 实测:连续主线档 health 第一次翻转 = 节点退出、飞机失控)。
+            # 两个分支必须是两个物理调用点,不能靠三元表达式合并。
+            if fresh:
+                self.get_logger().info(
+                    '[payload-health] healthy/fresh; model updates enabled')
+            else:
+                self.get_logger().warn(
+                    f'[payload-health] unhealthy/stale; holding model and '
+                    f'confidence timer '
+                    f'(mhe_healthy={self._payload_target.healthy}, '
+                    f'solution_age={self._payload_target.solution_age_sec:.3f}s, '
+                    f'rx_age={rx_age:.3f}s)')
+            self._payload_estimate_health_prev = fresh
+        return fresh
+
+    def _start_attach_j_bootstrap(self):
+        """Arm the conservative roll/pitch-inertia floor for an attach attempt."""
+        if (not getattr(self, 'attach_j_bootstrap_enable', False)
+                or self.control_mode == 'l1'):
+            return
+        self._attach_j_bootstrap_dj = self._dJ_from_mp(
+            max(0.0, self.grip_payload_envelope))
+        self._attach_j_bootstrap_weight = 1.0
+        self._attach_j_bootstrap_confirm_frames = 0
+        self._attach_j_bootstrap_releasing = False
+        self._attach_j_bootstrap_active = self._attach_j_bootstrap_dj > 0.0
+        if self._attach_j_bootstrap_active:
+            self.get_logger().info(
+                'ATTACH J bootstrap armed: '
+                f'm_p,envelope={self.grip_payload_envelope:.3f}kg, '
+                f'dJxx=dJyy={self._attach_j_bootstrap_dj:.4f}kg m^2, '
+                f'Jxx={p.Jxx + self._attach_j_bootstrap_dj:.4f}, '
+                f'Jyy={p.Jyy + self._attach_j_bootstrap_dj:.4f}; '
+                'm/s_xy remain MHE-only')
+
+    def _update_continuous_payload_model(self):
+        """Smooth and slew-limit the MHE state before every NMPC solve."""
+        bootstrap_active = getattr(self, '_attach_j_bootstrap_active', False)
+        estimate_fresh = self._payload_estimate_is_fresh()
+        if not estimate_fresh and not bootstrap_active:
+            return
+        dt = p.dt
+        alpha = 1.0 - math.exp(-dt / self.payload_model_tau)
+        t = self._payload_target
+        if estimate_fresh:
+            m_target = float(np.clip(t.m_total, p.m, mhe_p.m_max))
+            m_lp = self.m_est + alpha * (m_target - self.m_est)
+            if self.control_mode != 'l1':
+                self.m_est = float(slew(
+                    self.m_est, m_lp, self.payload_mass_slew, dt))
+            s_lp = self.s_est + alpha * (t.s_xy - self.s_est)
+            self.s_est = np.asarray(slew(
+                self.s_est, s_lp, self.payload_moment_slew, dt), dtype=float)
+            dj_mhe = max(0.0, float(np.mean(t.dJ_diag[:2])))
+        else:
+            # Bootstrap is deliberately independent of the transport coming up:
+            # no MHE frame means m/s are held, while J can still reach its safe
+            # pre-lift value.
+            dj_mhe = 0.0
+
+        # Once a handoff has started, loss of estimator validity freezes it at
+        # the last safe inertia.  Releasing the remaining floor toward zero on
+        # a failed/stale estimate would recreate the original LIFT failure.
+        if (bootstrap_active and self._attach_j_bootstrap_releasing
+                and not estimate_fresh):
+            return
+
+        if bootstrap_active:
+            loaded_evidence = (
+                estimate_fresh
+                and dj_mhe >= self.attach_j_bootstrap_min_dj
+                and self.no_payload_confidence
+                < max(0.0, self.no_payload_conf_threshold - 0.15))
+            if loaded_evidence and not self._attach_j_bootstrap_releasing:
+                self._attach_j_bootstrap_confirm_frames += 1
+                if (self._attach_j_bootstrap_confirm_frames
+                        >= self.attach_j_bootstrap_confirm_frames):
+                    self._attach_j_bootstrap_releasing = True
+                    self.get_logger().info(
+                        'ATTACH J bootstrap handoff: persistent MHE payload '
+                        f'evidence, blending floor {self._attach_j_bootstrap_dj:.4f} '
+                        f'-> MHE dJ {dj_mhe:.4f}kg m^2 over '
+                        f'{self.attach_j_bootstrap_release_sec:.2f}s')
+            elif not loaded_evidence and not self._attach_j_bootstrap_releasing:
+                self._attach_j_bootstrap_confirm_frames = 0
+
+            if self._attach_j_bootstrap_releasing:
+                self._attach_j_bootstrap_weight = max(
+                    0.0, self._attach_j_bootstrap_weight
+                    - dt / self.attach_j_bootstrap_release_sec)
+                if self._attach_j_bootstrap_weight <= 0.0:
+                    self._attach_j_bootstrap_active = False
+                    bootstrap_active = False
+                    self.get_logger().info(
+                        'ATTACH J bootstrap released; NMPC J is now MHE-only')
+
+        # The overlay changes J only.  It neither fabricates payload mass nor a
+        # lateral first moment.  The existing LPF + slew limiter makes both the
+        # bootstrap rise and MHE handoff continuous at the solver boundary.
+        if bootstrap_active:
+            floor_extra = max(self._attach_j_bootstrap_dj - dj_mhe, 0.0)
+            dj_target = dj_mhe + self._attach_j_bootstrap_weight * floor_extra
+        else:
+            dj_target = dj_mhe
+        dj_lp = self.dJ_est + alpha * (dj_target - self.dJ_est)
+        self.dJ_est = float(slew(
+            self.dJ_est, dj_lp, self.payload_dj_slew, dt))
+        # First mass moment is authoritative for lateral CoM.  Never infer
+        # payload presence from m_est alone.
+        self.c_est = (self.s_est / max(self.m_est, 1e-6)
+                      if self.control_mode != 'l1' else np.zeros(2))
+
+    def _confirm_no_payload_if_persistent(self):
+        """Reset adaptive states only after persistent MHE empty confidence."""
+        if getattr(self, '_no_payload_latched', True):
+            return
+        if not self._payload_estimate_is_fresh():
+            # Confidence persistence must be contiguous in *valid estimator
+            # time*.  A stale or failed frame breaks, rather than pauses, it.
+            self._no_payload_conf_frames = 0
+            return
+        if self.no_payload_confidence >= self.no_payload_conf_threshold:
+            self._no_payload_conf_frames += 1
+        else:
+            self._no_payload_conf_frames = 0
+            return
+        if self._no_payload_conf_frames < self.no_payload_conf_hold_frames:
+            return
+        self._no_payload_latched = True
+        self._no_payload_conf_frames = 0
+        if self.control_mode == 'l1':
+            self.l1.reset()
+            self.d_lumped = np.zeros(3)
+            self._l1_last_stamp = None
+        if self.tau_lumped_enable:
+            self.l1_rot.reset()
+            self.xi_lumped = np.zeros(3)
+            self._l1_rot_last_stamp = None
+        if self.gripper_mode and getattr(self, 'grip_drop_pending', False):
+            self.grip_drop_pending = False
+            self.grip_drop_done = True
+            self.grip_dropped = True
+            self.get_logger().info(
+                f'DROP complete: MHE no-payload confidence '
+                f'{self.no_payload_confidence:.3f} persisted for '
+                f'{self.no_payload_conf_hold_frames * p.dt:.2f}s; '
+                'adaptive states reset')
+        if getattr(self, 'drop_pending_confirmation', False):
+            self.drop_pending_confirmation = False
+            self.drop_done = True
+            self.get_logger().info(
+                f'Payload drop complete: MHE no-payload confidence '
+                f'{self.no_payload_confidence:.3f} persisted; adaptive states reset')
+
     def _update_online_geometry(self):
         """B.3 Phase2:online 模式下 c_est 吃 mhe_node 发的在线 c_xy(τ_phys 反算,
         与 m_est 无关);**dJ 不在这里更新**——它在 attach 瞬间由操作先验
@@ -1210,7 +1515,8 @@ class AcadosNMPCNode(Node):
                           ⇒ 夹爪可能没松开,而模型已归零成空机、增益也复位了,
                              这是带着货按空机模型飞,比前者危险。
         """
-        if not self.gripper_mode or not getattr(self, 'cmd_verify_enable', False):
+        if (self.continuous_payload_estimates or not self.gripper_mode
+                or not getattr(self, 'cmd_verify_enable', False)):
             return
         # m̂ 没被消费的两档不做检查:use_mhe=False 与 control_mode='l1' 下
         # mhe_mass_cb 直接 return,self.m_est 是固定标称值,比对必然误报。
@@ -1378,7 +1684,10 @@ class AcadosNMPCNode(Node):
 
         # B.3 Phase2:online 几何接管后,每次 solve 前用最新 m_est+在线 c_xy
         # 刷新 dJ_est/c_est(替代 attach 真值一次性赋值)
-        if self.geom_online_active and self.geom_source == 'online':
+        if self.continuous_payload_estimates:
+            self._update_continuous_payload_model()
+            self._confirm_no_payload_if_persistent()
+        elif self.geom_online_active and self.geom_source == 'online':
             self._update_online_geometry()
 
         self.solver.set(0, 'lbx', x_cur)
@@ -1485,6 +1794,79 @@ class AcadosNMPCNode(Node):
         solve_time = (time.time() - t_start) * 1000
         return u_opt, omega_cmd, solve_time
 
+    def _fd_reset(self):
+        """清空诊断窗口累加器(每打印一行后调一次)。"""
+        self._fd = {
+            'tilt': 0.0,                    # 最大倾角(deg)
+            'w': np.zeros(3),               # 机体角速度三轴绝对值峰值(rad/s)
+            'u_frac': np.zeros(4),          # |u|/约束 的峰值 [T, tau_x, tau_y, tau_z]
+            'u_sat': np.zeros(4),           # 各通道 >=98% 约束的帧数
+            'om_lo': np.inf, 'om_hi': 0.0,  # omega_scale 窗口内 min/max
+            'n': 0,
+        }
+        self._fd_mot_peak = 0.0
+        self._fd_mot_sat = 0
+        self._fd_mot_n = 0
+
+    def _flight_diag_accum(self, u_opt):
+        """逐帧累积飞行安全诊断量。**只读**:不回写任何控制状态。
+
+        倾角用机体 z 轴与世界 z 的夹角 cos(tilt)=1-2(qx²+qy²)(x_cur[6:10] 在
+        odom_cb 里已归一化)。饱和按约束值算而不是按"看着挺大":T 的上界是
+        p.Tmax=2mg,roll/pitch 是 p.tau_max,yaw 是小得多的 p.tau_psi——三者
+        混在一个 tau[] 里比大小会把 yaw 的饱和整个漏掉。
+        """
+        if not self.flight_diag_enable or self.x_cur is None:
+            return
+        d = self._fd
+        q = self.x_cur[6:10]
+        c = float(np.clip(1.0 - 2.0 * (q[1] ** 2 + q[2] ** 2), -1.0, 1.0))
+        d['tilt'] = max(d['tilt'], math.degrees(math.acos(c)))
+        d['w'] = np.maximum(d['w'], np.abs(self.x_cur[10:13]))
+        u = np.abs(np.asarray(u_opt, dtype=float))
+        lim = np.array([p.Tmax, p.tau_max, p.tau_max, p.tau_psi])
+        frac = u / lim
+        d['u_frac'] = np.maximum(d['u_frac'], frac)
+        d['u_sat'] += (frac >= 0.98).astype(float)
+        d['om_lo'] = min(d['om_lo'], self.omega_scale)
+        d['om_hi'] = max(d['om_hi'], self.omega_scale)
+        d['n'] += 1
+
+    def _flight_diag_log(self, nmpc_time):
+        """打一条 [flight-diag] 并清窗口。字段固定、单行,给离线聚合器解析。
+
+        health/age/conf 只有连续主线档才有意义(legacy 档 NMPC 压根不订阅
+        payload_estimate,打出来会是恒定初值)——那一档显式打 na,免得聚合器
+        把初值当成"一直健康"。
+        """
+        d = self._fd
+        if not self.flight_diag_enable or d['n'] == 0:
+            return
+        n = float(d['n'])
+        sat_pct = 100.0 * d['u_sat'] / n
+        om_lo = 1.0 if not np.isfinite(d['om_lo']) else d['om_lo']
+        mot_pct = (100.0 * self._fd_mot_sat / self._fd_mot_n
+                   if self._fd_mot_n else float('nan'))
+        if self.continuous_payload_estimates:
+            tgt = self._payload_target
+            hs = (f"health={int(bool(tgt.healthy))} "
+                  f"age={tgt.solution_age_sec:.3f}s "
+                  f"conf={self.no_payload_confidence:.3f}")
+        else:
+            hs = 'health=na age=na conf=na'
+        self.get_logger().info(
+            f'[flight-diag] t={nmpc_time:.1f}s | '
+            f'om_scale={self.omega_scale:.3f}(lo {om_lo:.3f} hi {d["om_hi"]:.3f}) | '
+            f'tilt_max={d["tilt"]:.2f}deg | '
+            f'w_max=[r{d["w"][0]:.3f} p{d["w"][1]:.3f} y{d["w"][2]:.3f}]rad/s | '
+            f'u_frac=[T{d["u_frac"][0]:.3f} r{d["u_frac"][1]:.3f} '
+            f'p{d["u_frac"][2]:.3f} y{d["u_frac"][3]:.3f}] | '
+            f'u_sat=[T{sat_pct[0]:.1f} r{sat_pct[1]:.1f} p{sat_pct[2]:.1f} '
+            f'y{sat_pct[3]:.1f}]% | '
+            f'mot_peak={self._fd_mot_peak:.3f} mot_sat={mot_pct:.1f}% | '
+            f'{hs} | n={d["n"]}')
+        self._fd_reset()
+
     def _update_omega_scale(self):
         """更新 ω_cmd 缩放比例 Ĵ_t/J_a(每帧,一阶低通)。
 
@@ -1498,7 +1880,9 @@ class AcadosNMPCNode(Node):
         """
         if not self.omega_scale_enable:
             return
-        if self.omega_scale_source == 'thrust':
+        if self.omega_scale_source == 'djest':
+            dJ_eff = max(0.0, float(self.dJ_est))
+        elif self.omega_scale_source == 'thrust':
             if self._l1_T_phys is None:
                 return                      # 还没收到转速:保持 1.0
             # 地面门控:与 L1 同一条件同一理由(地面支持力会让 T_phys 失去意义)
@@ -1507,25 +1891,42 @@ class AcadosNMPCNode(Node):
                 self._omega_scale_stamp = None
                 return
             m_eff = self._l1_T_phys / p.g
+            m_p_eff = max(0.0, m_eff - p.m)
+            dJ_eff = self._dJ_from_mp(m_p_eff)
         else:
             m_eff = self.m_est
-        # 有效载荷 → 同一套几何代数 → 惯量比。空载时 m_p_eff=0 ⇒ target=1.0,
-        # 自然退化不影响空机(FlyAware 的 K_k≈I3 是同一个边界条件)。
-        m_p_eff = max(0.0, m_eff - p.m)
-        dJ_eff = self._dJ_from_mp(m_p_eff)
-        target = float(np.clip((p.Jxx + dJ_eff) / p.Jxx, 1.0, self.omega_scale_cap))
+            m_p_eff = max(0.0, m_eff - p.m)
+            dJ_eff = self._dJ_from_mp(m_p_eff)
+        desired = float(np.clip(
+            (p.Jxx + dJ_eff) / p.Jxx, 1.0, self.omega_scale_cap))
+        # Schmitt-like dead band on the requested ratio.  Noise inside the band
+        # cannot move the target; accepted changes are still applied continuously
+        # by the low-pass + asymmetric slew limiter below.
+        if desired <= 1.0 + 0.5 * self.omega_scale_hysteresis:
+            # Hysteresis must not strand the empty-airframe steady state above
+            # one forever.  State recovery remains continuous via LPF + slew.
+            self._omega_scale_target = 1.0
+        elif desired >= self.omega_scale_cap - 0.5 * self.omega_scale_hysteresis:
+            self._omega_scale_target = self.omega_scale_cap
+        elif abs(desired - self._omega_scale_target) >= self.omega_scale_hysteresis:
+            self._omega_scale_target = desired
 
         t = self.get_clock().now().nanoseconds * 1e-9   # ROS clock,不用墙钟
         if self._omega_scale_stamp is None:
             self._omega_scale_stamp = t
-            self.omega_scale = target       # 首帧直接对齐,不从 1.0 慢慢爬
             return
         dt = t - self._omega_scale_stamp
         self._omega_scale_stamp = t
         if not (0.0 < dt < 0.5):            # 时基跳变帧:不推进
             return
         alpha = 1.0 - np.exp(-dt / max(self.omega_scale_tau, 1e-3))
-        self.omega_scale += alpha * (target - self.omega_scale)
+        filtered = self.omega_scale + alpha * (
+            self._omega_scale_target - self.omega_scale)
+        rate = (self.omega_scale_rise_rate if filtered >= self.omega_scale
+                else self.omega_scale_recover_rate)
+        self.omega_scale = float(np.clip(
+            slew(self.omega_scale, filtered, rate, dt),
+            1.0, self.omega_scale_cap))
 
     def publish_attitude(self, u_opt, omega_cmd):
         T = u_opt[0]
@@ -1548,17 +1949,21 @@ class AcadosNMPCNode(Node):
                 # ω_cmd' = ω + s·(ω_cmd − ω),只作用 roll/pitch
                 w_now = (self.x_cur[10:13] if self.x_cur is not None
                          else np.zeros(3))
+                scale_eff = headroom_limited_scale(
+                    w_now[0:2], w_cmd[0:2], self.omega_scale,
+                    self.omega_scale_headroom_fraction * wmax)
                 w_cmd[0:2] = (w_now[0:2]
-                              + self.omega_scale * (w_cmd[0:2] - w_now[0:2]))
-                # 撞限幅 = 补偿被静默截断(与 xi_max 同一类坑,08-25 踩过)。
-                # 只警告一次避免刷屏;真要用大比例得同步放宽 omega_cmd_max。
-                if ((np.abs(w_cmd[0:2]) > wmax).any()
+                              + scale_eff * (w_cmd[0:2] - w_now[0:2]))
+                # Saturation prevention is explicit and observable.  The final
+                # hard clip remains as a last-resort guard for raw NMPC commands.
+                if (scale_eff < self.omega_scale - 1e-6
                         and not self._omega_scale_clip_warned):
                     self._omega_scale_clip_warned = True
                     self.get_logger().warn(
-                        f'[omega_scale] 缩放后 body_rate 撞限幅 ±{wmax:.1f}rad/s '
-                        f'(s={self.omega_scale:.2f}) — 补偿被截断,'
-                        '考虑放宽 omega_cmd_max')
+                        f'[omega_scale] body-rate headroom limited scale '
+                        f'{self.omega_scale:.2f}->{scale_eff:.2f} '
+                        f'(guard ±{self.omega_scale_headroom_fraction*wmax:.2f}, '
+                        f'hard ±{wmax:.2f}rad/s)')
         # 诊断日志(2026-08-25):量 ω_cmd 的实际分布,给 omega_cmd_max 该放宽到
         # 多少提供依据。同时补上 omega_scale 缺的 s 周期日志。只打印不改逻辑;
         # 50Hz 下每 10 帧一行 ≈ 5Hz,飞 93s 约 465 行,grep 完能直接算分位数。
@@ -1640,7 +2045,8 @@ class AcadosNMPCNode(Node):
         # 同帧广播质量突变事件给 mhe_node(事件触发权重调度)。注意 gz CLI 冷
         # 启动 discovery 可能比这条 ROS 消息慢几百毫秒——事件先到、物理后变,
         # MHE 侧多降权一两帧旧数据,无害(方向是保守的)。
-        self.mass_event_pub.publish(Empty())
+        if not self.continuous_payload_estimates:
+            self.mass_event_pub.publish(Empty())
 
     def _drop_phase(self, nmpc_time):
         """NMPC 已经接管追踪之后,每帧都会被调用。追踪满 drop_after_track_sec
@@ -1656,8 +2062,19 @@ class AcadosNMPCNode(Node):
             self._trigger_payload_detach()
             self.drop_triggered = True
             self.drop_trigger_time = self.get_clock().now()
+            self.drop_pending_confirmation = self.continuous_payload_estimates
+            if self.continuous_payload_estimates:
+                # 与 _grip_drop_phase 同一处理:释放指令是明确边沿,无条件重新
+                # 武装空载检测。两条 drop 路径必须对称,漏一条就是下一次的坑。
+                self._no_payload_latched = False
+                self._no_payload_conf_frames = 0
             self.get_logger().info(
-                f't={nmpc_time:.1f}s | Drop triggered (mass switched to empty).')
+                f't={nmpc_time:.1f}s | Drop triggered (mass switched to empty)'
+                + ('; waiting for MHE no-payload confidence.'
+                   if self.continuous_payload_estimates else '.'))
+            return
+
+        if self.continuous_payload_estimates:
             return
 
         settle_time = (self.get_clock().now() -
@@ -1742,7 +2159,7 @@ class AcadosNMPCNode(Node):
         取两者均值);推力不过质心产生的常值力矩交给模型里的 c_sym 项。"""
         if not self.gripper_mode or self.grip_mass_stepped:
             return
-        if self.grip_payload_mass <= 0.0:
+        if self.grip_payload_mass <= 0.0 and not self.continuous_payload_estimates:
             return
         # 方案(a):质量阶跃严格绑定真实 attach 事件,不再靠 nmpc_time 阈值猜测
         # (grip_mass_step_sec 在受控 attach 下已无意义)。必须先 descend 到位、
@@ -1750,6 +2167,20 @@ class AcadosNMPCNode(Node):
         # attach_offset 到达才阶跃。超时兜底:发 enable 后 grip_mass_step_timeout_sec
         # 秒仍没收到 attach_offset(万一 attach 没成功),才退回 grip_arm_d 兜底几何。
         if not self.grip_descend_done or self.grip_descend_done_time is None:
+            return
+        if self.continuous_payload_estimates:
+            # Start the mission phase from our own enable command.  We do not
+            # subscribe to the gripper's attach notification.  m/s stay purely
+            # estimated; only J gets a conservative, temporary pre-lift floor
+            # because inertia is unobservable while the box is ground-supported.
+            self.grip_mass_stepped = True
+            self.attach_time = self.grip_descend_done_time
+            self.geom_online_active = True
+            self._start_attach_j_bootstrap()
+            self.get_logger().info(
+                f't={nmpc_time:.1f}s | ATTACH command issued; m/s remain on '
+                'continuous MHE estimates, J safety bootstrap active '
+                '(no attach notification subscription)')
             return
         if self.attach_offset is None:
             if nmpc_time < (self.grip_descend_done_time
@@ -1876,6 +2307,10 @@ class AcadosNMPCNode(Node):
         coupled: [rx, ry, rz] 载荷几何偏移,J/c 由模型内部按 m_est 现算——这一档
         NMPC 与 MHE 用**同一套**代数,两个求解器对同一质量给出同一姿态动力学。
         载荷不在机上(未 attach / 已 drop)时装全零,退化回空机 J、c=0。"""
+        if self.continuous_payload_estimates:
+            if self.control_mode == 'l1':
+                return np.zeros(3)
+            return np.concatenate([[self.dJ_est], self.c_est])
         if not p.geom_coupled:
             return np.concatenate([[self.dJ_est], self.c_est])
         if not self.gripper_mode or not self.grip_mass_stepped:
@@ -2081,6 +2516,7 @@ class AcadosNMPCNode(Node):
         grip_dropped,_update_online_geometry 随即把 dJ/c_est 归零(载荷已卸)。
         只触发一次;grip_drop_after_sec<=0 禁用。"""
         if (not self.gripper_mode or self.grip_drop_done
+                or getattr(self, 'grip_drop_pending', False)
                 or self.grip_drop_after_sec <= 0.0 or self.attach_time is None):
             return
         t_drop = (self.attach_time + self.grip_lift_after_sec
@@ -2101,10 +2537,28 @@ class AcadosNMPCNode(Node):
             tip_win = max(0.12, 3.0 * self.grip_dyn_w * p.dt)
             if not (1.5 * np.pi <= a_mod < 1.5 * np.pi + tip_win):
                 return
-        self.grip_drop_done = True
-        self.grip_dropped = True
         self.drop_time = nmpc_time                 # 指令兑现检查的起点
         self.enable_pub.publish(Bool(data=False))  # 拉低 → proximity 释放 box
+        if self.continuous_payload_estimates:
+            # The release command changes the plant, not the controller model.
+            # Keep consuming the decaying MHE estimates; completion and L1 reset
+            # happen only after persistent no-payload confidence.
+            self.grip_drop_pending = True
+            # 无条件重新武装空载检测(2026-09-04):latch 是一次性的,而 re-arm
+            # 只在收到"确有载荷"的估计帧时才发生(conf < 阈值-0.15)。attach 没
+            # 成功的轮次里 conf 全程 1.0 → latch 在起飞后不久就被消耗掉,等真发
+            # drop 指令时 _confirm_no_payload_if_persistent 第一行就 return,
+            # DROP 永远 complete 不了(96 架次批次 #19 实测)。发释放指令这一刻
+            # 是明确的边沿,此处无条件复位。
+            self._no_payload_latched = False
+            self._no_payload_conf_frames = 0
+            self.get_logger().info(
+                f't={nmpc_time:.1f}s | DROP command issued; waiting for MHE '
+                f'no-payload confidence >= {self.no_payload_conf_threshold:.2f} '
+                f'for {self.no_payload_conf_hold_frames * p.dt:.2f}s')
+            return
+        self.grip_drop_done = True
+        self.grip_dropped = True
         # --- 是否把 drop 告诉 MHE(2026-08-25)---
         # False = **不发**:MHE 必须自己从 T_phys 残差看出载荷没了。drop 是外部
         # 事件信号,与 MHE 先验/几何先验同属"不该给估计器的信息",去掉它才和
@@ -2323,6 +2777,7 @@ class AcadosNMPCNode(Node):
 
         xref_now = self.ref_fn(t_ref)
         pos_err = np.linalg.norm(self.x_cur[0:3] - xref_now[0:3])
+        self._flight_diag_accum(u_opt)
         self.tracking_err_pub.publish(Float64(data=float(pos_err)))
 
         # drop 事件段逐帧记录(平时 50 帧一条太粗,量不出暂态峰——2026-07-03
@@ -2360,6 +2815,7 @@ class AcadosNMPCNode(Node):
                 f'y{u_opt[3]:.3f}]Nm | '
                 f'res_stat={self.last_res_stat:.3e}(peak {self.max_res_stat:.3e}) '
                 f'sqp_iter={self.last_sqp_iter} | solve={solve_time:.1f}ms')
+            self._flight_diag_log(nmpc_time)
 
 
 def main():
