@@ -31,6 +31,7 @@ cleanup() {
   pkill -9 -f 'make px4_sitl'
   pkill -9 -f 'gz_bridge'
   pkill -9 -f 'gz sim'
+  pkill -9 -f 'gz topic -e -t /gripper/state'
   pkill -9 -f 'offboard_test_acados/acados_nmpc_node'
   pkill -9 -f 'offboard_test_acados/mhe_node'
   pkill -9 -f 'offboard_test_acados/proximity_gripper_node'
@@ -40,7 +41,31 @@ cleanup() {
 }
 trap 'echo "[批次] 中断,清栈退出"; cleanup; exit 130' INT TERM
 
-[ -f "$MAN" ] || echo "idx,stamp,started,note" > "$MAN"
+# 2026-09-05:三列分类。attach 的"发出请求"与"关节真的建立"不是一回事,
+# 而 m_p 反推不出物理事实(20260905_182456:请求已发、MHE 全程没看到载荷,
+# 但当时没保存 /gripper/state 回执,无法判定关节到底建没建)。
+#   attach_requested    proximity 发出过 ATTACH 请求
+#   physically_attached 插件回执 ATTACHED,且 drop 前无 DETACHED  <- 有效性前置检查用它
+#   mhe_load_observed   估计器看到载荷(_load_armed / moment_ref_ready)  <- 只做统计
+[ -f "$MAN" ] || echo "idx,stamp,started,note,attach_requested,physically_attached,mhe_load_observed" > "$MAN"
+
+# 三列判定:只读日志,不参与在线控制。
+classify_round() {
+  local st="$1" areq=0 phys=0 mhe=0
+  local pf="$RES/grip_proximity_$st.log" sf="$RES/grip_state_$st.log" mf="$RES/grip_mhe_$st.log"
+  local nf="$RES/grip_nmpc_$st.log"
+  grep -q -- '-> ATTACH' "$pf" 2>/dev/null && areq=1
+  if [ -f "$sf" ] && grep -q 'ATTACHED' "$sf" 2>/dev/null; then
+    # drop 指令之前不得出现 DETACHED(用 sim_time 比对过于脆弱,这里用出现顺序:
+    # 第一条 ATTACHED 之后、第一条 DETACHED 之前,视为持续吸附)
+    local first_att first_det
+    first_att=$(grep -n 'ATTACHED' "$sf" | head -1 | cut -d: -f1)
+    first_det=$(grep -n 'DETACHED' "$sf" | head -1 | cut -d: -f1)
+    if [ -z "$first_det" ] || [ "$first_det" -gt "$first_att" ]; then phys=1; fi
+  fi
+  grep -qE '\[payload-state\].*EMPTY->LOADED|\[moment-ref\] 基准已建立' "$mf" 2>/dev/null && mhe=1
+  echo "$areq,$phys,$mhe"
+}
 
 run_one() {
   local idx="$1"
@@ -74,7 +99,7 @@ run_one() {
   done
   if [ -z "$N" ]; then
     echo "[批次] !!! #$idx 六分钟没等到新日志,跳过"
-    echo "$idx,NA,$(date +%FT%T),no-log" >> "$MAN"; return
+    echo "$idx,NA,$(date +%FT%T),no-log,0,0,0" >> "$MAN"; return
   fi
   local stamp; stamp=$(basename "$N" .log); stamp=${stamp#grip_nmpc_}
   echo "[批次] #$idx stamp=$stamp,等 DROP ..."
@@ -91,10 +116,10 @@ run_one() {
   done
   if [ $ok -eq 1 ]; then
     sleep 45
-    echo "$idx,$stamp,$(date +%FT%T),ok" >> "$MAN"
+    echo "$idx,$stamp,$(date +%FT%T),ok,$(classify_round "$stamp")" >> "$MAN"
     echo "[批次] #$idx 完成"
   else
-    echo "$idx,$stamp,$(date +%FT%T),no-drop" >> "$MAN"
+    echo "$idx,$stamp,$(date +%FT%T),no-drop,$(classify_round "$stamp")" >> "$MAN"
     echo "[批次] !!! #$idx 五分钟没等到 DROP"
   fi
   cleanup

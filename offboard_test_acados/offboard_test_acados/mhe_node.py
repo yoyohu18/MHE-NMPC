@@ -799,13 +799,34 @@ class MHENode(Node):
         # 15 轮实测 7.6%~18.3% 的带载帧越界(max 0.052,反解 r_xy=0.35m)。
         # ⚠️ 该缺陷在 ddfe9d2 之前就存在;A 修复只是让 detector 更早开始跑,把越界率
         #    从 7.6% 抬到 18.3%,不是根因。
-        self.declare_parameter('moment_abs_max', 0.039)      # kg·m = 0.30 x 0.13
+        # 由**共享的平台包线**派生,不写死(2026-09-05):两个节点从同一份
+        # config/gripper/gripper_params.yaml 的 /** 段读这两个值,避免
+        # 0.039 / 0.30 / 0.13 三处独立漂移。这是机架规格,不是任务信息,
+        # 也不是 attach/drop 事件信号 —— 它不进估计器的观测通路。
+        self.declare_parameter('payload_mass_envelope', 0.30)  # kg
+        self.declare_parameter('payload_rxy_envelope', 0.13)   # m
+        # override 仅供测试:>0 时覆盖派生值并打印显式警告。
+        self.declare_parameter('moment_abs_max', 0.0)
         self.declare_parameter('moment_ref_window', 20)      # 帧,10Hz -> 2s
         self.declare_parameter('moment_ref_omega_max', 0.15) # rad/s
         self.declare_parameter('moment_ref_vel_max', 0.20)   # m/s
         self.declare_parameter('moment_ref_max_cv', 0.25)    # 窗口离散度上限
         self.declare_parameter('moment_ref_dir_min', 0.90)   # 方向一致度下限
-        self.moment_abs_max = float(self.get_parameter('moment_abs_max').value)
+        _m_env = float(self.get_parameter('payload_mass_envelope').value)
+        _r_env = float(self.get_parameter('payload_rxy_envelope').value)
+        _derived = max(_m_env * _r_env, 1e-6)
+        _override = float(self.get_parameter('moment_abs_max').value)
+        if _override > 0.0:
+            self.moment_abs_max = _override
+            self.get_logger().warn(
+                f'⚠️ moment_abs_max 被**手动覆盖**为 {_override:.4f} kg·m '
+                f'(派生值 {_derived:.4f} = {_m_env:.2f}kg x {_r_env:.2f}m)。'
+                f'override 仅供测试,正式批次应让它随平台包线联动。')
+        else:
+            self.moment_abs_max = _derived
+            self.get_logger().info(
+                f'[moment-ref] 物理上限由平台包线派生: {_derived:.4f} kg·m '
+                f'= {_m_env:.2f}kg x {_r_env:.2f}m')
         self.moment_ref_window = max(
             3, int(self.get_parameter('moment_ref_window').value))
         self.moment_ref_omega_max = float(

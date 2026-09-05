@@ -1,6 +1,20 @@
 # 接近触发夹爪节点参数。用法:
 #   ros2 run offboard_test_acados proximity_gripper_node \
 #       --ros-args --params-file <path>/gripper_params.yaml
+
+# ===== 平台包线(静态规格,两个节点共读)=====
+# 2026-09-05:MHE 的 moment_abs_max 由这两个值相乘得到,不再在代码里写死 0.039。
+# 目的是避免 0.039 / 0.30 / 0.13 三处独立漂移。这是**机架规格**,不是任务信息,
+# 更不是 attach/drop 的外部事件信号 —— 它进不了估计器的观测通路。
+#   moment_abs_max = payload_mass_envelope * payload_rxy_envelope
+#                  = 0.30 kg * 0.13 m = 0.039 kg·m
+# ⚠️ payload_rxy_envelope 必须与 proximity 实际使用的 r_xy 上限一致
+#    (脚本按 GRIP_ECC_Y + GRIP_ATTACH_TOL 计算,默认 0.10+0.03=0.13)。
+/**:
+  ros__parameters:
+    payload_mass_envelope: 0.30   # kg,机架能吊的最大载荷
+    payload_rxy_envelope: 0.13    # m,attach 允许的最大水平偏心
+
 proximity_gripper_node:
   ros__parameters:
     # gz world 名(决定 pose/info 话题名),与 gripper_test.sdf 的 world name 一致

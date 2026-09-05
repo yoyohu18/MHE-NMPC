@@ -308,6 +308,14 @@ nohup ros2 run offboard_test_acados proximity_gripper_node --ros-args \
 #    路过几何窗口被动触发(旧行为让 attach 比 NMPC 接管早 5.5s,MHE 事件
 #    窗口没机会热身)。
 
+# 7b. /gripper/state 物理真值录制(2026-09-05)
+# 插件在真正建立/移除 DetachableJoint 时才发 ATTACHED/DETACHED。proximity 只
+# 记录"发出了 ATTACH 请求",两者不是一回事:20260905_182456 那轮 proximity 条件
+# 满足、请求已发,但 MHE 全程没看到载荷,而当时**没有保存回执**,无法判定关节到底
+# 有没有建立。这条日志只进实验记录与离线有效性判定,NMPC/MHE 都不消费它,
+# 因此不构成外部事件信号。
+nohup gz topic -e -t /gripper/state > "$RUNDIR/grip_state_$STAMP.log" 2>&1 &
+
 # 7. acados NMPC(gripper_mode,两段式接近->attach->定时抬升)
 NODE_LOG="$RUNDIR/grip_nmpc_$STAMP.log"
 nohup ros2 run offboard_test_acados acados_nmpc_node --ros-args \
@@ -434,6 +442,7 @@ if [ -n "${RESID_LOG_DIR:-}" ]; then
   RESID_ARG=(-p "residual_log_dir:=$RESID_LOG_DIR")
 fi
 nohup ros2 run offboard_test_acados mhe_node --ros-args \
+    --params-file "$PKG/config/gripper/gripper_params.yaml" \
     "${RESID_ARG[@]}" \
     -p motor_speed_topic:=/x500_0/command/motor_speed \
     -p external_event_inputs:=$(_b "${MHE_EXTERNAL_EVENTS:-false}") \

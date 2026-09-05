@@ -248,6 +248,7 @@ for pat in "px4_sitl_default/bin/px4" "gz sim" "/gz " "ruby" "mavros/mavros_node
            "lib/offboard_test_acados/acados_nmpc_node" \
            "lib/offboard_test_acados/mhe_node" \
            "topic pub -r 2 /gripper/enable" "ros_gz_bridge" "prop_joint_state" \
+           "gz topic -e -t /gripper/state" \
            "drone_tf_broadcaster" "robot_state_publisher" "rviz2" \
            "ninja gz_x500" "make px4_sitl"; do
   for pp in $(pgrep -f "$pat" 2>/dev/null); do kill -9 "$pp" 2>/dev/null || true; done
@@ -362,6 +363,14 @@ nohup bash -c "source /opt/ros/jazzy/setup.bash && source '$WS/install/setup.bas
     -p drone_model:=x500_0 -p r_xy:=$R_XY -p h_min:=0.35 -p h_max:=0.60" \
   > "$LOGDIR/gviz_proximity_$TS.log" 2>&1 &
 
+# 7b. /gripper/state 物理真值录制(2026-09-05)
+# 插件在真正建立/移除 DetachableJoint 时才发 ATTACHED/DETACHED。proximity 只
+# 记录"发出了 ATTACH 请求",两者不是一回事:20260905_182456 那轮 proximity 条件
+# 满足、请求已发,但 MHE 全程没看到载荷,而当时**没有保存回执**,无法判定关节到底
+# 有没有建立。这条日志只进实验记录与离线有效性判定,NMPC/MHE 都不消费它,
+# 因此不构成外部事件信号。
+nohup gz topic -e -t /gripper/state > "$LOGDIR/gviz_state_$TS.log" 2>&1 &
+
 # 8. acados NMPC(主配置:gripper_mode + online 几何 + drop + figure8 动态)
 NODE_LOG="$LOGDIR/gviz_nmpc_$TS.log"; echo "NMPC log: $NODE_LOG"
 nohup bash -c "source /opt/ros/jazzy/setup.bash && source '$WS/install/setup.bash' && \
@@ -395,6 +404,7 @@ MHE_LOG="$LOGDIR/gviz_mhe_$TS.log"; echo "MHE log: $MHE_LOG"
 nohup bash -c "source /opt/ros/jazzy/setup.bash && source '$WS/install/setup.bash' && \
   $ACADOS_ENV && export PYTHONUNBUFFERED=1 && \
   ros2 run offboard_test_acados mhe_node --ros-args \
+    --params-file '$PKG/config/gripper/gripper_params.yaml' \
     -p maneuver_gate_enable:=$MANEUVER_GATE \
     -p resid_release_geom:=$RESID_RELEASE_GEOM \
     -p resid_step_enable:=$RESID_STEP \
