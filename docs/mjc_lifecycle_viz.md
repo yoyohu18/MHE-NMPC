@@ -704,6 +704,111 @@ moment 未确认 → payload state = unresolved
 > 在线 10 Hz 的五帧持续条件，所以回放给出的"1/548"不是新版 slow 的在线误释放率。
 > **旧日志只用于定位根因，最终 FPR 必须来自全新的 fastA-free SITL。**
 
+##### moment reference：ratio 的分母不能是 running max
+
+`ratio = |s|/max_history(|s|)` 有一个致命前提：历史最大值是**真实的带载几何**。
+实测否掉了它 —— figure-8 段的 $s$ 估计会系统性越过物理上限：
+
+| 批次 | 越界帧/总帧 | 越界率 | 越界起点 | $\lVert s\rVert$ max |
+|---|---|---|---|---|
+| 早批（11 轮） | 49/644 | 7.6 % | attach+26~28 s | 0.0492 |
+| 后批（4 轮） | 49/268 | 18.3 % | attach+27 s | 0.0520 |
+
+物理上限 = 载荷包线 × attach 偏心上限 = $0.30 \times 0.13 = 0.039$ kg·m。
+越界值反解 $r_{xy}$ 达 0.35 m，远超 attach 上限 —— **那不是几何，是动态失真**。
+一旦进了分母，带载稳态的 ratio 就被压到阈值以下，`moment_collapsed` 会在载荷
+还挂着时成立，与 fastA 栽掉的结构同型。
+
+> [!warning] 一处因果误判（已更正）
+> 我最初把"detector 提早 10 s 开始跑"当成了"污染发生在 attach 早期"，
+> 并据此报告是 A 修复（`ddfe9d2`）引入的新缺陷。按时间分布重新核对后：
+> **两批的越界起点都在 attach+26~28 s（figure-8 段）**，早批 11 轮里就有 4 轮越界。
+> A 修复只是扩大了 detector 的观测窗口，把越界率从 7.6 % 抬到 18.3 %，**不是根因**。
+
+**状态机**（`_update_moment_reference`）：
+
+```text
+LOADED(自主) → healthy/fresh → 自主识别的低动态窗口(|ω|≤0.15, |v_xy|≤0.20)
+  → 剔除 |s|>0.039 的物理越界样本(剔除,不裁剪)
+  → 稳健统计(截尾均值 + 离散度≤0.25 + 方向一致度≥0.90)
+  → 冻结 s_ref_loaded → 进入机动后不再更新
+ratio = |s_current| / |s_ref_loaded|
+```
+
+低动态窗口是**在线判据**，不是"attach 后等 N 秒"——后者只是当前脚本时序下的
+巧合区间。越界帧的处置：不进 reference、不参与 moment 投票、清持续计数、
+累计为 estimator-quality 指标。基准建不起来就不判决 ⇒ 交 unresolved，
+**不降低释放门槛**。
+
+`moment_abs_max` 由**共享的平台包线**派生而非写死：两个节点读同一份
+`config/gripper/gripper_params.yaml` 的 `/**` 段（`payload_mass_envelope 0.30`
+× `payload_rxy_envelope 0.13`），避免 0.039 / 0.30 / 0.13 三处漂移。
+包线是机架规格，不进估计器观测通路。
+
+##### 物理真值日志：`attach 请求` ≠ `关节已建立`
+
+`20260905_182456` 暴露的判定盲区：proximity 条件满足、ATTACH 请求已发出，但
+MHE 全程没看到载荷（$m_{est}$ 恒 1.9611 = 下界），而当时**没有保存
+`/gripper/state` 回执**，无法判定 `DetachableJoint` 到底有没有建立。
+"用 $m_p$ 反推 attach 失败率"是不成立的 —— 那把机构失败与估计器失败混成一个数。
+
+现在每轮独立录制 `gz topic -e -t /gripper/state`（插件只在真正建立/移除关节时
+才发 `ATTACHED/DETACHED`），manifest 三列分开记：
+
+| 列 | 含义 | 用途 |
+|---|---|---|
+| `attach_requested` | proximity 发出过 ATTACH 请求 | 机构/接近失败的分类 |
+| `physically_attached` | 插件回执 ATTACHED 且其后无 DETACHED | **有效性前置检查用它** |
+| `mhe_load_observed` | 估计器看到载荷 | 只做统计：物理已 attach 但 MHE 未识别 = estimator observability failure |
+
+⚠️ 该日志只进实验记录与离线判定，NMPC/MHE 都不消费，不构成外部事件信号。
+
+##### 正式安全 smoke：12 轮（`200316` ~ `204345`）
+
+冻结记录 `freeze_release_detector_20260905_200257.md`（代码 `9fbcd9b`+`7f0cedc`、
+六文件 sha256、install↔src 一致性、共享包线、17 个判据参数、manifest 格式）。
+
+| 指标 | 结果 |
+|---|---|
+| `physically_attached` | **12/12** |
+| **带载段误释放** | **0/12** |
+| NMPC `DROP complete` | **12/12** |
+| `moment_ref_ready` | 11/12 |
+| 进过 unresolved | 6/12，**全部恢复（RESOLVED 6/6）** |
+| 释放路径 | fastB 9 / slow 2 |
+| 五条停批条件 | **逐轮核查全部未命中** |
+
+延迟是**二值**分布，与越界帧数严格对应：
+
+| `ovr` | 轮数 | 延迟 |
+|---|---|---|
+| 1 帧 | 5 | +1.3 ~ +1.5 s |
+| 10~25 帧 | 6 | +13.3 ~ +24.4 s（全部经 unresolved → RESOLVED） |
+
+中间没有过渡值 —— 越界帧的多少不直接决定延迟长短，它只决定**会不会跨过 12 s
+那道 unresolved 门**。
+
+> [!note] 目标覆盖 0/3，**未获得自然样本**
+> 目标组合（`physically_attached ∧ residual ATTACH ∧ _load_armed ∧ ¬_c_xy_mass_armed`）
+> 12 轮一次都没出现：全部经由 `sustained m_p evidence` 进 LOADED，而那条路径的
+> 水位 0.09 kg 同时把旧质量域分支也武装了。该组合的出现依赖 $m_{est}$ 收敛得
+> 足够慢（慢到残差先检出 attach），不受实验控制。
+>
+> **决定（2026-09-05）**：停止自然补跑。目标组合的逻辑已由单元测试覆盖
+> （`test_detector_runs_without_mass_domain_arming`）；要验证在线执行，
+> 另跑 3 个**明确标注的 fault-injection 构造轮**即可，不必消耗随机样本。
+> 本 12 轮作为**正式安全 smoke** 保留。
+
+##### 唯一的 `mref=0`：LOADED 与低动态窗口的时序竞争
+
+`201412`：`ATTACH t=5.9s → DYNAMIC t=20.4s → LOADED t=48.5s`（晚于 DYNAMIC **28 s**）。
+那时飞机已在 4 m/s figure-8 里，低动态窗口不再出现，窗口计数**恒为 `0/20`**。
+后续按设计走完：基准未就绪 → 不判决 → drop 后 `DROP complete (conf=0.993)`，
+零误释放。安全性无问题，但那一轮 detector 全程没有可用的 moment 通道。
+
+这是结构性的：LOADED 的进入依赖质量估计收敛，而低动态窗口只存在于 attach 后
+约 14 s 内（LIFT+悬停），两者是竞争关系，当前没有机制保证前者赢。
+
 ##### 三个遗留问题的处置（2026-09-05 定案）
 
 | # | 问题 | 处置 |
