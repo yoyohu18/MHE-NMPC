@@ -85,7 +85,12 @@ run_one() {
   # 2) 等 drop(headless 不会自己停,必须我们盯着)
   local ok=0
   for i in $(seq 1 60); do
-    grep -q "DROP: released" "$N" 2>/dev/null && { ok=1; break; }
+    # ⚠️ 2026-09-04:连续主线(continuous_payload_estimates=true)下 NMPC 打的是
+    #    "DROP complete"(no-payload confidence 确认后),legacy 事件档才打
+    #    "DROP: released"。只 grep 旧串会把**成功的轮次**静默记成 no-drop
+    #    (实测 20260904_234903:DROP complete 了,批次仍等满 5 分钟判失败)。
+    #    两种都认,legacy 批次行为不变。
+    grep -qE "DROP complete|DROP: released" "$N" 2>/dev/null && { ok=1; break; }
     sleep 5
   done
   if [ $ok -eq 1 ]; then

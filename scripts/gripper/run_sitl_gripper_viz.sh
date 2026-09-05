@@ -19,7 +19,7 @@
 #       只改一个是危险的。
 #    回到 2026-09-01 之前的旧默认(2m/s 工作点 + 有信号 event 主线),整行覆盖:
 #      GRIP_PAYLOAD_KG=0.15 GRIP_PAYLOAD_ENVELOPE=0.3 GRIP_DYN_R=5.0 GRIP_DYN_RAMP=3.0 \
-#      GRIP_Z_HIGH=2.5 GRIP_LIFT_DUR=3.0 DROP_PUBLISH_MASS_EVENT=true \
+#      GRIP_Z_HIGH=2.5 GRIP_LIFT_DUR=3.0 GRIP_LIFT_AFTER=1.5 DROP_PUBLISH_MASS_EVENT=true \
 #      MHE_SIGNAL_MODE=external MHE_GEOM_RELEASE_MODE=event MHE_CXY_MASS_RELEASE_MP=0 \
 #      MHE_CONFIRM_ALPHA=-1 bash src/scripts/gripper/run_sitl_gripper_viz.sh
 #
@@ -179,7 +179,13 @@ Z_HIGH_D=$(_f2d "$Z_HIGH"); LIFT_DUR_D=$(_f2d "$LIFT_DUR")
 # 给吸附更多稳定时间:d_xy 收不进 r_xy=0.13 时 box 吸不上,而 NMPC 的 J
 # bootstrap 已按包线放大内环 -> 空机吃带载增益,LIFT 段发散(实测两次)。
 # 只影响抓取等待,不碰 drop 机制/figure8/任何进论文的量。
-LIFT_AFTER_D=$(_f2d "${GRIP_LIFT_AFTER:-1.5}")
+# ★ 2026-09-04 默认 1.5 -> 3.0:同日三轮 viz 实测把它坐实成必须改的默认——
+#   1.5 那轮(gviz_*_20260904_162428)LIFT 段直接发散:822 次 solve failed、
+#   tilt 141°、pos_err 70m、om_scale 钉在 5.0、MHE health=0 持续 21s;
+#   3.0 的两轮(163315/164651)同档位干净通过(0 solve failed,DROP complete)。
+#   相位不受影响:lift_after 在 t_drop 与 dyn_t0 里自动抵消(见 DROP_AFTER 推导),
+#   整条时间线只是后移 1.5s,DROP_AFTER 不必重算。
+LIFT_AFTER_D=$(_f2d "${GRIP_LIFT_AFTER:-3.0}")
 DROP_AFTER_D=$(_f2d "$DROP_AFTER")
 ECC_Y_D=$(_f2d "$ECC_Y"); PAYLOAD_KG_D=$(_f2d "$PAYLOAD_KG")
 # 载荷质量信息的**唯一**入口(2026-08-26 去先验改造,与 run_gripper_headless.sh 对齐)。

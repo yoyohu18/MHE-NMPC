@@ -14,9 +14,11 @@
 #                      (扫描入口见 run_cxy_ecc_sweep.sh)
 #   MHE_EVENT_TRIGGER  事件触发开关 (默认 true)
 #   MHE_SCHEDULE_THETA 权重时间表 5 维 (默认 M0 规则版)
-#   MHE_CONFIRM_THRESH 确认阈值 [N] (默认 1.5——⚠️这个值是给 wrench 的 gz CLI
-#                      冷启动延迟调的,gripper attach 物理瞬时生效,不能直接沿用,
-#                      需要针对 gripper 重新标定,这里只是占位默认值)
+#   MHE_CONFIRM_ALPHA  确认阈值系数 (★2026-09-04 默认 -1.0 -> 1.5,即
+#                      thresh = α·g·包线 = 4.4N @0.3kg。见下面该变量处的说明)
+#   MHE_CONFIRM_THRESH 固定确认阈值 [N] (默认 1.5,**仅在 MHE_CONFIRM_ALPHA<0
+#                      时才生效**;该值原是给 wrench 的 gz CLI 冷启动延迟调的,
+#                      对 gripper 从未标定过,不要再当默认路径用)
 #
 # 默认事件链与 run_sitl_gripper_viz.sh 的无信号主线一致:
 #   DROP_PUBLISH_MASS_EVENT=false  NMPC_GEOM_RELEASE_MODE=event
@@ -128,6 +130,16 @@ L1_OMEGA_C_D=$(_f2d "${L1_OMEGA_C:-0.5}")
 GRIP_DROP_AFTER_D=$(_f2d "${GRIP_DROP_AFTER:-0.0}")
 ATTACH_WINDOW_SEC_D=$(_f2d "${ATTACH_WINDOW_SEC:-40.0}")
 MHE_CONFIRM_THRESH_D=$(_f2d "${MHE_CONFIRM_THRESH:-1.5}")
+# 残差自触发的确认阈值。confirm_thresh_alpha>=0 时生效的是 α·g·包线(不含任务
+# 信息,包线是机架规格);<0 才退回上面那个固定的 event_confirm_thresh_n。
+# ★ 2026-09-04 默认 -1.0(固定 1.5N) -> 1.5(= α·g·0.3 = 4.4N),与
+#   run_sitl_gripper_viz.sh 的 M0 分支对齐。为什么:0.15kg 载荷的卸载台阶只有
+#   m_P·g=1.47N,固定 1.5N 这个阈值**恰好卡在台阶量级上**,drop 于是由残差路检出
+#   —— 那既不是无信号主线要验证的机制,也把"残差信号在小载荷工况下不可用"这个
+#   结论绕了过去。4.4N 把残差路堵死,drop 只能由质量域判据 / |s| 塌陷判据检出。
+# ⚠️ 阈值随包线联动:GRIP_PAYLOAD_ENVELOPE=0.5 时变 7.36N。
+# 回退(不推荐,仅为复现 09-04 前的旧批次):MHE_CONFIRM_ALPHA=-1
+MHE_CONFIRM_ALPHA_D="${MHE_CONFIRM_ALPHA:-1.5}"
 # 转动 lumped 扰动通道 xi(2026-08-25)。默认关 → model.p 的 xi 槽恒零,逐位兼容。
 XI_MAX_D=$(_f2d "${XI_MAX:-40.0}")
 XI_OMEGA_C_D=$(_f2d "${XI_OMEGA_C:-0.5}")
@@ -142,6 +154,16 @@ OMEGA_SCALE_CAP_D=$(_f2d "${OMEGA_SCALE_CAP:-5.0}")
 # 所以 r=10 必须配 GRIP_Z_HIGH=6 GRIP_LIFT_DUR=8.4(速率与 2.5/3.0 同量级)。
 GRIP_Z_HIGH_D=$(_f2d "${GRIP_Z_HIGH:-2.5}")
 GRIP_LIFT_DUR_D=$(_f2d "${GRIP_LIFT_DUR:-3.0}")
+# attach 命令到 LIFT 之间的等待(2026-09-04 补透传 + 默认 1.5 -> 3.0,与
+# run_sitl_gripper_viz.sh 对齐)。原先这里是写死的 1.5。
+# ★ 为什么必须改:连续主线下 NMPC 在发 enable 的同一帧就按**包线**把 J 抬到
+#   0.0579(内环 ω 缩放到 cap 5.0),而吸附**没有回执**——box 没吸上时,这 5× 就
+#   加在接近空机的构型上 = 07-14 那个过增益振荡崩法。09-04 viz 三轮实测坐实:
+#   1.5 那轮 LIFT 段直接发散(822 次 solve failed、tilt 141°、pos_err 70m、
+#   om_scale 钉在 5.0、MHE health=0 持续 21s),3.0 的两轮干净通过。
+# 只影响抓取等待:lift_after 在 t_drop 与 dyn_t0 里自动抵消,figure8 相位、
+# DROP_AFTER、任何进论文的量都不受影响,整条时间线只是平移。
+GRIP_LIFT_AFTER_D=$(_f2d "${GRIP_LIFT_AFTER:-3.0}")
 # LIFT 中途 hold + dJ 跟随 m_est(2026-08-25,默认全关)。动机见 acados_nmpc_node
 # 的 grip_lift_hold_enable 注释:attach 后 box 还在地上时 MHE 学不到任何东西
 # (实测 m_est 反而从 2.064 下漂到 2.023),真正该给的时间在**离地之后**。
@@ -292,7 +314,7 @@ nohup ros2 run offboard_test_acados acados_nmpc_node --ros-args \
     -p gripper_mode:=true -p grip_x:=1.0 -p grip_y:=$GRIP_ECC_Y_D \
     -p grip_z_low:=0.55 -p grip_z_high:=$GRIP_Z_HIGH_D \
     -p grip_mass_step_sec:=0.0 -p grip_payload_mass:=$GRIP_PAYLOAD_KG_D -p grip_arm_d:=0.47 \
-    -p grip_lift_after_sec:=1.5 -p grip_lift_dur:=$GRIP_LIFT_DUR_D \
+    -p grip_lift_after_sec:=$GRIP_LIFT_AFTER_D -p grip_lift_dur:=$GRIP_LIFT_DUR_D \
     -p grip_lift_hold_enable:=$(_b "${GRIP_LIFT_HOLD:-false}") \
     -p grip_lift_hold_dz:=$GRIP_LIFT_HOLD_DZ_D \
     -p grip_lift_hold_sec:=$GRIP_LIFT_HOLD_SEC_D \
@@ -419,7 +441,7 @@ nohup ros2 run offboard_test_acados mhe_node --ros-args \
     -p event_trigger_enable:=${MHE_EVENT_TRIGGER:-true} \
     -p schedule_theta:="${MHE_SCHEDULE_THETA:-[-4.0,0.0,0.0,0.0]}" \
     -p event_confirm_thresh_n:=$MHE_CONFIRM_THRESH_D \
-    -p confirm_thresh_alpha:=${MHE_CONFIRM_ALPHA:--1.0} \
+    -p confirm_thresh_alpha:=$MHE_CONFIRM_ALPHA_D \
     -p grip_payload_envelope:=$MHE_PAYLOAD_ENVELOPE_D \
     -p eval_true_payload_mass:=$EVAL_TRUE_PAYLOAD_D \
     -p geom_release_mode:=${MHE_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-self}} \
@@ -459,5 +481,5 @@ echo "gripper headless stack up: nmpc=$NODE_LOG mhe=$MHE_LOG"
 echo "  payload=${GRIP_PAYLOAD_KG}kg ecc_y=${GRIP_ECC_Y}m r_xy=$R_XY"
 echo "  event_trigger=${MHE_EVENT_TRIGGER:-true} signal=${MHE_SIGNAL_MODE:-residual} drop_publish=${DROP_PUBLISH_MASS_EVENT:-false}"
 echo "  geom_release: NMPC=${NMPC_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-event}} MHE=${MHE_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-self}} cxy_release_mp=${MHE_CXY_MASS_RELEASE_MP:-0.03}"
-echo "  theta=${MHE_SCHEDULE_THETA:-M0} confirm_thresh=${MHE_CONFIRM_THRESH:-1.5}"
+echo "  theta=${MHE_SCHEDULE_THETA:-M0} confirm_alpha=$MHE_CONFIRM_ALPHA_D (alpha>=0 => thresh=alpha*g*envelope; <0 => fixed ${MHE_CONFIRM_THRESH:-1.5}N)"
 echo "  payload_envelope=${GRIP_PAYLOAD_ENVELOPE:-0.3}kg (机架规格; attach 仅用它引导 J,m/s 仍来自 MHE)"

@@ -29,6 +29,7 @@ from .mhe_solver_builder import ensure_mhe_ocp_solver
 from .mhe_weight_learning import M0_THETA, ParametricWeightSchedule
 from .payload_estimate import (
     PayloadEstimate,
+    empty_evidence_scores,
     inertia_from_mass_moment,
     no_payload_confidence,
     relative_error_percent,
@@ -686,16 +687,43 @@ class MHENode(Node):
         self._s_out_prev = np.zeros(2)
         self._present_hi = 0
         self._present_lo = 0
-        # 辅助(非主力)判据:武装期间记 |s| 峰值,衰减到 ratio×峰值并持续若干帧
-        # 也算释放。给"m̂ 卡住但 s 已经回零"这类情形留一条路;主力仍是质量域。
+        # --- drop 侧释放判据:一阶矩**相对**塌陷 + 质量/惯量佐证(2026-09-04 改)---
+        # 武装期间记 |s| 峰值,|s|/peak 跌破 ratio 且质量与惯量通道也报"空"、
+        # 持续若干帧 ⇒ 释放。
+        #
+        # ★ 为什么 ratio 从 0.10 提到 0.20:09-04 纯默认档实测(232444),物理卸载后
+        #   |s| 从峰值 0.0229 塌到 0.0032 = 塌掉 86%,但 0.10 要求塌掉 >90% —— 那等于
+        #   要求估计器残噪低于一个**没有物理必要性**的水平。三条释放路径因此全断,
+        #   conf 卡在 0.694,DROP 永远 complete 不了(死锁细节见 docs/mjc_lifecycle_viz.md)。
+        #   0.20 相对实测的 0.14 有裕量,又不是一下子放到很松。
+        #
+        # ★ 为什么持续帧从 20(2s) 缩到 5(0.5s):加了质量/惯量两条佐证之后,单靠
+        #   长时间等待来防误触发的必要性下降;而 drop 后每多等一帧,NMPC 的
+        #   grip_drop_pending 就多挂一帧。
+        #
+        # ★ 为什么佐证用 mass/inertia 而**不用** moment 通道:moment 通道是绝对阈值
+        #   (moment_full=0.0015),而 s 的残噪本底就在 0.003 量级 —— 用它当触发条件
+        #   正是死锁的成因。这里只借 payload_estimate 的同一套标定算 mass/inertia
+        #   两个分数,与 conf 同源但不共用那条卡死的通道。
+        #   ⚠️ 单独的 mass 佐证会误报(机动中 m_p 周期性探底到负值,这正是
+        #   _mass_observable 门控存在的理由),但它与"相对塌陷"合取后是安全的:
+        #   载荷还在机上时 |s| 不会塌到自身峰值的 20% 以下。所以这条路**故意不加**
+        #   机动门控 —— 加了就退回质量域判据在 figure8 中永远不累计的老问题。
         # ratio<=0 关闭。
-        self.declare_parameter('s_release_ratio', 0.10)
-        self.declare_parameter('s_release_persist', 20)   # 帧,10Hz->2s
+        self.declare_parameter('s_release_ratio', 0.20)
+        self.declare_parameter('s_release_persist', 5)    # 帧,10Hz->0.5s
+        self.declare_parameter('s_release_mass_score_min', 0.90)
+        self.declare_parameter('s_release_inertia_score_min', 0.90)
         self.s_release_ratio = float(self.get_parameter('s_release_ratio').value)
         self.s_release_persist = max(
             1, int(self.get_parameter('s_release_persist').value))
+        self.s_release_mass_score_min = float(
+            self.get_parameter('s_release_mass_score_min').value)
+        self.s_release_inertia_score_min = float(
+            self.get_parameter('s_release_inertia_score_min').value)
         self._s_peak = 0.0
         self._s_low = 0
+        self._s_ratio_log_n = 0
         if self.c_xy_mass_release_mp > 0.0 and self.geom_release_mode != 'self':
             self.get_logger().error(
                 "c_xy_mass_release_mp 只在 geom_release_mode='self' 下可用"
@@ -1892,13 +1920,36 @@ class MHENode(Node):
                     and mhe_p.ns and self._load_armed):
                 s_norm = float(np.linalg.norm(self.s_est))
                 self._s_peak = max(self._s_peak, s_norm)
+                ratio = (s_norm / self._s_peak) if self._s_peak > 0.0 else 1.0
+                # 质量/惯量佐证:与 conf 同一套标定,但不碰 moment 通道(见上)。
+                m_p_now = max(float(self.m_est) - mhe_p.m_B, 0.0)
+                _, dJ_now, _ = inertia_from_mass_moment(
+                    max(float(self.m_est), mhe_p.m_min), self.s_est, mhe_p.m_B,
+                    [mhe_p.Jxx, mhe_p.Jyy, mhe_p.Jzz], mhe_p.rz_prior,
+                    payload_ki=mhe_p.payload_ki)
+                mass_sc, _, inertia_sc = empty_evidence_scores(
+                    m_p_now, self.s_est, dJ_now, **self._payload_conf_args)
+                # 诊断:attached 段的 ratio_min 与 released 段的 ratio_max 是给
+                # 阈值定分界用的分布数据(2026-09-04 起按用户要求逐轮记录)。
+                self._s_ratio_log_n += 1
+                if self._s_ratio_log_n % 10 == 1:      # 10Hz -> 每 1s 一行
+                    self.get_logger().info(
+                        f'[s-collapse] |s|={s_norm:.5f} peak={self._s_peak:.5f} '
+                        f'ratio={ratio:.3f} (thr {self.s_release_ratio:.2f}) '
+                        f'mass_sc={mass_sc:.3f} inert_sc={inertia_sc:.3f} '
+                        f'm_p={float(self.m_est) - mhe_p.m_B:+.4f} '
+                        f'low={self._s_low}/{self.s_release_persist}')
                 if (self._s_peak > 0.0
-                        and s_norm < self.s_release_ratio * self._s_peak):
+                        and ratio < self.s_release_ratio
+                        and mass_sc >= self.s_release_mass_score_min
+                        and inertia_sc >= self.s_release_inertia_score_min):
                     self._s_low += 1
                     if self._s_low >= self.s_release_persist:
                         self._release_payload(
-                            f'|s|={s_norm:.4f} < {self.s_release_ratio:.2f}x'
-                            f' peak {self._s_peak:.4f}')
+                            f'|s|={s_norm:.4f} = {ratio:.3f}x peak '
+                            f'{self._s_peak:.4f} < {self.s_release_ratio:.2f} '
+                            f'x{self.s_release_persist}帧, mass_sc={mass_sc:.2f} '
+                            f'inert_sc={inertia_sc:.2f}')
                         return
                 else:
                     self._s_low = 0

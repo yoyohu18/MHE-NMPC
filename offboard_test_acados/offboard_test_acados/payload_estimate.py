@@ -32,23 +32,38 @@ def _smooth_zero_score(value, full, zero):
     return 1.0 - (3.0 * x * x - 2.0 * x * x * x)
 
 
-def no_payload_confidence(m_payload, s_xy, dJ_diag,
+def empty_evidence_scores(m_payload, s_xy, dJ_diag,
                           mass_full=0.015, mass_zero=0.060,
                           moment_full=0.0015, moment_zero=0.0060,
                           inertia_full=0.0020, inertia_zero=0.0100):
+    """Return the three independent "empty" scores, unfused.
+
+    Split out so a release *detector* can use the mass and inertia channels
+    without inheriting the moment channel's absolute threshold.  That absolute
+    threshold is a confidence calibration; a state transition must not depend
+    on the estimator's noise floor sitting below it (2026-09-04 deadlock).
+    """
+    s_norm = float(np.linalg.norm(np.asarray(s_xy, dtype=float)))
+    dj_xy = float(np.max(np.abs(np.asarray(dJ_diag, dtype=float)[:2])))
+    return (_smooth_zero_score(m_payload, mass_full, mass_zero),
+            _smooth_zero_score(s_norm, moment_full, moment_zero),
+            _smooth_zero_score(dj_xy, inertia_full, inertia_zero))
+
+
+def no_payload_confidence(m_payload, s_xy, dJ_diag, **kwargs):
     """Fuse three independent "empty" indications into a [0, 1] score.
 
     A product is intentional: one clear payload indication is sufficient to
     veto "empty".  In particular, a non-zero first mass moment keeps the score
     low even when the scalar mass estimate happens to touch its lower bound.
+
+    This is a *state quality* metric for an already-released payload.  It is
+    deliberately not the trigger for the release itself — see
+    ``empty_evidence_scores``.
     """
-    s_norm = float(np.linalg.norm(np.asarray(s_xy, dtype=float)))
-    dj_xy = float(np.max(np.abs(np.asarray(dJ_diag, dtype=float)[:2])))
-    return float(np.clip(
-        _smooth_zero_score(m_payload, mass_full, mass_zero)
-        * _smooth_zero_score(s_norm, moment_full, moment_zero)
-        * _smooth_zero_score(dj_xy, inertia_full, inertia_zero),
-        0.0, 1.0))
+    mass_s, moment_s, inertia_s = empty_evidence_scores(
+        m_payload, s_xy, dJ_diag, **kwargs)
+    return float(np.clip(mass_s * moment_s * inertia_s, 0.0, 1.0))
 
 
 def inertia_from_mass_moment(m_total, s_xy, m_body, J_body, rz,

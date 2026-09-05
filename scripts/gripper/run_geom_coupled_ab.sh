@@ -114,7 +114,12 @@ run_one() {
   # 等 drop 发生(NMPC 日志里的 'DROP: released gripper'),再多录 RECOVER_SEC 秒
   local waited=0 dropped=0
   while [ "$waited" -lt "$TIMEOUT" ]; do
-    if grep -q "DROP: released gripper" "$nmpc" 2>/dev/null; then dropped=1; break; fi
+    # ⚠️ 2026-09-04:连续主线(continuous_payload_estimates=true)下 NMPC 打的是
+    #    "DROP complete"(no-payload confidence 确认后),legacy 事件档才打
+    #    "DROP: released"。只 grep 旧串会把**成功的轮次**静默记成 no-drop
+    #    (实测 20260904_234903:DROP complete 了,批次仍等满 5 分钟判失败)。
+    #    两种都认,legacy 批次行为不变。
+    if grep -qE "DROP complete|DROP: released gripper" "$nmpc" 2>/dev/null; then dropped=1; break; fi
     sleep 6; waited=$((waited+6))
   done
   [ "$dropped" -eq 1 ] && sleep "$RECOVER_SEC"
