@@ -2048,77 +2048,84 @@ class MHENode(Node):
                     return
             else:
                 self._c_xy_mass_low = 0
-            # --- 统一释放判据(2026-09-05 三信息源)---
-            # 决策逻辑放在 payload_estimate.release_decision:在线节点与离线
-            # 回放(scripts/gripper/replay_release_detector.py)共用同一份实现,
-            # 免得"回放通过、上线不通过"。三个信息源与"禁止单通道释放"的理由
-            # 见该模块注释。
-            if (self._c_xy_mass_armed and self.s_release_ratio > 0.0
-                    and mhe_p.ns and self._load_armed):
-                # ★★ health/freshness 门控(2026-09-05):估计不可信时**不判决**。
-                # 根因链(20260905_152924):连续 5 次 solve failure -> re-anchor
-                # 把 s_est 清成 0 -> 释放判据在下一次成功解之前照常运行 ->
-                # ratio=0.000 被当成 moment_collapsed -> 恰好 m_p 也探负 ->
-                # slow 误释放。而这条判据跑在 _solve_window **之前**,却完全没有
-                # 用上节点已有的 health/freshness 状态。
-                # 不健康时:立即清持续计数(不是暂停——跨盲区拼出来的持续是假的),
-                # 且不允许释放;等下一次 fresh 且成功的解才恢复判决。
-                # ⚠️ _s_peak **不清**:短暂求解失败不该丢掉本轮的带载基准,
-                #    否则重新立峰会把判据的分母搞错。
-                frame_ok, _sol_age = self._payload_frame_health()
-                frame_ok = frame_ok and not self._s_reanchored
-                if not frame_ok:
-                    self._s_low = 0
-                    self._s_fast = 0
-                    self._s_strong = 0
-                    if self._s_ratio_log_n % 10 == 1:
-                        self.get_logger().warn(
-                            f'[s-collapse] 估计不健康,释放判决暂停 '
-                            f'(solve_ok={int(self._last_solve_ok)} '
-                            f'reanchored={int(self._s_reanchored)} '
-                            f'age={_sol_age:.2f}s) — 持续计数已清零')
-                    self._s_ratio_log_n += 1
-                    return
-                s_norm = float(np.linalg.norm(self.s_est))
-                self._s_peak = max(self._s_peak, s_norm)
-                m_p_now = max(float(self.m_est) - mhe_p.m_B, 0.0)
-                resid_ev = (self.get_clock().now().nanoseconds * 1e-9
-                            < self._residual_drop_evidence_until)
-                _now = self.get_clock().now().nanoseconds * 1e-9
-                strong_ev = _now < self._residual_strong_evidence_until
-                ev = release_evidence(
-                    m_p_now, s_norm, self._s_peak, resid_ev,
-                    ratio_thr=self.s_release_ratio,
-                    s_abs_max=self.s_release_abs_max,
-                    mass_release_mp=self.c_xy_mass_release_mp,
-                    residual_strong=strong_ev)
-                (fire, why, self._s_low, self._s_fast,
-                 self._s_strong) = release_decision(
-                    ev, self._load_armed, self._s_low, self._s_fast,
-                    slow_persist=self.s_release_persist,
-                    fast_persist=self.s_release_fast_persist,
-                    strong_frames=self._s_strong,
-                    strong_persist=self.s_release_strong_persist)
-                # 诊断:带载段的 ratio_min 与卸载后的 ratio 是给阈值定分界用的
-                # 分布数据(2026-09-04 起逐轮记录)。
+        # --- 统一释放判据(2026-09-05 三信息源)---
+        # ★ 外层门控**去掉 _c_xy_mass_armed**,并整段移出质量域判据的 if 块:原来两个
+        # 武装状态被串在了一起 —— 自主状态机的 _load_armed(残差 attach 或持续 m_p 证据)
+        # 已经置位,却还要等旧的"质量持续过 0.09kg"路径再武装一次。20260905_162459 那轮
+        # m_est 全程偏低(进 LOADED 时 m_p=-0.103,靠残差事件进的),_c_xy_mass_armed 从未
+        # 置位 => [s-collapse] 一行都没有,统一 detector 整段没运行(被 unresolved 兜住)。
+        # 旧的质量域释放分支保留它**自己的** _c_xy_mass_armed(那条路本就该等质量爬起来),
+        # 但它不该继续当 moment/residual detector 的总开关 —— 两条路的证据来源不同。
+        # 决策逻辑放在 payload_estimate.release_decision:在线节点与离线
+        # 回放(scripts/gripper/replay_release_detector.py)共用同一份实现,
+        # 免得"回放通过、上线不通过"。三个信息源与"禁止单通道释放"的理由
+        # 见该模块注释。
+        if (self.s_release_ratio > 0.0 and mhe_p.ns
+                and self._load_armed):
+            # ★★ health/freshness 门控(2026-09-05):估计不可信时**不判决**。
+            # 根因链(20260905_152924):连续 5 次 solve failure -> re-anchor
+            # 把 s_est 清成 0 -> 释放判据在下一次成功解之前照常运行 ->
+            # ratio=0.000 被当成 moment_collapsed -> 恰好 m_p 也探负 ->
+            # slow 误释放。而这条判据跑在 _solve_window **之前**,却完全没有
+            # 用上节点已有的 health/freshness 状态。
+            # 不健康时:立即清持续计数(不是暂停——跨盲区拼出来的持续是假的),
+            # 且不允许释放;等下一次 fresh 且成功的解才恢复判决。
+            # ⚠️ _s_peak **不清**:短暂求解失败不该丢掉本轮的带载基准,
+            #    否则重新立峰会把判据的分母搞错。
+            frame_ok, _sol_age = self._payload_frame_health()
+            frame_ok = frame_ok and not self._s_reanchored
+            if not frame_ok:
+                self._s_low = 0
+                self._s_fast = 0
+                self._s_strong = 0
+                if self._s_ratio_log_n % 10 == 1:
+                    self.get_logger().warn(
+                        f'[s-collapse] 估计不健康,释放判决暂停 '
+                        f'(solve_ok={int(self._last_solve_ok)} '
+                        f'reanchored={int(self._s_reanchored)} '
+                        f'age={_sol_age:.2f}s) — 持续计数已清零')
                 self._s_ratio_log_n += 1
-                if self._s_ratio_log_n % 10 == 1:      # 10Hz -> 每 1s 一行
-                    self.get_logger().info(
-                        f'[s-collapse] |s|={s_norm:.5f} peak={self._s_peak:.5f} '
-                        f'ratio={ev["ratio"]:.3f} (thr {self.s_release_ratio:.2f}) '
-                        f'moment={int(ev["moment_collapsed"])} '
-                        f'quantity={int(ev["quantity_empty"])} '
-                        f'resid={int(ev["residual_drop"])}'
-                        f'{"S" if ev["residual_strong"] else ""} '
-                        f'health=1 age={_sol_age:.2f} '
-                        f'solve_ok={int(self._last_solve_ok)} '
-                        f'reanch={int(self._s_reanchored)} '
-                        f'm_p={float(self.m_est) - mhe_p.m_B:+.4f} '
-                        f'slow={self._s_low}/{self.s_release_persist}')
-                if fire:
-                    self._update_payload_presence('drop')
-                    self._release_payload(why)
-                    return
+                return
+            s_norm = float(np.linalg.norm(self.s_est))
+            self._s_peak = max(self._s_peak, s_norm)
+            m_p_now = max(float(self.m_est) - mhe_p.m_B, 0.0)
+            resid_ev = (self.get_clock().now().nanoseconds * 1e-9
+                        < self._residual_drop_evidence_until)
+            _now = self.get_clock().now().nanoseconds * 1e-9
+            strong_ev = _now < self._residual_strong_evidence_until
+            ev = release_evidence(
+                m_p_now, s_norm, self._s_peak, resid_ev,
+                ratio_thr=self.s_release_ratio,
+                s_abs_max=self.s_release_abs_max,
+                mass_release_mp=self.c_xy_mass_release_mp,
+                residual_strong=strong_ev)
+            (fire, why, self._s_low, self._s_fast,
+             self._s_strong) = release_decision(
+                ev, self._load_armed, self._s_low, self._s_fast,
+                slow_persist=self.s_release_persist,
+                fast_persist=self.s_release_fast_persist,
+                strong_frames=self._s_strong,
+                strong_persist=self.s_release_strong_persist)
+            # 诊断:带载段的 ratio_min 与卸载后的 ratio 是给阈值定分界用的
+            # 分布数据(2026-09-04 起逐轮记录)。
+            self._s_ratio_log_n += 1
+            if self._s_ratio_log_n % 10 == 1:      # 10Hz -> 每 1s 一行
+                self.get_logger().info(
+                    f'[s-collapse] |s|={s_norm:.5f} peak={self._s_peak:.5f} '
+                    f'ratio={ev["ratio"]:.3f} (thr {self.s_release_ratio:.2f}) '
+                    f'moment={int(ev["moment_collapsed"])} '
+                    f'quantity={int(ev["quantity_empty"])} '
+                    f'resid={int(ev["residual_drop"])}'
+                    f'{"S" if ev["residual_strong"] else ""} '
+                    f'health=1 age={_sol_age:.2f} '
+                    f'solve_ok={int(self._last_solve_ok)} '
+                    f'reanch={int(self._s_reanchored)} '
+                    f'm_p={float(self.m_est) - mhe_p.m_B:+.4f} '
+                    f'slow={self._s_low}/{self.s_release_persist}')
+            if fire:
+                self._update_payload_presence('drop')
+                self._release_payload(why)
+                return
         # --- 一阶质量矩驱动(见 __init__ 里 c_xy_from_moment 注释)---
         # 放在最前:这条路不依赖 tau_phys/稳态,s 本身就是窗口解算出来的。
         if self.c_xy_from_moment and mhe_p.ns:

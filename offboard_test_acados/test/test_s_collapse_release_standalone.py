@@ -348,6 +348,23 @@ def test_counters_do_not_span_unhealthy_gap():
     assert _released(st)
 
 
+def test_detector_runs_without_mass_domain_arming():
+    """★ 统一 detector 不得再被旧的质量域武装位 _c_xy_mass_armed 挡住。
+
+    20260905_162459:自主状态机已 EMPTY->LOADED(_load_armed=True,靠残差 attach
+    事件),但那轮 m_est 全程偏低,旧路径的 _c_xy_mass_armed 从未置位 =>
+    [s-collapse] 一行都没有,统一 detector 整段没运行。
+    两个武装状态的证据来源不同,不该串在一起当同一个总开关。
+    """
+    st = _Stub()
+    st._c_xy_mass_armed = False          # 旧质量域路径从未武装
+    assert st._load_armed                # 但自主状态机认为载荷在机上
+    st._tick([0.0, -S_PEAK_LOADED], 0.15, n=5)
+    assert st._s_peak > 0.02, '未武装时 detector 仍应在跑(峰值要立起来)'
+    st._tick([S_RESID_UNLOADED, 0.0002], -0.005, n=st.s_release_persist)
+    assert _released(st), '统一 detector 不该被 _c_xy_mass_armed 挡住'
+
+
 def _run():
     fails = 0
     for name, fn in sorted(globals().items()):
