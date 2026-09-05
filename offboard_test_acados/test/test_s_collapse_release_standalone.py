@@ -59,7 +59,7 @@ class _Stub:
     _update_payload_presence = mn.MHENode._update_payload_presence
     _mass_observable = mn.MHENode._mass_observable
 
-    def __init__(self, ratio=0.20, persist=5):
+    def __init__(self, ratio=0.30, persist=5):
         self.m_est = mhe_p.m_B + 0.15
         self.s_est = np.array([0.0, -S_PEAK_LOADED])
         # 质量域判据(主力):这里让它保持"已武装但不触发释放"
@@ -75,6 +75,11 @@ class _Stub:
         self.s_release_persist = persist
         self.s_release_mass_score_min = 0.90
         self.s_release_inertia_score_min = 0.90
+        self.s_release_abs_max = 0.008
+        self.s_release_fast_persist = 2
+        self._s_fast = 0
+        self._residual_drop_evidence_until = -1.0
+        self._t = 0.0
         self._s_peak = 0.0
         self._s_low = 0
         self._s_ratio_log_n = 0
@@ -115,10 +120,25 @@ class _Stub:
     def get_logger(self):
         return self._log
 
+    def get_clock(self):
+        stub = self
+
+        class _C:
+            @staticmethod
+            def now():
+                class _N:
+                    nanoseconds = stub._t * 1e9
+                return _N()
+        return _C()
+
+    def _arm_residual(self, hold=3.0):
+        self._residual_drop_evidence_until = self._t + hold
+
     def _tick(self, s_xy, m_p, n=1):
         self.s_est = np.asarray(s_xy, dtype=float)
         self.m_est = mhe_p.m_B + m_p
         for _ in range(n):
+            self._t += 0.1
             self._update_c_xy_est()
 
 
@@ -186,6 +206,39 @@ def test_release_unblocks_confidence():
     st._tick([0.0, -S_PEAK_LOADED], 0.15, n=5)
     st._tick([S_RESID_UNLOADED, 0.0002], -0.005, n=st.s_release_persist)
     assert _released(st) and not st._payload_present
+
+
+def test_single_channel_never_releases():
+    """禁止单通道:光有 ratio 塌陷(载荷还在)不释放;光有质量为空也不释放。
+
+    mass 与 inertia 在连续接口里不是两个独立证据(dJ 由 m_est 与固定 r_z 派生),
+    所以它们合并成一条通道,更不能靠"两票"过关。
+    """
+    st = _Stub()
+    st._tick([0.0, -S_PEAK_LOADED], 0.15, n=5)
+    # ① |s| 塌到 0,但载荷量证据说还挂着 -> 不释放
+    st._tick([0.0002, 0.0], 0.15, n=40)
+    assert not _released(st), 'ratio 单通道不得释放'
+    # ② 质量为空,但 |s| 还在峰值附近 -> 不释放
+    st2 = _Stub()
+    st2._tick([0.0, -S_PEAK_LOADED], 0.15, n=5)
+    st2._tick([0.0, -S_PEAK_LOADED], -0.005, n=40)
+    assert not _released(st2), '质量(含惯量)单通道不得释放'
+
+
+def test_residual_fast_path_handles_worst_case():
+    """对抗组合:残噪大 + peak 小 => ratio 0.35 越过阈值,慢路径检不出;
+    此时"残差 DROP + 质量为空"应当仍能释放(这是第三个信息源的价值)。"""
+    worst_peak, worst_resid = 0.0140, 0.0049      # 实测两个边界值的最坏组合
+    st = _Stub()
+    st._tick([0.0, -worst_peak], 0.15, n=5)
+    st._tick([worst_resid, 0.0], -0.005, n=20)
+    assert not _released(st), f'ratio={worst_resid/worst_peak:.2f} 本就该检不出'
+    st2 = _Stub()
+    st2._tick([0.0, -worst_peak], 0.15, n=5)
+    st2._arm_residual()
+    st2._tick([worst_resid, 0.0], -0.005, n=st2.s_release_fast_persist)
+    assert _released(st2), '残差证据在场时,最坏组合也应能释放'
 
 
 def _run():

@@ -29,8 +29,11 @@ from .mhe_solver_builder import ensure_mhe_ocp_solver
 from .mhe_weight_learning import M0_THETA, ParametricWeightSchedule
 from .payload_estimate import (
     PayloadEstimate,
+    RELEASE_RATIO_THR,
     empty_evidence_scores,
     inertia_from_mass_moment,
+    release_decision,
+    release_evidence,
     no_payload_confidence,
     relative_error_percent,
 )
@@ -710,7 +713,13 @@ class MHENode(Node):
         #   载荷还在机上时 |s| 不会塌到自身峰值的 20% 以下。所以这条路**故意不加**
         #   机动门控 —— 加了就退回质量域判据在 figure8 中永远不累计的老问题。
         # ratio<=0 关闭。
-        self.declare_parameter('s_release_ratio', 0.20)
+        # ★ 0.20 -> 0.30(2026-09-05):59 轮 valid 历史日志的**留一交叉验证**
+        #   59/59 折一致选中 0.30(留出轮 90% 成功),而 0.20 只有 48/59。
+        #   误释放在两个阈值下都是 0 —— 因为释放要求 ratio 与**质量通道**同时
+        #   成立,带载段 ratio 掉到 0.000 的 8 轮全部被质量通道否决。
+        #   这不是"把阈值往上调到能过",是合取结构下 ratio 单通道判别力本来就
+        #   不该被当成唯一闸门(它与带载分布重叠)。
+        self.declare_parameter('s_release_ratio', RELEASE_RATIO_THR)
         self.declare_parameter('s_release_persist', 5)    # 帧,10Hz->0.5s
         self.declare_parameter('s_release_mass_score_min', 0.90)
         self.declare_parameter('s_release_inertia_score_min', 0.90)
@@ -721,8 +730,24 @@ class MHENode(Node):
             self.get_parameter('s_release_mass_score_min').value)
         self.s_release_inertia_score_min = float(
             self.get_parameter('s_release_inertia_score_min').value)
+        # |s| 的绝对上限:**不是判别器**,只挡"peak 异常大导致 ratio 假性偏小"。
+        # 09-04/05 实测两个分布是重叠的(带载 |s| 最小 0.0039 反而低于卸载后
+        # 最大 0.0049),所以绝对量给得宽松,判别力全靠 ratio + 质量通道的合取。
+        self.declare_parameter('s_release_abs_max', 0.008)
+        self.declare_parameter('s_release_fast_persist', 2)
+        self.s_release_abs_max = float(
+            self.get_parameter('s_release_abs_max').value)
+        self.s_release_fast_persist = max(
+            1, int(self.get_parameter('s_release_fast_persist').value))
+        # 残差 DROP 证据的时效 [s]。残差是**边沿**事件,过期不该再算数;
+        # 给 3s 是为了覆盖"残差先看见、质量域随后确认"的正常先后关系。
+        self.declare_parameter('residual_evidence_hold_sec', 3.0)
+        self.residual_evidence_hold_sec = float(
+            self.get_parameter('residual_evidence_hold_sec').value)
+        self._residual_drop_evidence_until = -1.0
         self._s_peak = 0.0
         self._s_low = 0
+        self._s_fast = 0
         self._s_ratio_log_n = 0
         if self.c_xy_mass_release_mp > 0.0 and self.geom_release_mode != 'self':
             self.get_logger().error(
@@ -1728,10 +1753,17 @@ class MHENode(Node):
                 # "模型正确后它能回归"。
                 if (dropped and self.resid_release_geom
                         and self._load_armed):
-                    self._update_payload_presence('drop')
-                    self._release_payload('no-signal residual')
+                    # 2026-09-05:残差不再**单独**释放,而是作为三信息源里的
+                    # "动态证据"投进 release_decision(见 payload_estimate 的
+                    # 模块注释)。单通道裸奔正是上一版的问题:残差档下它一个人
+                    # 说了算,默认档下它又完全失声,两种极端都不好。
+                    # 证据带时效:残差是**边沿**事件,过期就不该再算数。
+                    self._residual_drop_evidence_until = (
+                        self.get_clock().now().nanoseconds * 1e-9
+                        + self.residual_evidence_hold_sec)
                     self.get_logger().info(
-                        '[no-signal] → 自主释放载荷几何(无外部 drop 信号)')
+                        f'[no-signal] 残差检出 DROP 方向 → 作为释放证据保持 '
+                        f'{self.residual_evidence_hold_sec:.1f}s')
                 elif not dropped:
                     # 检出的是 ATTACH 方向:快速通道进 LOADED,不必等 m_p 攒够
                     # 持续帧 —— 残差看见的承重比质量收敛早得多。
@@ -1912,47 +1944,43 @@ class MHENode(Node):
                     return
             else:
                 self._c_xy_mass_low = 0
-            # 辅助判据(见 __init__ 里 s_release_ratio)。质量域是主力,这条只在
-            # 已武装、且 |s| 相对**自己的峰值**塌下去时补一刀,覆盖"m̂ 卡在带载值
-            # 但 s 已经回零"这类质量域看不见的情形。用相对量而不是绝对阈值:
-            # 残余 |s| 的量级随载荷和力臂变,固定阈值要么太松要么太紧。
+            # --- 统一释放判据(2026-09-05 三信息源)---
+            # 决策逻辑放在 payload_estimate.release_decision:在线节点与离线
+            # 回放(scripts/gripper/replay_release_detector.py)共用同一份实现,
+            # 免得"回放通过、上线不通过"。三个信息源与"禁止单通道释放"的理由
+            # 见该模块注释。
             if (self._c_xy_mass_armed and self.s_release_ratio > 0.0
                     and mhe_p.ns and self._load_armed):
                 s_norm = float(np.linalg.norm(self.s_est))
                 self._s_peak = max(self._s_peak, s_norm)
-                ratio = (s_norm / self._s_peak) if self._s_peak > 0.0 else 1.0
-                # 质量/惯量佐证:与 conf 同一套标定,但不碰 moment 通道(见上)。
                 m_p_now = max(float(self.m_est) - mhe_p.m_B, 0.0)
-                _, dJ_now, _ = inertia_from_mass_moment(
-                    max(float(self.m_est), mhe_p.m_min), self.s_est, mhe_p.m_B,
-                    [mhe_p.Jxx, mhe_p.Jyy, mhe_p.Jzz], mhe_p.rz_prior,
-                    payload_ki=mhe_p.payload_ki)
-                mass_sc, _, inertia_sc = empty_evidence_scores(
-                    m_p_now, self.s_est, dJ_now, **self._payload_conf_args)
-                # 诊断:attached 段的 ratio_min 与 released 段的 ratio_max 是给
-                # 阈值定分界用的分布数据(2026-09-04 起按用户要求逐轮记录)。
+                resid_ev = (self.get_clock().now().nanoseconds * 1e-9
+                            < self._residual_drop_evidence_until)
+                ev = release_evidence(
+                    m_p_now, s_norm, self._s_peak, resid_ev,
+                    ratio_thr=self.s_release_ratio,
+                    s_abs_max=self.s_release_abs_max,
+                    mass_release_mp=self.c_xy_mass_release_mp)
+                fire, why, self._s_low, self._s_fast = release_decision(
+                    ev, self._load_armed, self._s_low, self._s_fast,
+                    slow_persist=self.s_release_persist,
+                    fast_persist=self.s_release_fast_persist)
+                # 诊断:带载段的 ratio_min 与卸载后的 ratio 是给阈值定分界用的
+                # 分布数据(2026-09-04 起逐轮记录)。
                 self._s_ratio_log_n += 1
                 if self._s_ratio_log_n % 10 == 1:      # 10Hz -> 每 1s 一行
                     self.get_logger().info(
                         f'[s-collapse] |s|={s_norm:.5f} peak={self._s_peak:.5f} '
-                        f'ratio={ratio:.3f} (thr {self.s_release_ratio:.2f}) '
-                        f'mass_sc={mass_sc:.3f} inert_sc={inertia_sc:.3f} '
+                        f'ratio={ev["ratio"]:.3f} (thr {self.s_release_ratio:.2f}) '
+                        f'moment={int(ev["moment_collapsed"])} '
+                        f'quantity={int(ev["quantity_empty"])} '
+                        f'resid={int(ev["residual_drop"])} '
                         f'm_p={float(self.m_est) - mhe_p.m_B:+.4f} '
-                        f'low={self._s_low}/{self.s_release_persist}')
-                if (self._s_peak > 0.0
-                        and ratio < self.s_release_ratio
-                        and mass_sc >= self.s_release_mass_score_min
-                        and inertia_sc >= self.s_release_inertia_score_min):
-                    self._s_low += 1
-                    if self._s_low >= self.s_release_persist:
-                        self._release_payload(
-                            f'|s|={s_norm:.4f} = {ratio:.3f}x peak '
-                            f'{self._s_peak:.4f} < {self.s_release_ratio:.2f} '
-                            f'x{self.s_release_persist}帧, mass_sc={mass_sc:.2f} '
-                            f'inert_sc={inertia_sc:.2f}')
-                        return
-                else:
-                    self._s_low = 0
+                        f'slow={self._s_low}/{self.s_release_persist}')
+                if fire:
+                    self._update_payload_presence('drop')
+                    self._release_payload(why)
+                    return
         # --- 一阶质量矩驱动(见 __init__ 里 c_xy_from_moment 注释)---
         # 放在最前:这条路不依赖 tau_phys/稳态,s 本身就是窗口解算出来的。
         if self.c_xy_from_moment and mhe_p.ns:

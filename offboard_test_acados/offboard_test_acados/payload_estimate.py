@@ -170,3 +170,79 @@ def relative_error_percent(value, reference, eps=1e-6):
     if not np.isfinite(reference) or abs(reference) <= abs(float(eps)):
         return float('nan')
     return float((float(value) - reference) / reference * 100.0)
+
+
+# --- drop 侧释放判据(2026-09-05 三信息源改造)---------------------------------
+# 上一版把 mass 与 inertia 当两票用是**虚假鲁棒性**:连续接口里
+# dJ = μ(m_p)·r_z² 完全由 m_est 与固定 r_z 派生,两者携带同一份质量证据。
+# 所以这里按**真正独立的三个信息源**组织:
+#   ① 一阶矩塌陷   —— 相对 ratio 为主,绝对 |s| 只作 sanity 上限(见下)
+#   ② 载荷量证据   —— mass/inertia 合并成**一条**通道(它们不独立)
+#   ③ 残差方向证据 —— no-signal detector 的 DROP,独立的动态证据
+#
+# ⚠️ 绝对 |s| 没有判别力,别拿它当判据:09-04/05 五轮实测,带载段 |s| 最小值
+#    0.0039 kg·m 反而**低于**卸载后 |s| 的最大值 0.0049 —— 两个分布是重叠的。
+#    它只用来挡"peak 异常大导致 ratio 假性偏小"那种情形,所以阈值给得宽松。
+
+# ★ 0.30 而非 0.20:59 轮 valid 历史日志的留一交叉验证 59/59 折一致选中 0.30
+#   (留出轮 90% 成功,0.20 只有 48/59);两个阈值的带载段误释放都是 0——释放要求
+#   ratio 与质量通道**同时**成立,带载 ratio 掉到 0.000 的 8 轮全被质量通道否决。
+RELEASE_RATIO_THR = 0.30
+RELEASE_S_ABS_MAX = 0.008      # kg·m,sanity 上限而非判别器
+RELEASE_MASS_MP = 0.03         # kg
+RELEASE_SLOW_PERSIST = 5       # 帧,10Hz -> 0.5s
+RELEASE_FAST_PERSIST = 2       # 帧
+
+
+def release_evidence(m_payload, s_norm, s_peak, residual_drop,
+                     ratio_thr=RELEASE_RATIO_THR,
+                     s_abs_max=RELEASE_S_ABS_MAX,
+                     mass_release_mp=RELEASE_MASS_MP):
+    """Return the three independent release indications plus the raw ratio."""
+    s_norm = float(s_norm)
+    s_peak = float(s_peak)
+    ratio = (s_norm / s_peak) if s_peak > 0.0 else 1.0
+    moment_collapsed = bool(ratio < ratio_thr and s_norm < s_abs_max)
+    quantity_empty = bool(float(m_payload) < mass_release_mp)
+    return {
+        'ratio': ratio,
+        'moment_collapsed': moment_collapsed,
+        'quantity_empty': quantity_empty,      # mass 与 inertia 合并的那一条
+        'residual_drop': bool(residual_drop),
+    }
+
+
+def release_decision(ev, load_armed, slow_frames, fast_frames,
+                     slow_persist=RELEASE_SLOW_PERSIST,
+                     fast_persist=RELEASE_FAST_PERSIST):
+    """Decide whether to release, given evidence and the two persistence counters.
+
+    Returns ``(release, why, slow_frames, fast_frames)``.  Pure function: the
+    caller owns the counters, so the online node and the offline replay share
+    exactly one implementation.
+
+    Rules (see module comment for why mass/inertia are one channel):
+      * nothing fires unless the payload was reliably LOADED at some point;
+      * fast  = residual DROP  AND (quantity empty OR moment collapsed);
+      * slow  = quantity empty AND moment collapsed, sustained;
+      * a single channel never releases — neither the ratio alone nor the
+        mass/inertia pair "voting twice".
+    """
+    if not load_armed:
+        return False, '', 0, 0
+    fast_ok = ev['residual_drop'] and (ev['quantity_empty']
+                                       or ev['moment_collapsed'])
+    slow_ok = ev['quantity_empty'] and ev['moment_collapsed']
+    fast_frames = fast_frames + 1 if fast_ok else 0
+    slow_frames = slow_frames + 1 if slow_ok else 0
+    if fast_frames >= fast_persist:
+        return (True,
+                f"fast: residual DROP + {'quantity' if ev['quantity_empty'] else 'moment'}"
+                f" (ratio={ev['ratio']:.3f}) x{fast_frames}帧",
+                slow_frames, fast_frames)
+    if slow_frames >= slow_persist:
+        return (True,
+                f"slow: quantity empty + moment collapsed "
+                f"(ratio={ev['ratio']:.3f}) x{slow_frames}帧",
+                slow_frames, fast_frames)
+    return False, '', slow_frames, fast_frames
