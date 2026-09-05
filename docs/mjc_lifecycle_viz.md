@@ -30,7 +30,7 @@ tags: [MHE, NMPC, gripper, payload]
 > 09-02 那批工况改动（0.15 kg / 包线 0.3 / $r$=10 / $z$=6.0 / 4 m/s）**仍然有效**，
 > 与更早的批次不可直接对比。
 
-> [!success] 09-04 晚：纯默认档的 DROP 确认死锁**已修**
+> [!success] 死锁已修，释放判据经 12 轮 fastA-free smoke 验收
 > `232444` 轮暴露的死锁（$conf$ 卡 0.694、`grip_dropped` 永不置位）已定位到
 > "释放判据要求 $\lVert s\rVert$ 塌到峰值 10% 以下，比估计器噪声本底还低"。
 > 修法是把 drop 侧改成**相对塌陷 0.20 + 质量/惯量佐证 + 0.5 s 持续**，
@@ -75,6 +75,7 @@ tags: [MHE, NMPC, gripper, payload]
 | `payload_model_tau_sec`                            | 0.20 s                         | 模型侧 LPF                                                        |
 | `payload_mass_slew_kg_s` / `moment` / `dj`     | 0.60 / 0.080 / 0.080           | 每秒最大变化                                                      |
 | `no_payload_confidence_threshold` / `_hold_sec`  | 0.90 / 1.0 s                   | drop 完成判据                                                     |
+| `drop_unresolved_timeout_sec` | **12.0** s | ★ 超时 ⇒ unresolved（**不等于**已卸载，见 §3.4） |
 | `payload_estimate_fresh_sec`                       | 0.35 s                         | ROS 收帧新鲜度                                                    |
 
 **MHE**
@@ -95,6 +96,9 @@ tags: [MHE, NMPC, gripper, payload]
 | `payload_present_exit_mp` / `_persist`              | 0.02 kg / 50 帧                 | 出（5 s，更慢）                                                                                        |
 | `s_release_ratio` / `_persist`                      | **0.20** / **5 帧** | ★ drop 侧**相对塌陷**判据（09-04 由 0.10/20 改，见 §3.4）                                      |
 | `s_release_mass_score_min` / `_inertia_score_min`   | 0.90 / 0.90                     | ★ 塌陷判据的质量/惯量佐证（与$conf$ 同标定，但不碰 moment 通道）                                    |
+| `s_release_persist` / `_strong_persist` | 5 / 3 帧 | slow / fastB 的持续要求 |
+| `release_resid_enable` / `_floor_n` | `true` / 0.9 N | ★ 独立释放票（`RELEASE_RESID=0` = 消融档） |
+| `release_resid_strong_persist` | **4** 帧 | 强票；靠比 figure-8 的 3 帧多一帧把它甩开 |
 | `payload_input_fresh_sec` / `solution_fresh_sec`    | 0.30 / 0.30 s                   | `healthy` 的两个条件                                                                                 |
 | `payload_output_tau_sec`                              | 0.25 s                          | 发布侧 LPF                                                                                             |
 | `MHE_RZ_PRIOR`                                        | **−0.47** m              | 唯一保留的几何先验（真值实测 −0.579）                                                                 |
@@ -791,6 +795,7 @@ moment 未确认 → payload state = unresolved
 | 8   | $r_z$ 先验 −0.47 vs 实测 −0.579（低估 19 %） | 有意：$\Delta J$ 只需量级对                                                                                         |                                                                                                                                             |
 | 9   | LIFT/交接期 pitch 力矩`u_sat` 达 15 %、`mot_sat` 9 %                                                                                                                 | 与"4 m/s 真瓶颈是力矩"一致                                                                                                                  |
 | 10  | `event_confirm_timeout_sec = 3.0` > MHE 窗口 2.0 s ⇒ `external` 档超时兜底永远零降权                                                                                | 未修（主线不走 external）                                                                                                                   |
+| 12 | ★ 释放判据的三个遗留问题（武装条件挡在判据前 / drop 后 $s$ 不归零 / 保守悬停对 $s$ 可观测性影响不明） | 见 §3.4 末表，均未修 |
 | 10b | 四个批次脚本的 drop 判据只 grep legacy 的`"DROP: released"`，连续档打的是 `DROP complete` ⇒ **成功轮被静默记成 `no-drop`** 并空等 5 分钟                    | **已修**（09-04）：`run_cxy_mass_repeat` / `run_dj_ratchet_ab` / `run_geom_coupled_ab` / `run_moment_ab_4ms` 四处改为两种都认 |
 | 11  | 这批默认值的证据基础：**离线回放 + 09-04 四轮 viz**（三轮带 `ALPHA=-1` 覆盖：2 成 1 败；一轮纯默认档：飞行成功但 drop 确认死锁），尚无成规模 SITL 批次           | 引用任何数字前先确认样本量与覆盖项                                                                                                          |
 
