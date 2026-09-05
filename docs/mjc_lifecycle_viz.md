@@ -3,7 +3,6 @@ title: viz 场景下 m / J / c 的全生命周期
 tags: [MHE, NMPC, gripper, payload]
 基准: feature/noInitialMass @ 6419cbe (2026-09-04)
 ---
-
 # viz 场景下 m / J / c 的全生命周期
 
 按 `scripts/gripper/run_sitl_gripper_viz.sh` 的**当前默认档位**，逐阶段说明质量 $m$、
@@ -16,17 +15,17 @@ tags: [MHE, NMPC, gripper, payload]
 > `6419cbe` 把 MHE→NMPC 换成**单条原子连续接口** `/mhe/payload_estimate`，并把
 > 一阶质量矩默认打开。相对本文上一版（基准 `ea899ae`），下列结论**已被推翻**：
 >
-> | 旧版说法 | 现状 |
-> |---|---|
-> | $m$ 走 `/mhe/mass_est`、$c$ 走 `/acados_nmpc/c_xy_est`、$J$ 不发话题 | 三者**同一帧**走 `/mhe/payload_estimate`（14 字段），$J$ 现在**是**发的 |
-> | attach 时 $\Delta J$ 写 floor `0.0108` | 写 **bootstrap 包线** `0.0579`，随后交接给 MHE |
-> | attach 改写 PX4 `MC_*RATE_K`（×5.0），drop 复位 | **不再改 PX4 参数**；改走 setpoint 侧 `omega_scale` |
-> | 一阶质量矩 `MHE_ESTIMATE_MOMENT` 默认关 | **默认开**（`moment_a_mode=frozen`） |
-> | $c_{xy}$ 在八字里完全冻结 | `c_xy_from_moment` 默认开 ⇒ **机动中每帧更新** |
-> | MHE 仍吃 `attach_offset` 真值 | 主线档 `_model_r_p` 只用 $r_z$ 弱先验，**attach/drop 都不进 MHE** |
-> | drop 同帧清几何、`grip_dropped=True` | drop 进 **pending**，等 `no_payload_confidence` 确认才 complete |
-> | `self` 档 drop 后 $m_{est}$ 偏低 −2.81 % | 09-04 实跑 **−0.27 ~ −0.66 %**，不触下界 |
-> | M0 ⇒ 确认阈值固定 1.5 N | 脚本 M0 分支给 $\alpha=1.5$ ⇒ **4.4 N**；`MHE_CONFIRM_ALPHA=-1` 这个覆盖已废弃 |
+> | 旧版说法                                                                                                                                                                 | 现状                                                                                     |
+> | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------- |
+> | $m$ 走 `/mhe/mass_est`、$c$ 走 `/acados_nmpc/c_xy_est`、$J$ 不发话题 | 三者**同一帧**走 `/mhe/payload_estimate`（14 字段），$J$ 现在**是**发的 |                                                                                          |
+> | attach 时$\Delta J$ 写 floor `0.0108`                                                                                                                                | 写**bootstrap 包线** `0.0579`，随后交接给 MHE                                    |
+> | attach 改写 PX4`MC_*RATE_K`（×5.0），drop 复位                                                                                                                        | **不再改 PX4 参数**；改走 setpoint 侧 `omega_scale`                              |
+> | 一阶质量矩`MHE_ESTIMATE_MOMENT` 默认关                                                                                                                                 | **默认开**（`moment_a_mode=frozen`）                                             |
+> | $c_{xy}$ 在八字里完全冻结                                                                                                                                              | `c_xy_from_moment` 默认开 ⇒ **机动中每帧更新**                                  |
+> | MHE 仍吃`attach_offset` 真值                                                                                                                                           | 主线档`_model_r_p` 只用 $r_z$ 弱先验，**attach/drop 都不进 MHE**               |
+> | drop 同帧清几何、`grip_dropped=True`                                                                                                                                   | drop 进**pending**，等 `no_payload_confidence` 确认才 complete                   |
+> | `self` 档 drop 后 $m_{est}$ 偏低 −2.81 %                                                                                                                            | 09-04 实跑**−0.27 ~ −0.66 %**，不触下界                                          |
+> | M0 ⇒ 确认阈值固定 1.5 N                                                                                                                                                 | 脚本 M0 分支给$\alpha=1.5$ ⇒ **4.4 N**；`MHE_CONFIRM_ALPHA=-1` 这个覆盖已废弃 |
 >
 > 09-02 那批工况改动（0.15 kg / 包线 0.3 / $r$=10 / $z$=6.0 / 4 m/s）**仍然有效**，
 > 与更早的批次不可直接对比。
@@ -46,64 +45,64 @@ tags: [MHE, NMPC, gripper, payload]
 
 **场景（工况）**
 
-| 参数 | 值 | 含义 |
-|---|---|---|
-| `GRIP_PAYLOAD_KG` | **0.15** kg | 载荷真值（只用于评估对表） |
-| `GRIP_PAYLOAD_ENVELOPE` | **0.3** kg | 机架规格，**不是**包裹质量 |
-| `GRIP_ECC_Y` / `GRIP_ATTACH_TOL` | 0.10 / 0.03 m | attach 偏心上限 $r_{xy}=0.13$ |
-| `GRIP_DYN_R` / `W` / `RAMP` / `DZ` | 10.0 / 0.283 / 9.36 / 0.8 | 八字，$v_{peak}=4.0$ m/s |
-| `GRIP_Z_HIGH` / `LIFT_DUR` | 6.0 m / 8.4 s | 爬升率 0.649 m/s |
-| `GRIP_LIFT_AFTER` | **3.0** s | ★ 09-04 由 1.5 改默认——1.5 会在 LIFT 段发散，见 §3.1 |
-| `GRIP_DROP_AFTER` / `DROP_AT_TIP` | 55.0 s / true | 粗门 + 尖点对齐 |
-| `GRIP_LIFT_HOLD` | false | LIFT 中途停顿档（默认关） |
-| `METHOD` | `M0` | ⇒ $\theta=[-4,0,0,0]$、$\alpha=1.5$ |
+| 参数                                       | 值                        | 含义                                                     |
+| ------------------------------------------ | ------------------------- | -------------------------------------------------------- |
+| `GRIP_PAYLOAD_KG`                        | **0.15** kg         | 载荷真值（只用于评估对表）                               |
+| `GRIP_PAYLOAD_ENVELOPE`                  | **0.3** kg          | 机架规格，**不是**包裹质量                         |
+| `GRIP_ECC_Y` / `GRIP_ATTACH_TOL`       | 0.10 / 0.03 m             | attach 偏心上限$r_{xy}=0.13$                           |
+| `GRIP_DYN_R` / `W` / `RAMP` / `DZ` | 10.0 / 0.283 / 9.36 / 0.8 | 八字，$v_{peak}=4.0$ m/s                               |
+| `GRIP_Z_HIGH` / `LIFT_DUR`             | 6.0 m / 8.4 s             | 爬升率 0.649 m/s                                         |
+| `GRIP_LIFT_AFTER`                        | **3.0** s           | ★ 09-04 由 1.5 改默认——1.5 会在 LIFT 段发散，见 §3.1 |
+| `GRIP_DROP_AFTER` / `DROP_AT_TIP`      | 55.0 s / true             | 粗门 + 尖点对齐                                          |
+| `GRIP_LIFT_HOLD`                         | false                     | LIFT 中途停顿档（默认关）                                |
+| `METHOD`                                 | `M0`                    | ⇒$\theta=[-4,0,0,0]$、$\alpha=1.5$                  |
 
 **NMPC（连续接口）**
 
-| 参数 | 值 | 含义 |
-|---|---|---|
-| `continuous_payload_estimates` | **`true`** | ★ `/mhe/payload_estimate` 是**唯一**载荷输入 |
-| `geom_source` | **`estimate`** | 被上一条强制（写别的值会被覆盖） |
-| `NMPC_GEOM_COUPLED` | `0` | 连续档**要求**为 0，否则 `__init__` 直接 `RuntimeError` |
-| `attach_j_bootstrap_enable` | **`true`** | attach 时按包线抬 $\Delta J$ 地板 |
-| `attach_j_bootstrap_confirm_sec` / `release_sec` | 0.5 / 0.5 s | 交接确认 / 淡出时长 |
-| `attach_j_bootstrap_min_dj` | 0.010 kg·m² | 交接需要的最小 MHE $\Delta J$ |
-| `omega_scale_enable` / `_source` | **`true`** / `djest` | ★ 增益调度走 setpoint 侧 |
-| `omega_scale_tau` / `_cap` | 0.5 s / 5.0 | 一阶低通 + 硬上限 |
-| `omega_scale_hysteresis` / `rise` / `recover` | 0.08 / 4.0 / 1.5 s⁻¹ | 目标滞回 + 非对称 slew |
-| `omega_scale_headroom_fraction` | 0.95 | 保 5 % 体速率余量 |
-| `scale_px4_rate_gains` | **`false`** | ★ = `not continuous`；**PX4 参数不动** |
-| `payload_model_tau_sec` | 0.20 s | 模型侧 LPF |
-| `payload_mass_slew_kg_s` / `moment` / `dj` | 0.60 / 0.080 / 0.080 | 每秒最大变化 |
-| `no_payload_confidence_threshold` / `_hold_sec` | 0.90 / 1.0 s | drop 完成判据 |
-| `payload_estimate_fresh_sec` | 0.35 s | ROS 收帧新鲜度 |
+| 参数                                                 | 值                             | 含义                                                              |
+| ---------------------------------------------------- | ------------------------------ | ----------------------------------------------------------------- |
+| `continuous_payload_estimates`                     | **`true`**             | ★`/mhe/payload_estimate` 是**唯一**载荷输入              |
+| `geom_source`                                      | **`estimate`**         | 被上一条强制（写别的值会被覆盖）                                  |
+| `NMPC_GEOM_COUPLED`                                | `0`                          | 连续档**要求**为 0，否则 `__init__` 直接 `RuntimeError` |
+| `attach_j_bootstrap_enable`                        | **`true`**             | attach 时按包线抬$\Delta J$ 地板                                |
+| `attach_j_bootstrap_confirm_sec` / `release_sec` | 0.5 / 0.5 s                    | 交接确认 / 淡出时长                                               |
+| `attach_j_bootstrap_min_dj`                        | 0.010 kg·m²                  | 交接需要的最小 MHE$\Delta J$                                    |
+| `omega_scale_enable` / `_source`                 | **`true`** / `djest` | ★ 增益调度走 setpoint 侧                                         |
+| `omega_scale_tau` / `_cap`                       | 0.5 s / 5.0                    | 一阶低通 + 硬上限                                                 |
+| `omega_scale_hysteresis` / `rise` / `recover`  | 0.08 / 4.0 / 1.5 s⁻¹         | 目标滞回 + 非对称 slew                                            |
+| `omega_scale_headroom_fraction`                    | 0.95                           | 保 5 % 体速率余量                                                 |
+| `scale_px4_rate_gains`                             | **`false`**            | ★ =`not continuous`；**PX4 参数不动**                    |
+| `payload_model_tau_sec`                            | 0.20 s                         | 模型侧 LPF                                                        |
+| `payload_mass_slew_kg_s` / `moment` / `dj`     | 0.60 / 0.080 / 0.080           | 每秒最大变化                                                      |
+| `no_payload_confidence_threshold` / `_hold_sec`  | 0.90 / 1.0 s                   | drop 完成判据                                                     |
+| `payload_estimate_fresh_sec`                       | 0.35 s                         | ROS 收帧新鲜度                                                    |
 
 **MHE**
 
-| 参数 | 值 | 含义 |
-|---|---|---|
-| `external_event_inputs` | **`false`** | ★ 不订阅 `attach_offset` / `mass_event` / `u_opt`（sensor-only） |
-| `MHE_GEOM_COUPLED` | `1` | 几何槽装 $r_p$，$J(m)/c(m)$ 模型内现算 |
-| `MHE_ESTIMATE_MOMENT` | **`1`** | ★ 一阶质量矩 $s=[s_x,s_y]$ 增广为状态（`ns=2`） |
-| `MHE_MOMENT_A_MODE` | **`frozen`** | ★ $A=\mu r_z^2$ 用**上一窗口** $\hat m$ 现算，窗口内 $\partial A/\partial m\equiv 0$ |
-| `MHE_SIGMA_S0` | 0.1 | $s$ 的到达代价（实质无先验） |
-| `MHE_C_XY_FROM_MOMENT` | **`true`** | ★ $c_{xy}=s/m_T$，**无稳态门控** |
-| `event_signal_mode` | `residual` | 无外部信号，从 $T_{phys}$ 残差自触发 |
-| `confirm_thresh_alpha` | **`1.5`** | ⇒ 阈值 $=\alpha g\,\text{env}=$ **4.4 N**，故意堵死残差路（§3.4）。**不要再覆盖成 −1** |
-| `resid_persist_frames` / `resid_step_enable` | 2 / `false` | 第二段确认 / 并行阶跃判据关 |
-| `c_xy_mass_release_mp` / `arm_ratio` / 两个 persist | 0.03 kg / 3.0 / 20 / 20 帧 | 质量域卸载判据（武装 0.09 kg，各持 2 s） |
-| `payload_present_enter_mp` / `_persist` | 0.09 kg / 20 帧 | 载荷存在状态机进 |
-| `payload_present_exit_mp` / `_persist` | 0.02 kg / 50 帧 | 出（5 s，更慢） |
-| `s_release_ratio` / `_persist` | **0.20** / **5 帧** | ★ drop 侧**相对塌陷**判据（09-04 由 0.10/20 改，见 §3.4） |
-| `s_release_mass_score_min` / `_inertia_score_min` | 0.90 / 0.90 | ★ 塌陷判据的质量/惯量佐证（与 $conf$ 同标定，但不碰 moment 通道） |
-| `payload_input_fresh_sec` / `solution_fresh_sec` | 0.30 / 0.30 s | `healthy` 的两个条件 |
-| `payload_output_tau_sec` | 0.25 s | 发布侧 LPF |
-| `MHE_RZ_PRIOR` | **−0.47** m | 唯一保留的几何先验（真值实测 −0.579） |
-| `geom_release_mode` | `self` | 主线下**对模型槽无效**（见 §3.1） |
-| `MHE_RESID_RELEASE_GEOM` | `true` | 残差检出即释放几何 |
-| `payload_lost_watch` | `false` | 演示视频用 `1` 打开 |
+| 参数                                                    | 值                              | 含义                                                                                                   |
+| ------------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `external_event_inputs`                               | **`false`**             | ★ 不订阅`attach_offset` / `mass_event` / `u_opt`（sensor-only）                                 |
+| `MHE_GEOM_COUPLED`                                    | `1`                           | 几何槽装$r_p$，$J(m)/c(m)$ 模型内现算                                                              |
+| `MHE_ESTIMATE_MOMENT`                                 | **`1`**                 | ★ 一阶质量矩$s=[s_x,s_y]$ 增广为状态（`ns=2`）                                                    |
+| `MHE_MOMENT_A_MODE`                                   | **`frozen`**            | ★$A=\mu r_z^2$ 用**上一窗口** $\hat m$ 现算，窗口内 $\partial A/\partial m\equiv 0$       |
+| `MHE_SIGMA_S0`                                        | 0.1                             | $s$ 的到达代价（实质无先验）                                                                         |
+| `MHE_C_XY_FROM_MOMENT`                                | **`true`**              | ★$c_{xy}=s/m_T$，**无稳态门控**                                                               |
+| `event_signal_mode`                                   | `residual`                    | 无外部信号，从$T_{phys}$ 残差自触发                                                                  |
+| `confirm_thresh_alpha`                                | **`1.5`**               | ⇒ 阈值$=\alpha g\,\text{env}=$ **4.4 N**，故意堵死残差路（§3.4）。**不要再覆盖成 −1** |
+| `resid_persist_frames` / `resid_step_enable`        | 2 /`false`                    | 第二段确认 / 并行阶跃判据关                                                                            |
+| `c_xy_mass_release_mp` / `arm_ratio` / 两个 persist | 0.03 kg / 3.0 / 20 / 20 帧      | 质量域卸载判据（武装 0.09 kg，各持 2 s）                                                               |
+| `payload_present_enter_mp` / `_persist`             | 0.09 kg / 20 帧                 | 载荷存在状态机进                                                                                       |
+| `payload_present_exit_mp` / `_persist`              | 0.02 kg / 50 帧                 | 出（5 s，更慢）                                                                                        |
+| `s_release_ratio` / `_persist`                      | **0.20** / **5 帧** | ★ drop 侧**相对塌陷**判据（09-04 由 0.10/20 改，见 §3.4）                                      |
+| `s_release_mass_score_min` / `_inertia_score_min`   | 0.90 / 0.90                     | ★ 塌陷判据的质量/惯量佐证（与$conf$ 同标定，但不碰 moment 通道）                                    |
+| `payload_input_fresh_sec` / `solution_fresh_sec`    | 0.30 / 0.30 s                   | `healthy` 的两个条件                                                                                 |
+| `payload_output_tau_sec`                              | 0.25 s                          | 发布侧 LPF                                                                                             |
+| `MHE_RZ_PRIOR`                                        | **−0.47** m              | 唯一保留的几何先验（真值实测 −0.579）                                                                 |
+| `geom_release_mode`                                   | `self`                        | 主线下**对模型槽无效**（见 §3.1）                                                               |
+| `MHE_RESID_RELEASE_GEOM`                              | `true`                        | 残差检出即释放几何                                                                                     |
+| `payload_lost_watch`                                  | `false`                       | 演示视频用`1` 打开                                                                                   |
 
-> [!warning] 脚本里还在传、但主线**不再消费**的参数
+> [!warning] ⚠️ 脚本里还在传、但主线**不再消费**的参数
 > 连续档下 `_update_online_geometry` 根本不被调用、`_geom_slot` 走 continuous 分支、
 > `_grip_drop_phase` 走 pending 分支，所以这几个仍在命令行里的参数是**死参数**：
 > `dj_track_mest`、`dj_ratchet_enable`、`grip_dj_floor_mp`、`grip_mp_cap`、
@@ -112,16 +111,16 @@ tags: [MHE, NMPC, gripper, payload]
 
 ### 0.2 物理常数与派生量
 
-| 量 | 值 |
-|---|---|
-| 空机质量 $m_B$ | 2.0643 kg |
-| 空机惯量 $J_{xx}$ | 0.0142 kg·m² |
-| 惯量先验力臂 $r_z$ (`MHE_RZ_PRIOR`/`grip_arm_d`) | −0.47 m（实测真值 −0.579） |
-| 载荷真值 $m_P$ / 总质量 | 0.15 / 2.2143 kg |
-| 悬停推力 $T$ | 21.72 N |
-| 力矩约束 $\tau_{max}$ | 0.5 N·m |
-| MHE 窗口 | $N\cdot dt = 20\times 0.1 = 2.0$ s |
-| NMPC 求解 | $dt=0.05$ s（20 Hz），horizon 1.0 s；解耦发布 50 Hz |
+| 量                                                    | 值                                                    |
+| ----------------------------------------------------- | ----------------------------------------------------- |
+| 空机质量$m_B$                                       | 2.0643 kg                                             |
+| 空机惯量$J_{xx}$                                    | 0.0142 kg·m²                                        |
+| 惯量先验力臂$r_z$ (`MHE_RZ_PRIOR`/`grip_arm_d`) | −0.47 m（实测真值 −0.579）                          |
+| 载荷真值$m_P$ / 总质量                              | 0.15 / 2.2143 kg                                      |
+| 悬停推力$T$                                         | 21.72 N                                               |
+| 力矩约束$\tau_{max}$                                | 0.5 N·m                                              |
+| MHE 窗口                                              | $N\cdot dt = 20\times 0.1 = 2.0$ s                  |
+| NMPC 求解                                             | $dt=0.05$ s（20 Hz），horizon 1.0 s；解耦发布 50 Hz |
 
 连续接口的惯量代数（`payload_estimate.inertia_from_mass_moment`，**只留对角、丢掉
 $O(r_{xy}^2)$ 项**）：
@@ -132,12 +131,12 @@ c_{xy} = \frac{s}{m_T},\qquad
 \Delta J_{xx} = \Delta J_{yy} = \mu\, r_z^2,\qquad \Delta J_{zz} = 0
 $$
 
-| $m_p$ 来源 | $m_p$ [kg] | $\Delta J$ | $J_{xx}+\Delta J$ | $\omega$ 缩放比 |
-|---|---|---|---|---|
-| 空机 | 0 | 0 | 0.0142 | 1.00 |
-| **实测 $\hat m_p$** | **≈0.128** | **0.0267** | 0.0409 | **2.88** |
-| 真值 | 0.15 | 0.0309 | 0.0451 | 3.18 |
-| **bootstrap 包线** | **0.30** | **0.0579** | **0.0721** | **5.08 → cap 5.0** |
+| $m_p$ 来源                | $m_p$ [kg]      | $\Delta J$     | $J_{xx}+\Delta J$ | $\omega$ 缩放比         |
+| --------------------------- | ----------------- | ---------------- | ------------------- | ------------------------- |
+| 空机                        | 0                 | 0                | 0.0142              | 1.00                      |
+| **实测 $\hat m_p$** | **≈0.128** | **0.0267** | 0.0409              | **2.88**            |
+| 真值                        | 0.15              | 0.0309           | 0.0451              | 3.18                      |
+| **bootstrap 包线**    | **0.30**    | **0.0579** | **0.0721**    | **5.08 → cap 5.0** |
 
 配平力矩（$r_y$ 实测 −0.101 m）：
 
@@ -171,15 +170,16 @@ flowchart LR
  no_payload_confidence, healthy, solution_age_sec]
 ```
 
-| 量 | MHE 侧 | NMPC 侧 |
-|---|---|---|
-| $m$ | 被估状态（窗口第 14 维） | `self.m_est`，LPF + slew 0.60 kg/s |
-| $s$ | **被估状态**（`ns=2`），有独立观测 $\tau/T$ | `self.s_est`，slew 0.080 kg·m/s |
-| $\Delta J$ | 由 $m,s,r_z$ 代数派生后发布 | `self.dJ_est`，slew 0.080 kg·m²/s，attach 期叠 bootstrap 地板 |
-| $c_{xy}$ | $s/m_T$（发布字段；另有 `c_xy_est` 诊断话题） | `self.c_est = s_est / m_est` |
+| 量           | MHE 侧                                                | NMPC 侧                                                           |
+| ------------ | ----------------------------------------------------- | ----------------------------------------------------------------- |
+| $m$        | 被估状态（窗口第 14 维）                              | `self.m_est`，LPF + slew 0.60 kg/s                              |
+| $s$        | **被估状态**（`ns=2`），有独立观测 $\tau/T$ | `self.s_est`，slew 0.080 kg·m/s                                |
+| $\Delta J$ | 由$m,s,r_z$ 代数派生后发布                          | `self.dJ_est`，slew 0.080 kg·m²/s，attach 期叠 bootstrap 地板 |
+| $c_{xy}$   | $s/m_T$（发布字段；另有 `c_xy_est` 诊断话题）     | `self.c_est = s_est / m_est`                                    |
 
 > [!question] 上一版说"$J$ 不该发话题"，为什么现在发了
 > 旧论证的三条理由**在旧接口下仍然成立**，改变的是接口本身：
+>
 > 1. **不再是"零新增信息"**：$s$ 增广后 $J$ 不再是 $m$ 的确定性函数，$\Delta J$ 与
 >    $c_{xy}$ 各自带着 $s$ 的信息。NMPC 只拿 $m$ 已经推不出来了。
 > 2. **防护没有撤掉，只是换了形式**：`floor/cap` 换成 **LPF + slew + attach bootstrap
@@ -198,17 +198,17 @@ flowchart LR
 NMPC **不订阅** `/gripper/attach_offset`，`attach_time` 就是它自己发
 `/gripper/enable=true` 的那一刻（`grip_descend_done_time`），不再等夹爪回执。
 
-| 相对时刻（`lift_after` = **3.0**，当前默认） | 事件 | 性质 |
-|---|---|---|
-| $T_a$ | **ATTACH 命令**发出，J bootstrap 武装 | 事件 |
-| $T_a + 3.0$ | LIFT 斜坡开始，$z: 0.55 \to 6.0$ | 事件 |
-| $T_a + \sim 4.5$ | box 离地；MHE 见到推力台阶（$m_P g = 1.47$ N） | 物理 |
-| $T_a + \sim 5.0$ | **bootstrap 交接**（持续证据 0.5 s 确认）→ 0.5 s 淡出 | 状态 |
-| $T_a + 11.4$ | `lift_done_t` = $T_a$ + 3.0 + 8.4 | **公式** |
-| $T_a + 14.4$ | **DYNAMIC** 切换，`grip_dyn_t0` = 此刻（+`dyn_settle` 3.0） | 事件 |
-| $T_a + 16.4$ | 八字 `hover_time` 2.0 结束，相位开始推进（$t_c=0$） | — |
-| $T_a + 77.46$ | **DROP 命令**：第一个 $t_c \ge 50$ 的尖点（$t_c = 61.06$） | 事件 |
-| $T_a + ?$ | **DROP complete**：$conf \ge 0.90$ 持续 1.0 s —— 默认阈值档下的延迟**尚未实测**，见 §3.4 | 状态 |
+| 相对时刻（`lift_after` = **3.0**，当前默认）                                                                    | 事件                                                                  | 性质           |
+| ----------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | -------------- |
+| $T_a$                                                                                                                 | **ATTACH 命令**发出，J bootstrap 武装                           | 事件           |
+| $T_a + 3.0$ | LIFT 斜坡开始，$z: 0.55 \to 6.0$                                                                      | 事件                                                                  |                |
+| $T_a + \sim 4.5$ | box 离地；MHE 见到推力台阶（$m_P g = 1.47$ N）                                                   | 物理                                                                  |                |
+| $T_a + \sim 5.0$                                                                                                      | **bootstrap 交接**（持续证据 0.5 s 确认）→ 0.5 s 淡出          | 状态           |
+| $T_a + 11.4$                                                                                                          | `lift_done_t` = $T_a$ + 3.0 + 8.4                                 | **公式** |
+| $T_a + 14.4$                                                                                                          | **DYNAMIC** 切换，`grip_dyn_t0` = 此刻（+`dyn_settle` 3.0） | 事件           |
+| $T_a + 16.4$ | 八字 `hover_time` 2.0 结束，相位开始推进（$t_c=0$）                                                | —                                                                    |                |
+| $T_a + 77.46$                                                                                                         | **DROP 命令**：第一个 $t_c \ge 50$ 的尖点（$t_c = 61.06$）  | 事件           |
+| $T_a + ?$ | **DROP complete**：$conf \ge 0.90$ 持续 1.0 s —— 默认阈值档下的延迟**尚未实测**，见 §3.4 | 状态                                                                  |                |
 
 ### 2.1 DROP 门槛怎么算
 
@@ -227,13 +227,13 @@ $$
 
 $w = 0.283$ ⇒ 周期 22.20 s：
 
-| $k$ | $t_c^{tip}$ | 圈数 |
-|---|---|---|
-| 0 | 16.65 | 0.75 |
-| 1 | 38.85 | 1.75 |
+| $k$       | $t_c^{tip}$   | 圈数                             |
+| ----------- | --------------- | -------------------------------- |
+| 0           | 16.65           | 0.75                             |
+| 1           | 38.85           | 1.75                             |
 | **2** | **61.06** | **2.75** ← 第一个 ≥ 50.0 |
 
-> [!warning] 改 `GRIP_DYN_W` 必须重算 `GRIP_DROP_AFTER`
+> [!warning] ⚠️ 改 `GRIP_DYN_W` 必须重算 `GRIP_DROP_AFTER`
 > 门槛写的是**秒**，兑现的是**圈数**，汇率就是 $w$。同一个 `55.0`：
 > $w{=}0.20$ 只飞 **1.75 圈**，$w{=}0.283$ 飞 **2.75 圈**，$w{=}0.40$ 飞 **3.75 圈**。
 > 当 $t_c^{thr}$ 贴近某个尖点时（本档临界 $w \approx 0.3456$），$w$ 微调会让 drop 时刻
@@ -244,31 +244,31 @@ $w = 0.283$ ⇒ 周期 22.20 s：
 
 $a = 3\pi/2 \Rightarrow \sin a = -1,\ \cos a = 0,\ \cos 2a = -1$：
 
-| 量 | 值 | 说明 |
-|---|---|---|
-| $x$ | $c_x - 10.0$ m | 八字**最左端**（$x$ 的折返点） |
-| $y$ | $c_y$ | 正好在中线 |
-| $z$ | $6.0 - 0.8 = 5.2$ m | **轨迹最低点** |
-| $v_x,\ v_z$ | 0 | 都正比于 $\cos a$ |
-| $v_y$ | $-2.83$ m/s | $rw\cos 2a$ |
+| 量            | 值                                                        | 说明                 |
+| ------------- | --------------------------------------------------------- | -------------------- |
+| $x$         | $c_x - 10.0$ m | 八字**最左端**（$x$ 的折返点） |                      |
+| $y$         | $c_y$                                                   | 正好在中线           |
+| $z$         | $6.0 - 0.8 = 5.2$ m                                     | **轨迹最低点** |
+| $v_x,\ v_z$ | 0                                                         | 都正比于$\cos a$   |
+| $v_y$       | $-2.83$ m/s                                             | $rw\cos 2a$        |
 
 box 底离地 4.73 m，自由落体 0.98 s 落地，期间横移约 2.78 m。
 
 ### 2.3 2026-09-04 实跑对照（四轮）
 
-> [!caution] 这三轮都带着一个**已废弃**的覆盖
+> [!caution] 🔥 这三轮都带着一个**已废弃**的覆盖
 > 它们都传了 `MHE_CONFIRM_ALPHA=-1`（确认阈值回到固定 1.5 N），于是残差自检测这条路
 > 是**开着**的，drop 由它检出。默认档（4.4 N）把这条路堵死，**drop 的检出与确认时序
 > 会不同**。下表中 `DROP complete` 一列因此不代表默认档；其余各列（时序、发散与否、
 > solve failed、以及 §3.2 的估计精度）不受该覆盖影响。
 
-| 轮次 | `lift_after` | ATTACH | LIFT | DYNAMIC | DROP 命令 | DROP complete | solve failed | 结局 |
-|---|---|---|---|---|---|---|---|---|
-| `162428` | **1.5**（当时的默认） | 6.6 | 8.1 | 19.5 | 82.6 | — | **822** | **发散**（tilt 141°、pos_err 70 m） |
-| `163315` | 3.0 | 6.4 | 9.4 | 20.8 | 83.9 | +2.34 s | 0 | 正常 |
-| `164651` | 3.0 | 6.4 | 9.4 | 20.9 | 84.0 | +2.40 s | 0 | 正常 |
-| **`232444`** | **3.0（新默认）** | 6.6 | 9.6 | 21.0 | 84.1 | **从未** | 0 | 飞行正常，**drop 确认死锁**（§3.4） |
-| **`234516`** | 3.0 | 6.3 | 9.3 | 20.7 | 83.8 | **+3.55 s** | 0 | ★ 改造后纯默认档**全程走通** |
+| 轮次                 | `lift_after`              | ATTACH | LIFT | DYNAMIC | DROP 命令 | DROP complete     | solve failed  | 结局                                       |
+| -------------------- | --------------------------- | ------ | ---- | ------- | --------- | ----------------- | ------------- | ------------------------------------------ |
+| `162428`           | **1.5**（当时的默认） | 6.6    | 8.1  | 19.5    | 82.6      | —                | **822** | **发散**（tilt 141°、pos_err 70 m） |
+| `163315`           | 3.0                         | 6.4    | 9.4  | 20.8    | 83.9      | +2.34 s           | 0             | 正常                                       |
+| `164651`           | 3.0                         | 6.4    | 9.4  | 20.9    | 84.0      | +2.40 s           | 0             | 正常                                       |
+| **`232444`** | **3.0（新默认）**     | 6.6    | 9.6  | 21.0    | 84.1      | **从未**    | 0             | 飞行正常，**drop 确认死锁**（§3.4） |
+| **`234516`** | 3.0                         | 6.3    | 9.3  | 20.7    | 83.8      | **+3.55 s** | 0             | ★ 改造后纯默认档**全程走通**        |
 
 `232444` 是**纯默认档**（不带任何覆盖，`thresh=4.4N`），专为补齐默认阈值档的
 drop 时序而跑。飞行本身完全正常（0 solve failed、bootstrap 正常交接
@@ -296,13 +296,13 @@ drop 时序而跑。飞行本身完全正常（0 solve failed、bootstrap 正常
 
 #### NMPC（`_grip_mass_step`，continuous 分支）
 
-| 量 | 动作 |
-|---|---|
-| $m,\ s$ | **完全不动**，纯跟 MHE |
-| $\Delta J$ | 武装 **bootstrap**：地板 = 包线 0.3 kg ⇒ $\Delta J = 0.0579$、$J_{xx}=0.0721$ |
-| $c_{xy}$ | 仍是 $s_{est}/m_{est}$，**不置零、不注真值** |
-| `omega_scale` | 随 $\Delta J$ 连续爬到 cap 5.0（实测 4.998） |
-| PX4 参数 | **不动**（`scale_px4_rate_gains=false`） |
+| 量              | 动作                                                                                    |
+| --------------- | --------------------------------------------------------------------------------------- |
+| $m,\ s$       | **完全不动**，纯跟 MHE                                                            |
+| $\Delta J$    | 武装**bootstrap**：地板 = 包线 0.3 kg ⇒ $\Delta J = 0.0579$、$J_{xx}=0.0721$ |
+| $c_{xy}$      | 仍是$s_{est}/m_{est}$，**不置零、不注真值**                                     |
+| `omega_scale` | 随$\Delta J$ 连续爬到 cap 5.0（实测 4.998）                                           |
+| PX4 参数        | **不动**（`scale_px4_rate_gains=false`）                                        |
 
 ```python
 self.grip_mass_stepped = True
@@ -335,12 +335,12 @@ self._start_attach_j_bootstrap()                 # 只抬 J，不造 m/s
 
 #### MHE
 
-| 量 | 动作 |
-|---|---|
-| $m$ | 不动，靠窗口自己爬 |
-| $s$ | 同样靠窗口爬；有独立观测 $\tau/T$，不依赖 $m$ 收敛 |
-| 几何槽 | **恒为** $[0,0,r_z^{prior}]$ —— attach/drop 都不改它 |
-| 事件 | `residual` 自触发，但默认阈值 4.4 N ≫ 台阶 1.47 N ⇒ 本工况**不触发**（无降权）；`external_event_inputs=false` ⇒ 也没有任何外部武装 |
+| 量     | 动作                                                                                                                                            |
+| ------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| $m$  | 不动，靠窗口自己爬                                                                                                                              |
+| $s$  | 同样靠窗口爬；有独立观测$\tau/T$，不依赖 $m$ 收敛                                                                                           |
+| 几何槽 | **恒为** $[0,0,r_z^{prior}]$ —— attach/drop 都不改它                                                                                  |
+| 事件   | `residual` 自触发，但默认阈值 4.4 N ≫ 台阶 1.47 N ⇒ 本工况**不触发**（无降权）；`external_event_inputs=false` ⇒ 也没有任何外部武装 |
 
 ```python
 def _model_r_p(self):
@@ -349,7 +349,7 @@ def _model_r_p(self):
     ...  # 下面 self/event 两档的老逻辑主线走不到
 ```
 
-> [!important] `geom_release_mode` 在主线下是**空转**的
+> [!important] ❗ `geom_release_mode` 在主线下是**空转**的
 > 上面那个提前 `return` 意味着 `self` / `event` 两档的差别对**模型几何槽**不再生效：
 > 横向几何全部由被估的 $s$ 承担，纵向只有 $r_z$ 弱先验，且**永远在线**。
 > 启动日志里那条 `geom_release_mode='self'` 的警告仍会打印，但它描述的是老路径。
@@ -362,7 +362,7 @@ m_P = (m - m_B)^+,\quad \mu = \frac{m_B m_P}{m},\quad
 A = \mu r_z^2\ \text{(frozen)},\quad c = \frac{s}{m}
 $$
 
-> [!note] `moment_a_mode=frozen` 是什么意思
+> [!note] ✏️ `moment_a_mode=frozen` 是什么意思
 > $A=\mu r_z^2$ 用**上一窗口解出的** $\hat m$ 现算（借 `geom[0]` 槽传进来）。
 > 于是窗口内 $\partial A/\partial m \equiv 0$ —— 优化器**不能把 $m$ 当惯量旋钮**；
 > 但 $A$ 的数值每拍仍跟着真实质量刷新，不像 `const` 那样被包线钉死
@@ -388,7 +388,7 @@ dJ_est = slew(dJ_est, lpf(dj_tgt),    0.080, dt) # kg·m²/s
 c_est  = s_est / m_est                           # 横向质心只认一阶质量矩
 ```
 
-> [!important] 失效帧的语义是"冻住"，不是"归零"
+> [!important] ❗ 失效帧的语义是"冻住"，不是"归零"
 > `_payload_estimate_is_fresh()` 要求 MHE 自报 `healthy=1`、
 > `solution_age <= 0.35 s`、且 ROS 收帧不陈旧。任何一条不满足：
 > **保持上一帧模型**，并且**打断** `no_payload_confidence` 的连续计时
@@ -396,17 +396,17 @@ c_est  = s_est / m_est                           # 横向质心只认一阶质�
 
 #### 09-04 实测（`164651`，带载段）
 
-| 量 | 估计 | 真值 | 偏差 |
-|---|---|---|---|
-| $\hat m_p$ | 0.123 ~ 0.132 kg | 0.15 | **低估 ~14 %** |
-| $\hat s_y$ | −0.0149 ~ −0.0154 kg·m | −0.01515 | **2 % 以内** |
-| $\hat s_x$ | −0.005 ~ −0.011 kg·m | +0.0006 | 系统性偏负 ~0.01 |
-| $\Delta J$ | 0.0267 | 0.0309 | 低估 14 %（跟着 $m_p$） |
+| 量           | 估计                      | 真值      | 偏差                     |
+| ------------ | ------------------------- | --------- | ------------------------ |
+| $\hat m_p$ | 0.123 ~ 0.132 kg          | 0.15      | **低估 ~14 %**     |
+| $\hat s_y$ | −0.0149 ~ −0.0154 kg·m | −0.01515 | **2 % 以内**       |
+| $\hat s_x$ | −0.005 ~ −0.011 kg·m   | +0.0006   | 系统性偏负 ~0.01         |
+| $\Delta J$ | 0.0267                    | 0.0309    | 低估 14 %（跟着$m_p$） |
 
 （真值来自 proximity 的 `attach offset = [+0.004, −0.101, −0.579] m`，
 $s_{true} = m_P r_{xy}$。）
 
-> [!note] $s$ 准而 $m$ 低估——两件事，别混
+> [!note] ✏️ $s$ 准而 $m$ 低估——两件事，别混
 > $s_y$ 准到 2 % 以内，说明**横向一阶矩这条观测通路是干净的**（$\tau/T$ 直接给它）。
 > 而 $m$ 低估 14 % 是既有的"机动中质量低估"问题在小载荷上的放大
 > （$m_p = \hat m - m_B$ 的差分放大 ~7.9×，见记忆 `mest-maneuver-underestimate`）。
@@ -422,12 +422,12 @@ $s_{true} = m_P r_{xy}$。）
 轨迹：$x = \alpha r\sin a$，$y = \tfrac12\alpha r\sin 2a$，$z = z_h + \alpha\,dz\sin a$，$a = wt_c$。
 $r{=}10.0$，$w{=}0.283$，$dz{=}0.8$ ⇒ 包络 20 m × 10 m。
 
-| 量 | 这一段的行为 |
-|---|---|
-| $m$ | 照常 10 Hz 更新（机动会抬高估计误差，通路不变） |
-| $s$ | **照常更新**——窗口内被估状态，与稳态无关 |
-| $\Delta J$ | 跟随 $(m,s)$，双向，LPF + slew |
-| $c_{xy}$ | **每帧更新**（$= s/m_T$），不再冻结 |
+| 量                                                       | 这一段的行为                                     |
+| -------------------------------------------------------- | ------------------------------------------------ |
+| $m$                                                    | 照常 10 Hz 更新（机动会抬高估计误差，通路不变）  |
+| $s$                                                    | **照常更新**——窗口内被估状态，与稳态无关 |
+| $\Delta J$                                             | 跟随$(m,s)$，双向，LPF + slew                  |
+| $c_{xy}$ | **每帧更新**（$= s/m_T$），不再冻结 |                                                  |
 
 > [!success] $c_{xy}$ 的冻结问题已经解决
 > 上一版记的坑是"峰值速度 4.00 m/s 是稳态门限 0.20 m/s 的 20 倍 ⇒ 八字里
@@ -447,11 +447,11 @@ $r{=}10.0$，$w{=}0.283$，$dz{=}0.8$ ⇒ 包络 20 m × 10 m。
 
 #### 内环增益：从改 PX4 参数改成缩 setpoint
 
-| | 旧（≤09-02） | 新（主线） |
-|---|---|---|
-| 手段 | `ParamSetV2` 改写 `MC_ROLLRATE_K/MC_PITCHRATE_K` | 缩放发给 PX4 的 `body_rate` setpoint |
-| 时机 | attach 一次性，drop 复位 | **每帧连续**（`_update_omega_scale`） |
-| 副作用 | 参数被 PX4 当真机落盘，污染后续架次 | 无；PX4 参数全程不动 |
+|        | 旧（≤09-02）                                        | 新（主线）                                    |
+| ------ | ---------------------------------------------------- | --------------------------------------------- |
+| 手段   | `ParamSetV2` 改写 `MC_ROLLRATE_K/MC_PITCHRATE_K` | 缩放发给 PX4 的`body_rate` setpoint         |
+| 时机   | attach 一次性，drop 复位                             | **每帧连续**（`_update_omega_scale`） |
+| 副作用 | 参数被 PX4 当真机落盘，污染后续架次                  | 无；PX4 参数全程不动                          |
 
 $$
 s_\omega = \mathrm{clip}\!\left(\frac{J_{xx}+\Delta J}{J_{xx}},\,1,\,5\right),
@@ -468,7 +468,7 @@ $$
 `headroom limited 4.98→4.38`），带载八字段稳定在 **2.85 ~ 3.10**，
 drop 后连续回落到 **1.00**。
 
-> [!caution] 这一段仍有饱和
+> [!caution] 🔥 这一段仍有饱和
 > `[flight-diag] t=15.6s`（LIFT/交接期）实测 `u_sat=[T0 r0 p15.0 y0]%`、
 > `mot_peak=1.000 mot_sat=9.0%`。跟踪本身没问题（末段 `pos_err` 0.03~0.08 m），
 > 但 pitch 力矩通道在这一段确实短暂打满——与既有认知
@@ -518,11 +518,11 @@ $conf \ge 0.90$ **连续** 1.0 s（且期间每帧估计都新鲜），才置
 >
 > **而默认档下三条触发路径全断**：
 >
-> | 路径 | 为什么不通 | 实测 |
-> |---|---|---|
-> | 质量域判据 | `_mass_observable()` 要求 $\lvert\omega\rvert\le0.15$、$\lvert v_{xy}\rvert\le0.20$；drop 后飞机**继续飞八字**，释放计数被每帧清零 | yaw rate 1.03~1.05 rad/s，是阈值的 7 倍；判据已武装但一次都没累计 |
-> | $\lVert s\rVert$ 塌陷 | 需跌破自身峰值的 10 % | 峰值 0.0229 → drop 后 0.0032，比值 **0.14 > 0.10**，差一点 |
-> | 残差自检测 | 阈值 4.4 N ≫ 台阶 1.47 N | 默认档**故意**堵死的那条 |
+> | 路径                    | 为什么不通                                                                                                                                     | 实测                                                              |
+> | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+> | 质量域判据              | `_mass_observable()` 要求 $\lvert\omega\rvert\le0.15$、$\lvert v_{xy}\rvert\le0.20$；drop 后飞机**继续飞八字**，释放计数被每帧清零 | yaw rate 1.03~1.05 rad/s，是阈值的 7 倍；判据已武装但一次都没累计 |
+> | $\lVert s\rVert$ 塌陷 | 需跌破自身峰值的 10 %                                                                                                                          | 峰值 0.0229 → drop 后 0.0032，比值**0.14 > 0.10**，差一点  |
+> | 残差自检测              | 阈值 4.4 N ≫ 台阶 1.47 N                                                                                                                      | 默认档**故意**堵死的那条                                    |
 >
 > 后果不止是日志里少一行：`grip_dropped` 不置位 ⇒ L1 / $\xi$ 状态不复位、
 > 任务状态机停在 pending。**这是架构级死锁，不是调参问题**：NMPC 的完成判据
@@ -533,11 +533,11 @@ $conf \ge 0.90$ **连续** 1.0 s（且期间每帧估计都新鲜），才置
 > **修法（2026-09-04 晚已落地，用户拍板）**：走"drop 专用的相对塌陷确认"这条，
 > 另外两条都不动——
 >
-> | 方案 | 取舍 |
-> |---|---|
-> | ★ 相对塌陷 0.10 → **0.20** + 质量/惯量佐证 + 0.5 s 持续 | 采纳。0.14 的实测比值说明**物理卸载后一阶矩已塌 86 %**，而 0.10 要求塌 >90 %，是在要求残噪低于一个没有物理必要性的水平 |
-> | 抬 `moment_full` 0.0015 → 0.0035 | **不做**。那是 confidence 标定，抬它等于"噪声下不去就把满分线抬上来"，会把检测逻辑问题伪装成评分标定问题，且波及 attach 与其他载荷 |
-> | drop 后飞回低机动再判 | **不做**。detector 本身没解决，只是改实验让旧 detector 恰好能工作；对"持续机动 + 无事件信号"这条论证是自我削弱 |
+> | 方案                                                           | 取舍                                                                                                                                     |
+> | -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+> | ★ 相对塌陷 0.10 →**0.20** + 质量/惯量佐证 + 0.5 s 持续 | 采纳。0.14 的实测比值说明**物理卸载后一阶矩已塌 86 %**，而 0.10 要求塌 >90 %，是在要求残噪低于一个没有物理必要性的水平             |
+> | 抬`moment_full` 0.0015 → 0.0035                             | **不做**。那是 confidence 标定，抬它等于"噪声下不去就把满分线抬上来"，会把检测逻辑问题伪装成评分标定问题，且波及 attach 与其他载荷 |
+> | drop 后飞回低机动再判                                          | **不做**。detector 本身没解决，只是改实验让旧 detector 恰好能工作；对"持续机动 + 无事件信号"这条论证是自我削弱                     |
 >
 > 更关键的是**因果方向**要摆正。原来是：
 >
@@ -558,22 +558,23 @@ $conf \ge 0.90$ **连续** 1.0 s（且期间每帧估计都新鲜），才置
 
 ##### 改造后的实测分界（5 轮，`[s-collapse]` 日志每 1 s 一行）
 
-| stamp | peak | 释放时 $\lVert s\rVert$ | **释放 ratio** | **带载 $ratio_{min}$** | 带载中位 | pre-drop 误触发 |
-|---|---|---|---|---|---|---|
-| `234516`(viz) | 0.0243 | 0.0036 | 0.148 | 0.810 | 0.919 | 0 / 65 |
-| `234903` | 0.0275 | 0.0012 | **0.045** | 0.634 | 0.786 | 0 / 52 |
-| `235647` | 0.0184 | 0.0015 | 0.079 | **0.234** | 0.718 | 0 / 58 |
-| `000017` | 0.0140 | 0.0016 | 0.118 | 0.277 | 0.636 | 0 / 53 |
-| `000352` | 0.0267 | 0.0049 | **0.182** | 0.399 | 0.713 | 0 / 65 |
+| stamp           | peak   | 释放时$\lVert s\rVert$ | **释放 ratio** | **带载 $ratio_{min}$** | 带载中位 | pre-drop 误触发 |
+| --------------- | ------ | ------------------------ | -------------------- | ------------------------------ | -------- | --------------- |
+| `234516`(viz) | 0.0243 | 0.0036                   | 0.148                | 0.810                          | 0.919    | 0 / 65          |
+| `234903`      | 0.0275 | 0.0012                   | **0.045**      | 0.634                          | 0.786    | 0 / 52          |
+| `235647`      | 0.0184 | 0.0015                   | 0.079                | **0.234**                | 0.718    | 0 / 58          |
+| `000017`      | 0.0140 | 0.0016                   | 0.118                | 0.277                          | 0.636    | 0 / 53          |
+| `000352`      | 0.0267 | 0.0049                   | **0.182**      | 0.399                          | 0.713    | 0 / 65          |
 
 **5/5 释放成功、5/5 零误触发**，DROP 命令 → complete 延迟 3.55 / 3.40 / 3.90 / 9.30 / 4.10 s。
 
-> [!warning] ★ 但两个分布几乎贴在一起，别被单轮的"5.5× 分离"骗了
+> [!warning] ⚠️ ★ 但两个分布几乎贴在一起，别被单轮的"5.5× 分离"骗了
 > ```text
 > 卸载后 ratio :  0.045  0.079  0.118  0.148  0.182          ← max 0.182
 >                                              阈值 0.20 ↕
 > 带载 ratio_min:              0.234  0.277  0.399  0.634  0.810   ← min 0.234
 > ```
+>
 > **漏检裕度 1.10×、误触发裕度 1.17×** —— 都只有一成多。首轮那个
 > "0.810 vs 0.148 = 5.5×" 是**运气好的一轮**，n=1 严重高估了分离度。
 >
@@ -582,7 +583,7 @@ $conf \ge 0.90$ **连续** 1.0 s（且期间每帧估计都新鲜），才置
 > peak 0.0140）给出 ratio ≈ 0.35，会直接漏检、退回死锁。这个组合本批没撞上，
 > 但两个边界值都已经各自出现过。
 
-> [!important] 判别力其实来自**合取**，不是 ratio
+> [!important] ❗ 判别力其实来自**合取**，不是 ratio
 > 带载 $ratio_{min}$ 有两轮掉到 0.234 / 0.277 —— 已经在阈值门口，
 > 但**误触发仍是 0/283 帧**。挡住它的不是 ratio，是质量通道。
 > 也就是说：单看 ratio，两个分布重叠得几乎没有判别力。
@@ -595,131 +596,106 @@ $\Delta J = \mu(m_p) r_z^2$ 完全由 $m_{est}$ 与固定 $r_z$ 派生，两者�
 
 | 信息源 | 内容 | 备注 |
 |---|---|---|
-| ① 一阶矩塌陷 | 相对 $ratio$ 为主，绝对 $\lVert s\rVert$ 只作 sanity 上限 | 绝对量**没有判别力**：实测带载 $\lVert s\rVert$ 最小 0.0039 反而低于卸载后最大 0.0049，两个分布重叠 |
+| ① 一阶矩塌陷 | 相对 $ratio$ 为主，绝对 $\lVert s\rVert$ 只作 sanity 上限 | 绝对量**没有判别力**：带载 $\lVert s\rVert$ 最小 0.0039 反而低于卸载后最大 0.0049 |
 | ② 载荷量 | mass 与 inertia **合并成一条**通道 | 它们不独立，不能"两票" |
-| ③ 残差方向 | no-signal detector 的 DROP，作为动态证据 | 从"自己直接释放"改成"投一票" |
+| ③ 残差方向 | 独立的 release-residual 票，**不复用** `confirm_thresh` | 见下 |
 
 ```text
 前提：必须可靠进入过 LOADED
-快速：残差 DROP + (质量为空 或 一阶矩塌陷)
-慢速：质量为空 + 一阶矩塌陷 + 持续
-禁止：仅 ratio；仅 mass/inertia（它们算一票）
+慢速  ：quantity_empty AND moment_collapsed，持续 5 帧
+快速 A：release_residual AND quantity_empty，持续 2 帧
+快速 B：strong_residual AND moment_collapsed，持续 3 帧
+禁止  ：仅 ratio；仅 mass/inertia；普通票配 moment 塌陷
 ```
 
 决策是 `payload_estimate.release_decision` 这一个纯函数，**在线节点与离线回放
-共用**，避免"回放通过、上线不通过"。
+共用**，避免"回放通过、上线不通过"。并行 step detector 原来直接调
+`_release_payload`（绕过统一决策），也已改成只投票。
 
-##### 离线验证（先于 SITL，73 轮历史日志）
+##### 独立的 release-residual 票
 
-`scripts/gripper/replay_release_detector.py`。阈值由**留一交叉验证**选出，不是拍的：
+**不降** `confirm_thresh = 4.4 N` —— 它还管事件权重调度与 attach/drop 的质量突变
+检测，降它会改变 MHE 收敛行为、混淆实验结论。新判据只负责"释放投票"，形式是
+短窗方向阶跃 $\Delta T = \text{mean}(\text{post }0.3\,\text{s}) - \text{mean}(\text{pre }0.3\,\text{s})$。
+
+阈值按**系统最低支持载荷 0.15 kg** 的检测规格定（$m_P g = 1.47$ N），
+不是用本轮载荷真值。0.2 kg 高频回放标定（`fixtures/tphys_replay_20260826_165455`）：
+
+> [!warning] 两个和直觉相反的标定结论
+> 1. **z 归一化没有区分力**：$\sigma(\text{MAD}) \approx 0.13$ N 太小，凡是越过
+>    $T_{floor}$ 的样本自动 $z > 6$ —— $z = 3/4/6$ 的判定**逐帧完全相同**。
+>    参数保留但默认 0（关）；拿它当第二道闸门是虚假的严格。
+> 2. **幅度上不可分**：figure-8 稳定段 $\Delta T$ 最负 **−1.69 N**，比 0.15 kg
+>    卸载的真信号 −1.47 N 还大。任何能检出 0.15 kg 的绝对阈值都会被机动瞬态碰到。
+>
+> 唯一可用的区分维度是**持续性**（drop 是永久台阶，机动是暂态）：
+>
+> | $T_{floor}$ | figure-8 最长连续 | drop 连续 | 延迟 |
+> |---|---|---|---|
+> | 0.9 N | 3 帧 | 4 帧 | 0.30 s |
+> | 1.2 N | 1 帧 | 3 帧 | — |
+>
+> 于是普通票门槛低（0.9 N / 2 帧）但**只允许配质量通道**（载荷还在时
+> `quantity_empty` 恒假，机动误报无害）；强票靠 **4 帧**把 figure-8 的 3 帧甩开，
+> 才允许配 moment 塌陷。强票余量只有 1 帧，紧。
+
+##### 离线验证（73 轮历史日志，先于 SITL）
+
+`scripts/gripper/replay_release_detector.py`。阈值由**留一交叉验证**选出：
 
 | 检查 | 结果 |
 |---|---|
-| LOOCV 选阈值 | **59/59 折一致选中 0.30**，留出轮成功 90 %（0.20 只有 48/59） |
-| 全量回放（72 轮有 drop） | 释放成功 **58**，漏检 **14**，带载段误释放 **0**；延迟中位 2.1 s |
+| LOOCV 选阈值 | **59/59 折一致选中 0.30**，留出轮 90 %（0.20 只有 48/59） |
+| 全量回放（72 轮有 drop） | 释放成功 **58**，漏检 14，带载段误释放 **0** |
 | 全库带载帧 | **2614 帧零误释放** |
-| 带载 $ratio_{min}=0.000$ 的 8 轮 | 全部未误释放 —— 被**质量通道**否决，正是"禁止仅 ratio"的价值 |
-| 对抗（最小 peak × 最大残噪） | ratio = **1.52** ⇒ 残差通道关时**必漏检**；残差在场则可释放 |
+| 带载 $ratio_{min}=0.000$ 的 8 轮 | 全部未误释放 —— 被质量通道否决 |
+| 对抗（最小 peak × 最大残噪） | ratio = 1.52 ⇒ 慢速路径检不出；**快速 A 覆盖** |
 
-> [!bug] 结论：死锁已修复，但**尚不能宣称 release detector 鲁棒通过**
-> 1. 仍有 **14/72 漏检**（剔除 manifest 标 invalid 后 11/59）。其中约一半是
->    "$ratio$ 从未跌破阈值"的真漏检，靠调阈值解决不了。
-> 2. 对抗组合（残噪 0.0203 配 peak 0.0134，两个边界值都各自在实测中出现过）
->    给出 $ratio = 1.52$，**任何 ratio 阈值都检不出**，只能靠残差通道。
-> 3. 而默认档把残差路用 4.4 N 堵死 —— 于是**三个信息源在默认档下实际只有两个
->    可用**，快速路径形同虚设。这是当前结构性缺口，不是参数问题。
->
-> 换句话说：$0.20$ 单阈值的统计裕度不足这一点已经修掉（改成合取 + LOOCV 选
-> 0.30），但"最坏组合"的覆盖仍依赖一条默认关闭的通道。宣称鲁棒之前至少还需要
-> 10~15 个随机种子的 smoke，以及对残差通道在小载荷下如何参与的决策。
+⚠️ 回放要按日志抽样率折算 persist：0.5 Hz 的 `[truth]` 数据直接套 10 Hz 的
+"连续 5 帧"等于要求连续 10 s，会把 33/72 轮误判成漏检。那是框架伪影，不是判据缺陷。
 
-> [!info] 无条件 re-arm 是补出来的
-> `_no_payload_latched` 是一次性闩。attach 没成功的轮次里 $conf$ 全程 1.0，
-> 闩在起飞后不久就被消耗掉，等真发 drop 指令时
-> `_confirm_no_payload_if_persistent` 第一行就 `return`，**DROP 永远 complete 不了**
-> （96 架次批次 #19 实测）。发释放指令这一刻是明确边沿，此处无条件复位。
-> 两条 drop 路径（`_drop_phase` / `_grip_drop_phase`）必须对称，漏一条就是下次的坑。
+##### SITL 验证：无 drop figure-8 零误释放（`145626`）
 
-#### 空载置信度怎么算
+全程带载飞 166 s，配置经启动日志核对（`signal mode = residual, thresh=4.4N`、
+质量域判据已开）：
 
-三个**独立**的"空"证据取**乘积**（`payload_estimate.no_payload_confidence`），
-每个都是 C1 平滑的 1→0 过渡：
-
-| 通道 | full（记 1.0） | zero（记 0.0） |
-|---|---|---|
-| 质量 $m_p$ | 0.015 kg | 0.060 kg |
-| 一阶矩 $\lVert s\rVert$ | 0.0015 kg·m | 0.0060 kg·m |
-| 惯量 $\max\lvert\Delta J_{xy}\rvert$ | 0.0020 kg·m² | 0.0100 kg·m² |
-
-> [!success] 用乘积是**故意**的：一条明确的"有载荷"指示就足以否决"空"
-> 尤其是 $s$：即便质量估计恰好触到下界 $m_{min}=1.961$（历史上的常态），
-> 只要 $\lVert s\rVert$ 还不为零，$conf$ 就压得住。
-> 这正是 96 架次主线批次里 `_release_payload` 从未被调用过的那个阻塞缺陷的反面——
-> 当时 $s$ 不被释放，$conf$ 恒 0.000，谁也进不去。
-
-#### MHE 侧：谁把 $s$ 送回零
-
-MHE 收不到任何事件，靠三条路自己熄灭：
-
-| 对象 | 机制 |
+| 项 | 结果 |
 |---|---|
-| $m$ | 窗口从当前值**连续收敛**回空机，无阶跃（一直如此，故意的） |
-| 模型内 $J,c$ | $m_P=(m-m_B)^+ \to 0$、$s \to 0$ 自行熄灭；几何槽 $[0,0,r_z]$ 不变 |
-| **发布的 $s$** | `_release_payload` 置 `_s_release_latched=True` ⇒ 发布目标切零，`_s_out` 按 LPF（τ=0.25 s）连续衰减 |
+| figure-8 段 $ratio$ | min **0.789** / 中位 0.909（阈值 0.30 的裕度 **2.63×**） |
+| 三信息源成立帧数 | moment 0 / quantity 0 / residual **全 0** |
+| 强票 | **0 次**（与标定预测一致） |
+| 轨迹切换瞬间 | 三通道均未成立 |
+| 误释放 | **0** |
 
-触发 `_release_payload` 的三条路（`_update_c_xy_est` / `_residual_detect` 内）：
-
-1. **质量域卸载判据**：武装（$m_p > 0.09$ kg 持 20 帧）后，$m_p < 0.03$ kg 持 20 帧
-   —— **默认档下的主力**；
-2. **一阶矩相对塌陷判据**（09-04 改造后是默认档的**实际主力**）：已武装，且
-   $\lVert s\rVert / \lVert s\rVert_{peak} < 0.20$、质量与惯量佐证分数都 $\ge 0.90$，
-   持续 5 帧（0.5 s）；
-3. **残差自检测**（`resid_release_geom=true`）—— 默认阈值 4.4 N 下**走不到**。
-   09-04 三轮日志里的 `载荷释放(no-signal residual)` 是 `ALPHA=-1` 覆盖的产物，
-   不是默认行为。
-
-实测 `[s-decay]`（`164651`，10 Hz。⚠️ 该轮由残差路触发释放闩，默认档改由上面
-第 1 / 2 条触发，**起点会更晚**；闩生效之后的这段衰减动力学则与触发源无关）：
-
-| 帧 | 1 | 4 | 7 | 11 | 16 |
-|---|---|---|---|---|---|
-| $\lVert s_{out}\rVert$ | 0.01009 | 0.00304 | 0.00091 | 0.00018 | 0.00002 |
-| $conf$ | 0.000 | 0.022 | 0.611 | 0.921 | 0.989 |
-
-即释放闩生效后约 **1.1 s** 越过 0.90 阈值，再持 1.0 s 由 NMPC 判 complete。
-默认档要在这之前先等质量域判据的两段确认（武装态 + $m_p<0.03$ kg 持 2 s），
-所以 DROP 命令到 complete 的总延迟会明显大于下面那个 2.4 s。
-
-> [!warning] 确认阈值**故意调高**，不要再覆盖回 1.5 N
-> 脚本 M0 分支给 `confirm_thresh_alpha=1.5` ⇒ $\alpha g\cdot\text{env} = 4.4$ N，
-> 而 0.15 kg 卸载的推力台阶只有 $m_P g = 1.47$ N —— 等于**把残差这条路堵死**，
-> 逼 drop 只能由质量域判据检出，这正是无信号主线要展示的东西。
-> 阈值本身也不含任务信息：$\alpha g \cdot$ **包线**是机架规格，不是"这个包裹多重"。
+> [!bug] 现状定性：死锁已修复，但**尚不能宣称 release detector 鲁棒通过**
+> 1. 离线回放仍有 14/72 漏检，其中约一半是"$ratio$ 从未跌破阈值"的真漏检；
+> 2. 强票相对 figure-8 的余量只有 1 帧；
+> 3. 幅度不可分是**固有限制**，不是参数没调好。
 >
-> `MHE_CONFIRM_ALPHA=-1`（固定 1.5 N）这个覆盖**已废弃**：它把一个刚好卡在
-> 台阶量级上的阈值重新接进来，drop 变成由残差检出，既不是要验证的机制，
-> 也让"残差信号在 0.15 kg 工况下不可用"这个结论被绕过去。
-> 判读任何一轮日志前，先看 `signal mode` 那行的 `thresh=` 是不是 **4.4**。
+> 还需要 10~15 轮随机种子 smoke 才谈得上鲁棒。`RELEASE_RESID=0` 保留为
+> residual-disabled 消融档（退回"只有两个信息源"）。
 
-#### 其他释放路径（本档关）
-
-| 路径 | 触发 | 默认 |
-|---|---|---|
-| 外部 `mass_event` | NMPC 松爪同帧发 | **关**（`external_event_inputs=false`，连订阅都没建） |
-| 残差阶跃判据 | `resid_step_enable` | 关 |
-| 看门狗 | `_payload_lost_watch` → `/mhe/payload_lost` | 关；**且主线 NMPC 不订阅该话题** |
-
----
+> [!danger] ⚠️ 两次栽在同一处:`bash -c "..."` 里的参数串
+> 2026-09-05 连续两次改这段参数串都出了**静默**故障,两次 `bash -n` 都通过、
+> 节点都正常启动,只是参数丢失:
+> 1. 少写行尾 `\` ⇒ 那一行之后的 `-p` **全部丢失**;
+> 2. 在字符串**内部**写 `#` 注释 ⇒ `#` 不是注释,整行变成命令的一部分并截断。
+>
+> 后果特别隐蔽:丢的是 `c_xy_mass_release_mp` 与 `event_signal_mode`,
+> 整轮释放判据根本没跑,而那一轮的"零误释放"差点被当成证据 ——
+> **判据没跑当然不会误释放**。
+> 所以验证零误释放时,必须先在启动日志里核对
+> `质量域卸载判据已开` 与 `signal mode` 两行,再看结论。
 
 ### 3.5 阶段五：DROP 后
 
-| 量 | NMPC | MHE |
-|---|---|---|
-| $m$ | 跟原子帧连续回落 | 连续收敛回空机 |
-| $s$ | 跟 `_s_out` 衰减到 0 | 发布目标闩零，窗口内 $s_{est}$ 仍有残噪 |
-| $\Delta J,\ c$ | 随 $(m,s)$ 自然回零 | 同左 |
-| `omega_scale` | 按 1.5 s⁻¹ 恢复到 1.00 | — |
-| PX4 参数 | 全程没动过，无需复位 | — |
+| 量               | NMPC                     | MHE                                      |
+| ---------------- | ------------------------ | ---------------------------------------- |
+| $m$            | 跟原子帧连续回落         | 连续收敛回空机                           |
+| $s$            | 跟`_s_out` 衰减到 0    | 发布目标闩零，窗口内$s_{est}$ 仍有残噪 |
+| $\Delta J,\ c$ | 随$(m,s)$ 自然回零     | 同左                                     |
+| `omega_scale`  | 按 1.5 s⁻¹ 恢复到 1.00 | —                                       |
+| PX4 参数         | 全程没动过，无需复位     | —                                       |
 
 > [!success] `self` 档"drop 后 $m_{est}$ 偏低"的老坑，在 moment 档下没有复现
 > 旧记录：`geom_release_mode='self'` 下 drop 后 $m_{est}$ 系统性偏低 **−2.81 %**、
@@ -744,24 +720,24 @@ MHE 收不到任何事件，靠三条路自己熄灭：
 
 ### 4.1 NMPC 侧
 
-| | ATTACH | 巡航 | 八字 | DROP 命令 | DROP 后 |
-|---|---|---|---|---|---|
-| $m$ | 不动 | 跟原子帧 | 跟原子帧 | **继续跟** | 跟到空机 |
-| $s$ | 不动 | 跟原子帧 | 跟原子帧 | **继续跟**（衰减中） | → 0 |
-| $\Delta J$ | **bootstrap 0.0579** | 交接 → MHE 值 0.0267 | 跟随 | 继续跟 | → 0 |
-| $c_{xy}$ | $s/m$（≈0） | $s/m$ | $s/m$，**每帧更新** | $s/m$ | → 0 |
-| `omega_scale` | → cap 5.0 | 交接后 ~2.9 | 2.85 ~ 3.10 | 开始回落 | 1.00 |
-| 状态机 | `grip_mass_stepped` | — | — | `grip_drop_pending` | `grip_dropped`（覆盖档 +2.4 s；**默认档死锁，见 §3.4**） |
+|                 | ATTACH                     | 巡航                  | 八字                        | DROP 命令                  | DROP 后                                                           |
+| --------------- | -------------------------- | --------------------- | --------------------------- | -------------------------- | ----------------------------------------------------------------- |
+| $m$           | 不动                       | 跟原子帧              | 跟原子帧                    | **继续跟**           | 跟到空机                                                          |
+| $s$           | 不动                       | 跟原子帧              | 跟原子帧                    | **继续跟**（衰减中） | → 0                                                              |
+| $\Delta J$    | **bootstrap 0.0579** | 交接 → MHE 值 0.0267 | 跟随                        | 继续跟                     | → 0                                                              |
+| $c_{xy}$      | $s/m$（≈0）             | $s/m$               | $s/m$，**每帧更新** | $s/m$                    | → 0                                                              |
+| `omega_scale` | → cap 5.0                 | 交接后 ~2.9           | 2.85 ~ 3.10                 | 开始回落                   | 1.00                                                              |
+| 状态机          | `grip_mass_stepped`      | —                    | —                          | `grip_drop_pending`      | `grip_dropped`（覆盖档 +2.4 s；**默认档死锁，见 §3.4**） |
 
 ### 4.2 MHE 侧
 
-| | ATTACH | 巡航 | 八字 | DROP | DROP 后 |
-|---|---|---|---|---|---|
-| $m$ | 不动，靠窗口爬 | 收敛（低估 ~14 %） | 继续估 | 不动 | 连续回空机 −0.3 ~ −0.7 % |
-| $s$ | 靠窗口爬 | 准（$s_y$ 误差 <2 %） | 继续估 | 释放闩 → 目标零 | `_s_out` LPF → 0 |
-| 几何槽 | $[0,0,-0.47]$ | 同左 | 同左 | 同左 | 同左（**永不变**） |
-| $conf$ | 1.0 → ~0 | ~0 | 0.000 | 上升 | ≥0.99 |
-| 降权 | 阈值 4.4 N ⇒ 本工况不触发 | — | — | 释放走质量域 / $s$ 塌陷 | — |
+|                                            | ATTACH                     | 巡航               | 八字                | DROP                     | DROP 后                    |
+| ------------------------------------------ | -------------------------- | ------------------ | ------------------- | ------------------------ | -------------------------- |
+| $m$                                      | 不动，靠窗口爬             | 收敛（低估 ~14 %） | 继续估              | 不动                     | 连续回空机 −0.3 ~ −0.7 % |
+| $s$ | 靠窗口爬 | 准（$s_y$ 误差 <2 %） | 继续估                     | 释放闩 → 目标零   | `_s_out` LPF → 0 |                          |                            |
+| 几何槽                                     | $[0,0,-0.47]$            | 同左               | 同左                | 同左                     | 同左（**永不变**）   |
+| $conf$                                   | 1.0 → ~0                  | ~0                 | 0.000               | 上升                     | ≥0.99                     |
+| 降权                                       | 阈值 4.4 N ⇒ 本工况不触发 | —                 | —                  | 释放走质量域 /$s$ 塌陷 | —                         |
 
 ### 4.3 一句话
 
@@ -777,20 +753,20 @@ MHE 收不到任何事件，靠三条路自己熄灭：
 
 ## 5. 已知的坑与不一致
 
-| # | 问题 | 现状 |
-|---|---|---|
-| 1 | `GRIP_LIFT_AFTER` = 1.5 s **会发散**（09-04 `162428`：822 solve failed、tilt 141°、pos_err 70 m）；bootstrap 已按包线把内环推到 5×，box 却没吸稳 | **已修**：脚本默认 09-04 改为 3.0 |
-| 2 | 交接开始后估计失效 ⇒ `omega_scale` **冻在高位**（`162428` 钉在 5.0）；这是"不放掉地板"的有意代价 | 无兜底；靠 1 避免进入 |
-| 3 | 带载 $\hat m_p$ **低估 ~14 %**，$\Delta J$ 跟着低估同样比例 | 与 $s$ 的 2 % 精度对比鲜明；根因见 `mest-maneuver-underestimate` |
-| 4 | $\hat s_x$ 系统性偏负 ~0.01 kg·m（$c_x \approx -4.6$ mm） | pitch 通道污染，既有认知 |
-| 5 | ~~纯默认档 DROP 确认死锁~~ | **已修**（09-04 晚，相对塌陷判据）：`232444` 复现 → `234516` 走通，见 §3.4 |
-| 6 | `dj_track_mest` / `dj_ratchet_enable` / `grip_dj_floor_mp` / `grip_mp_cap` / NMPC `geom_release_mode` / `drop_publish_mass_event` 在主线**全是死参数** | 脚本仍在传，行为不受影响 |
-| 7 | MHE 启动日志仍打印 `geom_release_mode='self'` 的坠机警告 | 描述的是主线走不到的老路径 |
-| 8 | $r_z$ 先验 −0.47 vs 实测 −0.579（低估 19 %） | 有意：$\Delta J$ 只需量级对 |
-| 9 | LIFT/交接期 pitch 力矩 `u_sat` 达 15 %、`mot_sat` 9 % | 与"4 m/s 真瓶颈是力矩"一致 |
-| 10 | `event_confirm_timeout_sec = 3.0` > MHE 窗口 2.0 s ⇒ `external` 档超时兜底永远零降权 | 未修（主线不走 external） |
-| 10b | 四个批次脚本的 drop 判据只 grep legacy 的 `"DROP: released"`，连续档打的是 `DROP complete` ⇒ **成功轮被静默记成 `no-drop`** 并空等 5 分钟 | **已修**（09-04）：`run_cxy_mass_repeat` / `run_dj_ratchet_ab` / `run_geom_coupled_ab` / `run_moment_ab_4ms` 四处改为两种都认 |
-| 11 | 这批默认值的证据基础：**离线回放 + 09-04 四轮 viz**（三轮带 `ALPHA=-1` 覆盖：2 成 1 败；一轮纯默认档：飞行成功但 drop 确认死锁），尚无成规模 SITL 批次 | 引用任何数字前先确认样本量与覆盖项 |
+| #   | 问题                                                                                                                                                                     | 现状                                                                                                                                        |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `GRIP_LIFT_AFTER` = 1.5 s **会发散**（09-04 `162428`：822 solve failed、tilt 141°、pos_err 70 m）；bootstrap 已按包线把内环推到 5×，box 却没吸稳             | **已修**：脚本默认 09-04 改为 3.0                                                                                                     |
+| 2   | 交接开始后估计失效 ⇒`omega_scale` **冻在高位**（`162428` 钉在 5.0）；这是"不放掉地板"的有意代价                                                               | 无兜底；靠 1 避免进入                                                                                                                       |
+| 3   | 带载$\hat m_p$ **低估 ~14 %**，$\Delta J$ 跟着低估同样比例                                                                                                     | 与$s$ 的 2 % 精度对比鲜明；根因见 `mest-maneuver-underestimate`                                                                         |
+| 4   | $\hat s_x$ 系统性偏负 ~0.01 kg·m（$c_x \approx -4.6$ mm）                                                                                                           | pitch 通道污染，既有认知                                                                                                                    |
+| 5   | ~~纯默认档 DROP 确认死锁~~                                                                                                                                              | **已修**（09-04 晚，相对塌陷判据）：`232444` 复现 → `234516` 走通，见 §3.4                                                      |
+| 6   | `dj_track_mest` / `dj_ratchet_enable` / `grip_dj_floor_mp` / `grip_mp_cap` / NMPC `geom_release_mode` / `drop_publish_mass_event` 在主线**全是死参数** | 脚本仍在传，行为不受影响                                                                                                                    |
+| 7   | MHE 启动日志仍打印`geom_release_mode='self'` 的坠机警告                                                                                                                | 描述的是主线走不到的老路径                                                                                                                  |
+| 8   | $r_z$ 先验 −0.47 vs 实测 −0.579（低估 19 %） | 有意：$\Delta J$ 只需量级对                                                                                         |                                                                                                                                             |
+| 9   | LIFT/交接期 pitch 力矩`u_sat` 达 15 %、`mot_sat` 9 %                                                                                                                 | 与"4 m/s 真瓶颈是力矩"一致                                                                                                                  |
+| 10  | `event_confirm_timeout_sec = 3.0` > MHE 窗口 2.0 s ⇒ `external` 档超时兜底永远零降权                                                                                | 未修（主线不走 external）                                                                                                                   |
+| 10b | 四个批次脚本的 drop 判据只 grep legacy 的`"DROP: released"`，连续档打的是 `DROP complete` ⇒ **成功轮被静默记成 `no-drop`** 并空等 5 分钟                    | **已修**（09-04）：`run_cxy_mass_repeat` / `run_dj_ratchet_ab` / `run_geom_coupled_ab` / `run_moment_ab_4ms` 四处改为两种都认 |
+| 11  | 这批默认值的证据基础：**离线回放 + 09-04 四轮 viz**（三轮带 `ALPHA=-1` 覆盖：2 成 1 败；一轮纯默认档：飞行成功但 drop 确认死锁），尚无成规模 SITL 批次           | 引用任何数字前先确认样本量与覆盖项                                                                                                          |
 
 ---
 
@@ -839,27 +815,27 @@ grep 'attach offset' gviz_proximity_<stamp>.log
 
 ## 7. 源码索引
 
-| 内容 | 位置 |
-|---|---|
-| 接口 schema / 载荷代数 | `payload_estimate.py :15 FIELDS`、`:35 no_payload_confidence`、`:54 inertia_from_mass_moment`、`:117 slew`、`:126 headroom_limited_scale` |
-| 接口说明文档 | `docs/continuous_payload_interface.md` |
-| NMPC 收帧 / 新鲜度 | `acados_nmpc_node.py :1245 payload_estimate_cb`、`:1266 _payload_estimate_is_fresh` |
-| attach J bootstrap | `acados_nmpc_node.py :1299 _start_attach_j_bootstrap` |
-| 每帧模型更新(LPF+slew+交接) | `acados_nmpc_node.py :1319 _update_continuous_payload_model` |
-| drop 完成确认 | `acados_nmpc_node.py :1396 _confirm_no_payload_if_persistent` |
-| ω 缩放调度 | `acados_nmpc_node.py :1870 _update_omega_scale`（应用在 `publish_attitude`） |
-| attach 阶段 | `acados_nmpc_node.py :2148 _grip_mass_step`（continuous 分支在开头） |
-| 几何槽装配 | `acados_nmpc_node.py :2304 _geom_slot` |
-| drop 全流程 | `acados_nmpc_node.py :2512 _grip_drop_phase` |
-| PX4 增益改写(主线**不走**) | `acados_nmpc_node.py :2380 _scale_px4_rate_gains` |
-| MHE 载荷存在状态机 | `mhe_node.py :1019 _update_payload_presence` |
-| MHE 释放(s 闩 / c_xy 归零) | `mhe_node.py :1067 _release_payload` |
-| MHE 帧健康自检 | `mhe_node.py :1391 _payload_frame_health` |
-| MHE 发布原子帧 | `mhe_node.py :1401 _publish_payload_estimate` |
-| MHE 几何槽(主线提前 return) | `mhe_node.py :1476 _model_r_p` |
-| MHE c_xy(一阶矩路径) / 质量域判据 | `mhe_node.py :1850 _update_c_xy_est` |
-| frozen A 的实现 | `mhe_node.py :2025`（`_solve_window` 内借 `geom[0]` 传 $\hat m$） |
-| 一阶质量矩参数 | `mhe_params.py :227 estimate_moment`、`:231 rz_prior`、`:253 moment_a_mode` |
-| NMPC 动力学 | `acados_model.py` |
-| 耦合档模型代数 | `mhe_model.py` |
-| 视频叠加渲染 | `scripts/demo_video/make_overlay.py` |
+| 内容                              | 位置                                                                                                                                                |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 接口 schema / 载荷代数            | `payload_estimate.py :15 FIELDS`、`:35 no_payload_confidence`、`:54 inertia_from_mass_moment`、`:117 slew`、`:126 headroom_limited_scale` |
+| 接口说明文档                      | `docs/continuous_payload_interface.md`                                                                                                            |
+| NMPC 收帧 / 新鲜度                | `acados_nmpc_node.py :1245 payload_estimate_cb`、`:1266 _payload_estimate_is_fresh`                                                             |
+| attach J bootstrap                | `acados_nmpc_node.py :1299 _start_attach_j_bootstrap`                                                                                             |
+| 每帧模型更新(LPF+slew+交接)       | `acados_nmpc_node.py :1319 _update_continuous_payload_model`                                                                                      |
+| drop 完成确认                     | `acados_nmpc_node.py :1396 _confirm_no_payload_if_persistent`                                                                                     |
+| ω 缩放调度                       | `acados_nmpc_node.py :1870 _update_omega_scale`（应用在 `publish_attitude`）                                                                    |
+| attach 阶段                       | `acados_nmpc_node.py :2148 _grip_mass_step`（continuous 分支在开头）                                                                              |
+| 几何槽装配                        | `acados_nmpc_node.py :2304 _geom_slot`                                                                                                            |
+| drop 全流程                       | `acados_nmpc_node.py :2512 _grip_drop_phase`                                                                                                      |
+| PX4 增益改写(主线**不走**)  | `acados_nmpc_node.py :2380 _scale_px4_rate_gains`                                                                                                 |
+| MHE 载荷存在状态机                | `mhe_node.py :1019 _update_payload_presence`                                                                                                      |
+| MHE 释放(s 闩 / c_xy 归零)        | `mhe_node.py :1067 _release_payload`                                                                                                              |
+| MHE 帧健康自检                    | `mhe_node.py :1391 _payload_frame_health`                                                                                                         |
+| MHE 发布原子帧                    | `mhe_node.py :1401 _publish_payload_estimate`                                                                                                     |
+| MHE 几何槽(主线提前 return)       | `mhe_node.py :1476 _model_r_p`                                                                                                                    |
+| MHE c_xy(一阶矩路径) / 质量域判据 | `mhe_node.py :1850 _update_c_xy_est`                                                                                                              |
+| frozen A 的实现                   | `mhe_node.py :2025`（`_solve_window` 内借 `geom[0]` 传 $\hat m$）                                                                           |
+| 一阶质量矩参数                    | `mhe_params.py :227 estimate_moment`、`:231 rz_prior`、`:253 moment_a_mode`                                                                   |
+| NMPC 动力学                       | `acados_model.py`                                                                                                                                 |
+| 耦合档模型代数                    | `mhe_model.py`                                                                                                                                    |
+| 视频叠加渲染                      | `scripts/demo_video/make_overlay.py`                                                                                                              |
