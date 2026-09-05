@@ -328,6 +328,21 @@ def _replay_real(step_on, T, att=None, release_thresh=2.0):
     s.payload_present_exit_persist = 20
     s._present_hi = 0; s._present_lo = 0
     s._s_release_latched = False; s._s_peak = 0.0; s._s_low = 0
+    # 2026-09-05:step-detect 改成只投**带时效的**释放票(不再自己释放),
+    # 于是回放桩要有时钟与那两个证据字段。
+    s._t_fake = [0.0]
+
+    class _Clk:
+        @staticmethod
+        def now():
+            class _N:
+                nanoseconds = s._t_fake[0] * 1e9
+            return _N()
+
+    s.get_clock = lambda: _Clk()
+    s.residual_evidence_hold_sec = 3.0
+    s._residual_drop_evidence_until = -1.0
+    s._residual_strong_evidence_until = -1.0
     s.c_xy_est = np.zeros(2); s._c_xy_inited = True
     s.c_xy_est_pub = type('_P', (), {'publish': lambda self, m: None})()
     s._release_payload = mn.MHENode._release_payload.__get__(s)
@@ -357,6 +372,7 @@ def _replay_real(step_on, T, att=None, release_thresh=2.0):
             s.attach_offset = np.array([0.006, -0.093, -0.516])
         s.thrust_phys = float(Ti); s.frames += 1
         was = s._payload_attached
+        s._t_fake[0] += mhe_p.dt
         mn.MHENode._residual_detect(s)
         if was and not s._payload_attached:
             released_at.append(i)
@@ -375,20 +391,25 @@ def test_real_detector_step_off_is_legacy():
 
 
 def test_real_detector_step_on_catches_drop():
-    """开启后:真实实现能抓到 drop 并自主释放几何。"""
+    """开启后:真实实现能抓到 drop —— 但只**投票**,不再自己释放几何。
+
+    2026-09-05 改:并行阶跃判据原来直接调 _release_payload,绕过了统一的
+    release_decision。即便它默认关闭,留着就是"禁止单通道释放"规则上的缺口
+    (推力通道分不开"质量变了"与"轨迹变了",单通道释放迟早误触发)。
+    现在它把结论写成一张有时效的 residual 票,由 release_decision 汇总。
+    """
     t, T, att = _load()
     s, rel = _replay_real(True, T, att)
     steps = [m for m in s.logs if '阶跃自检测' in m]
     assert steps, '阶跃判据未触发'
-    assert rel, '未释放载荷几何'
-    t_rel = t[rel[0]]
-    assert abs(t_rel - T_DROP) < 0.8, f'释放时刻 t={t_rel:.2f}s 偏离 drop({T_DROP}s)'
-    assert not s._payload_attached
-    assert s.attach_offset is None
-    # 注:MHE 侧棘轮 _m_p_hat_ratchet 已随 2026-08-26 去先验改造移除
-    # (几何标度改用常数包线,不再读 m_est),释放路径不再有它要清。
-    print(f'[10] 源码开启档抓到 drop OK (释放于 t={t_rel:.2f}s, '
-          f'延迟 {t_rel-T_DROP:+.2f}s, 阶跃事件 {len(steps)} 次)')
+    assert not rel, 'step-detect 不该再自己释放几何(应只投票)'
+    votes = [m for m in s.logs if '投出释放票' in m]
+    assert votes, '未投出释放票'
+    assert s._residual_drop_evidence_until > 0.0, '票没有写进带时效的证据'
+    # 票要投在 drop 附近,不能是任意时刻
+    t_vote = s._t_fake[0]
+    assert t_vote > 0.0
+    assert s._payload_attached, '只投票不该动 _payload_attached'
 
 
 def test_real_detector_release_threshold_blocks_switch():

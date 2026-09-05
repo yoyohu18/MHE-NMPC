@@ -735,19 +735,67 @@ class MHENode(Node):
         # 最大 0.0049),所以绝对量给得宽松,判别力全靠 ratio + 质量通道的合取。
         self.declare_parameter('s_release_abs_max', 0.008)
         self.declare_parameter('s_release_fast_persist', 2)
+        self.declare_parameter('s_release_strong_persist', 3)
         self.s_release_abs_max = float(
             self.get_parameter('s_release_abs_max').value)
         self.s_release_fast_persist = max(
             1, int(self.get_parameter('s_release_fast_persist').value))
+        self.s_release_strong_persist = max(
+            1, int(self.get_parameter('s_release_strong_persist').value))
+        # --- 独立的 release-residual 判据(2026-09-05)---
+        # 与 confirm_thresh **完全解耦**:后者还管事件权重调度与 attach/drop 的
+        # 质量突变检测,降它会改变 MHE 收敛行为、混淆实验结论。这条只投"释放票"。
+        # 形式:短窗方向阶跃 ΔT = mean(post half) - mean(pre half),不复用慢基线。
+        #
+        # 阈值按**系统最低支持载荷 0.15kg** 的检测规格定(m_P·g=1.47N),不是用
+        # 本轮载荷真值。0.2kg 高频回放(fixtures/tphys_replay_20260826_165455)标定:
+        #   figure-8 稳定段 ΔT 最负 -1.69N —— **比 0.15kg 的真信号 1.47N 还大**,
+        #   所以幅度上不可分,任何能检出 0.15kg 的绝对阈值都会被机动瞬态碰到。
+        #   可用的区分维度只有**持续性**(drop 是永久台阶,机动是暂态):
+        #     T_floor=0.9N -> fig8 最长连续 3 帧, drop 连续 4 帧
+        #     T_floor=1.2N -> fig8 最长连续 1 帧, drop 连续 3 帧
+        # 于是:普通票门槛低(0.9N/2帧),只允许与**质量通道**配对(载荷还在时
+        # quantity_empty 恒假,机动误报无害);强票靠更长的持续(4帧)把 fig8 的
+        # 3 帧甩开,才允许与 moment 塌陷配对。
+        # ⚠️ z 归一化实测**没有区分力**:σ(MAD)≈0.13N 太小,越过 T_floor 的样本
+        #    自动 z>6,z=3/4/6 的结果逐帧相同。保留参数但默认 0(关),别拿它当
+        #    第二道闸门 —— 那会是虚假的严格。
+        self.declare_parameter('release_resid_enable', True)
+        self.declare_parameter('release_resid_half', 3)          # 半窗帧数 0.3s
+        self.declare_parameter('release_resid_floor_n', 0.9)     # 普通票 [N]
+        self.declare_parameter('release_resid_persist', 2)
+        self.declare_parameter('release_resid_strong_floor_n', 0.9)
+        self.declare_parameter('release_resid_strong_persist', 4)
+        self.declare_parameter('release_resid_z', 0.0)           # 0=不用 z
+        self.release_resid_enable = bool(
+            self.get_parameter('release_resid_enable').value)
+        self.release_resid_half = max(
+            1, int(self.get_parameter('release_resid_half').value))
+        self.release_resid_floor = float(
+            self.get_parameter('release_resid_floor_n').value)
+        self.release_resid_persist = max(
+            1, int(self.get_parameter('release_resid_persist').value))
+        self.release_resid_strong_floor = float(
+            self.get_parameter('release_resid_strong_floor_n').value)
+        self.release_resid_strong_persist = max(
+            1, int(self.get_parameter('release_resid_strong_persist').value))
+        self.release_resid_z = float(
+            self.get_parameter('release_resid_z').value)
+        self._rr_hist = []          # T_phys 短历史
+        self._rr_d_hist = []        # ΔT 历史(算滚动 sigma)
+        self._rr_n = 0              # 普通票连续帧
+        self._rr_strong_n = 0       # 强票连续帧
         # 残差 DROP 证据的时效 [s]。残差是**边沿**事件,过期不该再算数;
         # 给 3s 是为了覆盖"残差先看见、质量域随后确认"的正常先后关系。
         self.declare_parameter('residual_evidence_hold_sec', 3.0)
         self.residual_evidence_hold_sec = float(
             self.get_parameter('residual_evidence_hold_sec').value)
         self._residual_drop_evidence_until = -1.0
+        self._residual_strong_evidence_until = -1.0
         self._s_peak = 0.0
         self._s_low = 0
         self._s_fast = 0
+        self._s_strong = 0
         self._s_ratio_log_n = 0
         if self.c_xy_mass_release_mp > 0.0 and self.geom_release_mode != 'self':
             self.get_logger().error(
@@ -1627,6 +1675,56 @@ class MHENode(Node):
         self._armed_frame = None
         self._armed_baseline = None
 
+    def _update_release_residual(self):
+        """独立的 release-residual 投票(见 __init__ 里 release_resid_* 注释)。
+
+        每拍调用。只产出**带时效的票**,从不直接释放 —— 释放一律由
+        payload_estimate.release_decision 汇总三个信息源后决定。
+        """
+        if not self.release_resid_enable or self.thrust_phys is None:
+            return
+        h = self.release_resid_half
+        self._rr_hist.append(float(self.thrust_phys))
+        if len(self._rr_hist) > 2 * h:
+            self._rr_hist.pop(0)
+        if len(self._rr_hist) < 2 * h:
+            return
+        pre = sum(self._rr_hist[:h]) / h
+        post = sum(self._rr_hist[h:]) / h
+        d = post - pre
+        # 滚动 sigma 只用**过去**的 ΔT(不含当前帧),否则阶跃自己会把 sigma 抬起来
+        sigma = None
+        if len(self._rr_d_hist) >= 8:
+            med = float(np.median(self._rr_d_hist))
+            mad = float(np.median([abs(x - med) for x in self._rr_d_hist]))
+            sigma = max(1.4826 * mad, 0.05)
+        self._rr_d_hist.append(d)
+        if len(self._rr_d_hist) > 30:
+            self._rr_d_hist.pop(0)
+        z_ok = True
+        if self.release_resid_z > 0.0 and sigma is not None:
+            z_ok = (-d / sigma) > self.release_resid_z
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if d < -self.release_resid_floor and z_ok:
+            self._rr_n += 1
+            if self._rr_n >= self.release_resid_persist:
+                self._residual_drop_evidence_until = (
+                    now + self.residual_evidence_hold_sec)
+        else:
+            self._rr_n = 0
+        if d < -self.release_resid_strong_floor and z_ok:
+            self._rr_strong_n += 1
+            if self._rr_strong_n >= self.release_resid_strong_persist:
+                if now >= self._residual_strong_evidence_until:
+                    self.get_logger().info(
+                        f'[release-resid] STRONG 票: ΔT={d:+.2f}N '
+                        f'x{self._rr_strong_n}帧 (floor '
+                        f'{self.release_resid_strong_floor}N)')
+                self._residual_strong_evidence_until = (
+                    now + self.residual_evidence_hold_sec)
+        else:
+            self._rr_strong_n = 0
+
     def _residual_detect(self):
         """无信号消融的自触发检测器(event_signal_mode='residual')。
         不使用任何外部事件武装,纯从 T_phys 相对慢基线(EMA 低通)的残差做
@@ -1680,12 +1778,15 @@ class MHENode(Node):
                     # 释放几何用**更高**的门槛:轨迹切换与质量突变在推力通道上
                     # 不可分,误降权只是慢一点,误释放几何会让模型丢掉还挂着的载荷。
                     if (_dropped and self.resid_release_geom
-                            and self._load_armed
-                            and -_d >= self.resid_step_release_thresh):
-                        # 只释放几何状态。棘轮 _m_p_hat_ratchet 已随 2026-08-26
-                        # 去先验改造移除(几何标度改用常数包线,不再读 m_est,
-                        # 棘轮在这条路径上根本不参与),故此处不再有它要清。
-                        self._release_payload('step-detect')
+                            and self._load_armed):
+                        # 2026-09-05:并行阶跃判据同样只投票,不再自己释放。
+                        # 它原来绕过了统一的 release_decision —— 即便默认关闭,
+                        # 留着就是"禁止单通道释放"规则上的一个缺口。
+                        _now = self.get_clock().now().nanoseconds * 1e-9
+                        self._residual_drop_evidence_until = (
+                            _now + self.residual_evidence_hold_sec)
+                        self.get_logger().info(
+                            '[step-detect] → 投出释放票(不直接释放)')
                         self.get_logger().info(
                             f'[step-detect] → 自主释放载荷几何 '
                             f'(|Δ|={-_d:.2f}N ≥ '
@@ -1888,6 +1989,7 @@ class MHENode(Node):
         if self.payload_lost_watch:
             self._payload_lost_watch()
         if self.event_enabled and self.signal_mode == 'residual':
+            self._update_release_residual()
             self._residual_detect()
         else:
             self._check_confirmation()
@@ -1956,15 +2058,21 @@ class MHENode(Node):
                 m_p_now = max(float(self.m_est) - mhe_p.m_B, 0.0)
                 resid_ev = (self.get_clock().now().nanoseconds * 1e-9
                             < self._residual_drop_evidence_until)
+                _now = self.get_clock().now().nanoseconds * 1e-9
+                strong_ev = _now < self._residual_strong_evidence_until
                 ev = release_evidence(
                     m_p_now, s_norm, self._s_peak, resid_ev,
                     ratio_thr=self.s_release_ratio,
                     s_abs_max=self.s_release_abs_max,
-                    mass_release_mp=self.c_xy_mass_release_mp)
-                fire, why, self._s_low, self._s_fast = release_decision(
+                    mass_release_mp=self.c_xy_mass_release_mp,
+                    residual_strong=strong_ev)
+                (fire, why, self._s_low, self._s_fast,
+                 self._s_strong) = release_decision(
                     ev, self._load_armed, self._s_low, self._s_fast,
                     slow_persist=self.s_release_persist,
-                    fast_persist=self.s_release_fast_persist)
+                    fast_persist=self.s_release_fast_persist,
+                    strong_frames=self._s_strong,
+                    strong_persist=self.s_release_strong_persist)
                 # 诊断:带载段的 ratio_min 与卸载后的 ratio 是给阈值定分界用的
                 # 分布数据(2026-09-04 起逐轮记录)。
                 self._s_ratio_log_n += 1
@@ -1974,7 +2082,8 @@ class MHENode(Node):
                         f'ratio={ev["ratio"]:.3f} (thr {self.s_release_ratio:.2f}) '
                         f'moment={int(ev["moment_collapsed"])} '
                         f'quantity={int(ev["quantity_empty"])} '
-                        f'resid={int(ev["residual_drop"])} '
+                        f'resid={int(ev["residual_drop"])}'
+                        f'{"S" if ev["residual_strong"] else ""} '
                         f'm_p={float(self.m_est) - mhe_p.m_B:+.4f} '
                         f'slow={self._s_low}/{self.s_release_persist}')
                 if fire:

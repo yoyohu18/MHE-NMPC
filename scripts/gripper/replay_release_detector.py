@@ -133,7 +133,7 @@ def replay(rnd, ratio_thr, mass_mp, s_abs, slow_persist, fast_persist,
     armed = False
     hi = 0
     peak = 0.0
-    slow = fast = 0
+    slow = fast = strong = 0
     for t, s_norm, m_p in rnd.frames:
         if not armed:
             hi = hi + 1 if m_p > arm_mp else 0
@@ -145,9 +145,10 @@ def replay(rnd, ratio_thr, mass_mp, s_abs, slow_persist, fast_persist,
         ev = release_evidence(m_p, s_norm, peak, resid,
                               ratio_thr=ratio_thr, s_abs_max=s_abs,
                               mass_release_mp=mass_mp)
-        fire, _why, slow, fast = release_decision(
+        fire, _why, slow, fast, strong = release_decision(
             ev, armed, slow, fast,
-            slow_persist=slow_persist, fast_persist=fast_persist)
+            slow_persist=slow_persist, fast_persist=fast_persist,
+            strong_frames=strong)
         if fire:
             false_pos = (rnd.t_drop_cmd is None or t < rnd.t_drop_cmd)
             return t, false_pos, peak
@@ -231,7 +232,8 @@ def main():
         for name, rd in (('残差通道关(默认档)', None), ('残差通道开', 0.0)):
             ev = release_evidence(0.0, s_max, p_min, rd is not None,
                                   ratio_thr=args.ratio)
-            fire, why, _, _ = release_decision(ev, True, 99, 99)
+            fire, why, _, _, _ = release_decision(ev, True, 99, 99,
+                                                  strong_frames=99)
             print(f'    {name}: {"可释放" if fire else "不释放"} '
                   f'{why.split("(")[0] if why else ""}')
 
@@ -267,5 +269,69 @@ def main():
         print(f'  选中的阈值分布: {dict(Counter(picks))}')
 
 
+def check_release_residual(fixture=None, half=3, floor=0.9, strong_persist=4,
+                          persist=2):
+    """用高频 T_phys fixture 校验 release-residual 票(默认档的第三个信息源)。
+
+    0.5Hz 的 [truth] 日志做不了这一步:短窗阶跃要的是 10Hz 原始推力。
+    """
+    fixture = fixture or os.path.join(
+        os.path.dirname(__file__), '..', '..', 'offboard_test_acados',
+        'test', 'fixtures', 'tphys_replay_20260826_165455.csv')
+    if not os.path.exists(fixture):
+        print('  (缺 fixture,跳过)')
+        return
+    ts, T = [], []
+    for ln in open(fixture):
+        if ln.startswith('#'):
+            continue
+        parts = ln.strip().split(',')
+        try:
+            ts.append(float(parts[0]))
+            T.append(float(parts[1]))
+        except (ValueError, IndexError):
+            pass
+    ATT, FIG, DROP = 6.50, 19.5, 71.50
+    d = [None] * len(T)
+    for i in range(2 * half, len(T)):
+        d[i] = (sum(T[i - half:i]) / half
+                - sum(T[i - 2 * half:i - half]) / half)
+
+    def longest(a, b, thr, need):
+        best = cur = 0
+        first = None
+        for i, v in enumerate(d):
+            if v is None or not (a <= ts[i] < b):
+                continue
+            if v < -thr:
+                cur += 1
+                best = max(best, cur)
+                if cur >= need and first is None:
+                    first = ts[i]
+            else:
+                cur = 0
+        return best, first
+
+    fig_n, _ = longest(FIG + 2.5, DROP - 1.5, floor, persist)
+    drop_n, drop_t = longest(DROP, DROP + 2.0, floor, persist)
+    sfig_n, _ = longest(FIG + 2.5, DROP - 1.5, floor, strong_persist)
+    sdrop_n, sdrop_t = longest(DROP, DROP + 2.0, floor, strong_persist)
+    print(f'  普通票(floor={floor}N, persist={persist}): '
+          f'figure-8 最长连续 {fig_n} 帧, drop {drop_n} 帧'
+          + (f', 延迟 {drop_t - DROP:.2f}s' if drop_t else ''))
+    print(f'  强票  (floor={floor}N, persist={strong_persist}): '
+          f'figure-8 最长连续 {sfig_n} 帧, drop {sdrop_n} 帧'
+          + (f', 延迟 {sdrop_t - DROP:.2f}s' if sdrop_t else ''))
+    print(f'  => 普通票在机动中{"会" if fig_n >= persist else "不会"}出现'
+          f'(它只允许与质量通道配对,故{"无害" if fig_n >= persist else "更安全"});'
+          f' 强票{"会" if sfig_n >= strong_persist else "不会"}误报')
+    fig_min = min(v for i, v in enumerate(d)
+                  if v is not None and FIG + 2.5 <= ts[i] < DROP - 1.5)
+    print(f'  ⚠️ 幅度不可分:figure-8 段最负 ΔT {fig_min:.2f}N '
+          'vs 0.15kg 卸载真信号 -1.47N')
+
+
 if __name__ == '__main__':
     main()
+    print('\n=== 5. release-residual 票(高频 fixture 标定) ===')
+    check_release_residual()

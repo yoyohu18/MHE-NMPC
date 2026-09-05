@@ -77,8 +77,11 @@ class _Stub:
         self.s_release_inertia_score_min = 0.90
         self.s_release_abs_max = 0.008
         self.s_release_fast_persist = 2
+        self.s_release_strong_persist = 3
         self._s_fast = 0
+        self._s_strong = 0
         self._residual_drop_evidence_until = -1.0
+        self._residual_strong_evidence_until = -1.0
         self._t = 0.0
         self._s_peak = 0.0
         self._s_low = 0
@@ -131,8 +134,10 @@ class _Stub:
                 return _N()
         return _C()
 
-    def _arm_residual(self, hold=3.0):
+    def _arm_residual(self, hold=3.0, strong=False):
         self._residual_drop_evidence_until = self._t + hold
+        if strong:
+            self._residual_strong_evidence_until = self._t + hold
 
     def _tick(self, s_xy, m_p, n=1):
         self.s_est = np.asarray(s_xy, dtype=float)
@@ -239,6 +244,27 @@ def test_residual_fast_path_handles_worst_case():
     st2._arm_residual()
     st2._tick([worst_resid, 0.0], -0.005, n=st2.s_release_fast_persist)
     assert _released(st2), '残差证据在场时,最坏组合也应能释放'
+
+
+def test_plain_residual_must_not_pair_with_collapse():
+    """普通残差票 + moment 塌陷**不得**释放,只有强票才行。
+
+    理由是幅度不可分:0.2kg 高频回放里 figure-8 稳定段 ΔT 最负到 -1.69N,
+    比 0.15kg 卸载的真信号 -1.47N 还大。普通票必然会在机动中偶发,若允许它与
+    "偶发 ratio 塌陷"组合,就是一次等着发生的误释放。
+    """
+    st = _Stub()
+    st._tick([0.0, -S_PEAK_LOADED], 0.15, n=5)
+    st._arm_residual(strong=False)
+    # |s| 塌了,但载荷量说还挂着(机动中 m_p 没探空) -> 只有普通票,不该释放
+    st._tick([0.0005, 0.0], 0.15, n=20)
+    assert not _released(st), '普通残差票不得与 moment 塌陷直接释放'
+    # 换成强票 -> 允许
+    st2 = _Stub()
+    st2._tick([0.0, -S_PEAK_LOADED], 0.15, n=5)
+    st2._arm_residual(strong=True)
+    st2._tick([0.0005, 0.0], 0.15, n=st2.s_release_strong_persist)
+    assert _released(st2), '强票 + moment 塌陷应当释放'
 
 
 def _run():

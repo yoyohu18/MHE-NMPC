@@ -192,13 +192,20 @@ RELEASE_S_ABS_MAX = 0.008      # kg·m,sanity 上限而非判别器
 RELEASE_MASS_MP = 0.03         # kg
 RELEASE_SLOW_PERSIST = 5       # 帧,10Hz -> 0.5s
 RELEASE_FAST_PERSIST = 2       # 帧
+RELEASE_STRONG_PERSIST = 3     # 帧,快速路径 B
 
 
 def release_evidence(m_payload, s_norm, s_peak, residual_drop,
                      ratio_thr=RELEASE_RATIO_THR,
                      s_abs_max=RELEASE_S_ABS_MAX,
-                     mass_release_mp=RELEASE_MASS_MP):
-    """Return the three independent release indications plus the raw ratio."""
+                     mass_release_mp=RELEASE_MASS_MP,
+                     residual_strong=False):
+    """Return the three independent release indications plus the raw ratio.
+
+    ``residual_drop`` / ``residual_strong`` are the two levels of the release
+    residual vote (see the MHE node): the normal vote may only pair with the
+    payload-quantity channel, the strong one may pair with a moment collapse.
+    """
     s_norm = float(s_norm)
     s_peak = float(s_peak)
     ratio = (s_norm / s_peak) if s_peak > 0.0 else 1.0
@@ -209,40 +216,56 @@ def release_evidence(m_payload, s_norm, s_peak, residual_drop,
         'moment_collapsed': moment_collapsed,
         'quantity_empty': quantity_empty,      # mass 与 inertia 合并的那一条
         'residual_drop': bool(residual_drop),
+        'residual_strong': bool(residual_strong),
     }
 
 
 def release_decision(ev, load_armed, slow_frames, fast_frames,
                      slow_persist=RELEASE_SLOW_PERSIST,
-                     fast_persist=RELEASE_FAST_PERSIST):
-    """Decide whether to release, given evidence and the two persistence counters.
+                     fast_persist=RELEASE_FAST_PERSIST,
+                     strong_frames=0,
+                     strong_persist=RELEASE_STRONG_PERSIST):
+    """Decide whether to release, given evidence and the persistence counters.
 
-    Returns ``(release, why, slow_frames, fast_frames)``.  Pure function: the
-    caller owns the counters, so the online node and the offline replay share
-    exactly one implementation.
+    Returns ``(release, why, slow_frames, fast_frames, strong_frames)``.
+    Pure function: the caller owns the counters, so the online node and the
+    offline replay share exactly one implementation.
 
-    Rules (see module comment for why mass/inertia are one channel):
-      * nothing fires unless the payload was reliably LOADED at some point;
-      * fast  = residual DROP  AND (quantity empty OR moment collapsed);
-      * slow  = quantity empty AND moment collapsed, sustained;
-      * a single channel never releases — neither the ratio alone nor the
-        mass/inertia pair "voting twice".
+    Three paths (2026-09-05; see module comment for why mass/inertia are one
+    channel, and why the normal residual vote may not pair with a collapse):
+
+      slow    : quantity empty AND moment collapsed, sustained;
+      fast A  : release residual AND quantity empty;
+      fast B  : *strong* release residual AND moment collapsed.
+
+    Fast B needs the strong vote because a plain residual dip is not separable
+    from a figure-8 thrust transient by amplitude alone — on 0.2 kg replay the
+    manoeuvre floor reaches -1.69 N while a 0.15 kg release is only -1.47 N.
+    Pairing a plain vote with an occasional ratio collapse would therefore be a
+    false release waiting to happen; the quantity channel in fast A does not
+    have that problem because it is false whenever the payload is still on.
+
+    A single channel never releases, and mass/inertia never "vote twice".
     """
     if not load_armed:
-        return False, '', 0, 0
-    fast_ok = ev['residual_drop'] and (ev['quantity_empty']
-                                       or ev['moment_collapsed'])
+        return False, '', 0, 0, 0
+    fast_ok = ev['residual_drop'] and ev['quantity_empty']
+    strong_ok = ev.get('residual_strong', False) and ev['moment_collapsed']
     slow_ok = ev['quantity_empty'] and ev['moment_collapsed']
     fast_frames = fast_frames + 1 if fast_ok else 0
+    strong_frames = strong_frames + 1 if strong_ok else 0
     slow_frames = slow_frames + 1 if slow_ok else 0
     if fast_frames >= fast_persist:
+        return (True, f"fastA: residual DROP + quantity empty x{fast_frames}帧",
+                slow_frames, fast_frames, strong_frames)
+    if strong_frames >= strong_persist:
         return (True,
-                f"fast: residual DROP + {'quantity' if ev['quantity_empty'] else 'moment'}"
-                f" (ratio={ev['ratio']:.3f}) x{fast_frames}帧",
-                slow_frames, fast_frames)
+                f"fastB: strong residual + moment collapsed "
+                f"(ratio={ev['ratio']:.3f}) x{strong_frames}帧",
+                slow_frames, fast_frames, strong_frames)
     if slow_frames >= slow_persist:
         return (True,
                 f"slow: quantity empty + moment collapsed "
                 f"(ratio={ev['ratio']:.3f}) x{slow_frames}帧",
-                slow_frames, fast_frames)
-    return False, '', slow_frames, fast_frames
+                slow_frames, fast_frames, strong_frames)
+    return False, '', slow_frames, fast_frames, strong_frames

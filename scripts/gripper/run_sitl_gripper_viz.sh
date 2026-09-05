@@ -418,6 +418,9 @@ nohup bash -c "source /opt/ros/jazzy/setup.bash && source '$WS/install/setup.bas
     -p c_xy_from_moment:=$C_XY_FROM_MOMENT \
     -p eval_true_payload_mass:=$PAYLOAD_KG_D \
     -p geom_release_mode:=${MHE_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-self}} \
+    -p release_resid_enable:=$(_b "${RELEASE_RESID:-true}")
+    -p release_resid_floor_n:=${RELEASE_RESID_FLOOR:-0.9}
+    -p release_resid_strong_persist:=${RELEASE_RESID_STRONG_PERSIST:-4}
     -p c_xy_mass_release_mp:=${MHE_CXY_MASS_RELEASE_MP:-0.03} -p c_xy_mass_release_persist:=${MHE_CXY_MASS_RELEASE_PERSIST:-20} -p c_xy_mass_arm_ratio:=${MHE_CXY_MASS_ARM_RATIO:-3.0} -p c_xy_mass_arm_persist:=${MHE_CXY_MASS_ARM_PERSIST:-20} -p event_signal_mode:=${MHE_SIGNAL_MODE:-residual}" \
   > "$MHE_LOG" 2>&1 &
 
