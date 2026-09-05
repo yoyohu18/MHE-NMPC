@@ -156,6 +156,7 @@ def test_reattach_restores_s_target():
 class _NMPCStub:
     _confirm_no_payload_if_persistent = (
         mn_nmpc.AcadosNMPCNode._confirm_no_payload_if_persistent)
+    _check_drop_unresolved = mn_nmpc.AcadosNMPCNode._check_drop_unresolved
     _payload_estimate_is_fresh = (
         mn_nmpc.AcadosNMPCNode._payload_estimate_is_fresh)
 
@@ -180,6 +181,11 @@ class _NMPCStub:
         self.grip_drop_done = False
         self.grip_dropped = False
         self.now_sec = 100.0
+        # unresolved 路径(2026-09-05)
+        self.drop_unresolved_timeout_sec = 12.0
+        self.payload_unresolved = False
+        self._drop_cmd_wall = None
+        self.grip_dynamic_active = True
         self._log = _Logger()
 
     def get_clock(self):
@@ -284,6 +290,63 @@ def test_confidence_vetoed_by_moment_alone():
     """质量为零但一阶矩不为零时 conf 必须是 0 —— 这条不能被"放宽"掉。"""
     assert no_payload_confidence(0.0, [0.0175, 0.0], [0.0, 0.0, 0.0]) < 1e-6
     assert no_payload_confidence(0.0, [0.0, 0.0], [0.0, 0.0, 0.0]) > 0.99
+
+
+# ------------------------------------------- 4) 超时 = unresolved,不是"已卸载"
+def test_timeout_goes_unresolved_not_empty():
+    """★ 超时**不等于**已卸载:进 unresolved,且不得清模型/复位(2026-09-05)。
+
+    释放判据现在强制要求 moment 证据,"ratio 不塌的 drop"是有意接受的漏检。
+    此时飞机真实状态未知——猜"已卸载"会在载荷还挂着时按空机构型飞;继续按带载飞
+    则可能带着幽灵偏心。两边都不猜:保持模型,退出机动转保守悬停。
+    """
+    node = _NMPCStub()
+    node.no_payload_confidence = 0.30          # moment 未确认 => conf 上不去
+    node._payload_target = dataclasses.replace(
+        node._payload_target, no_payload_confidence=0.30)
+    node._no_payload_latched = False
+    node.grip_drop_pending = True
+    node._drop_cmd_wall = node.now_sec
+
+    node.now_sec += node.drop_unresolved_timeout_sec - 1.0
+    node._payload_estimate_rx_sec = node.now_sec
+    node._confirm_no_payload_if_persistent()
+    assert not node.payload_unresolved, '未超时不该进 unresolved'
+    assert node.grip_dynamic_active, '未超时不该退出机动'
+
+    node.now_sec += 2.0
+    node._payload_estimate_rx_sec = node.now_sec
+    node._confirm_no_payload_if_persistent()
+    assert node.payload_unresolved, '超时应进 unresolved'
+    assert not node.grip_dynamic_active, 'unresolved 必须退出 figure-8 转悬停'
+    assert not node.grip_dropped, 'unresolved 不得清模型'
+    assert not node.grip_drop_done
+    assert node.grip_drop_pending, 'pending 保持,交给上层处理'
+
+
+def test_late_evidence_resolves_unresolved():
+    """迟到的 moment 证据到达后,从 unresolved 恢复成正常卸载完成。"""
+    node = _NMPCStub()
+    node.no_payload_confidence = 0.30
+    node._payload_target = dataclasses.replace(
+        node._payload_target, no_payload_confidence=0.30)
+    node._no_payload_latched = False
+    node.grip_drop_pending = True
+    node._drop_cmd_wall = node.now_sec
+    node.now_sec += node.drop_unresolved_timeout_sec + 1.0
+    node._payload_estimate_rx_sec = node.now_sec
+    node._confirm_no_payload_if_persistent()
+    assert node.payload_unresolved
+
+    node.no_payload_confidence = 0.99
+    node._payload_target = dataclasses.replace(
+        node._payload_target, no_payload_confidence=0.99)
+    for _ in range(node.no_payload_conf_hold_frames + 2):
+        node.now_sec += 0.05
+        node._payload_estimate_rx_sec = node.now_sec
+        node._confirm_no_payload_if_persistent()
+    assert not node.payload_unresolved, '证据到达应解除 unresolved'
+    assert node.grip_dropped and node.grip_drop_done
 
 
 if __name__ == '__main__':

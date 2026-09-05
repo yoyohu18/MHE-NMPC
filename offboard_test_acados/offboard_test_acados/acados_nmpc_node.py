@@ -487,6 +487,12 @@ class AcadosNMPCNode(Node):
         self.drop_trigger_time = None
         self.drop_done = False
         self.drop_pending_confirmation = False
+        # 卸载未证实的超时 [s]。超时**不等于**已卸载,见 _check_drop_unresolved。
+        self.declare_parameter('drop_unresolved_timeout_sec', 12.0)
+        self.drop_unresolved_timeout_sec = float(
+            self.get_parameter('drop_unresolved_timeout_sec').value)
+        self.payload_unresolved = False
+        self._drop_cmd_wall = None
 
         # ============ 夹爪吊挂实验模式(默认关;关闭时下面全部不生效,
         # 现有 mass_changer/figure8 行为逐字节不变)============
@@ -1393,8 +1399,41 @@ class AcadosNMPCNode(Node):
         self.c_est = (self.s_est / max(self.m_est, 1e-6)
                       if self.control_mode != 'l1' else np.zeros(2))
 
+    def _check_drop_unresolved(self):
+        """载荷卸载**未被证实**时进入 unresolved,而不是当作已卸载(2026-09-05)。
+
+        为什么不能超时即清:释放判据现在要求 moment 证据(见
+        payload_estimate.release_decision),而"ratio 不塌"的 drop 检不出来是
+        **有意接受**的漏检代价。此时飞机的真实状态是**未知**的——载荷可能还挂着,
+        也可能掉了。两种猜法都危险:
+          * 猜"已卸载"→ 清模型/复位增益,若载荷其实还在,就是带载飞空机构型;
+          * 继续按带载飞 → 若载荷真掉了,是带着幽灵偏心飞(07-02 实测会坠)。
+        所以既不清也不猜:保持模型不动(不切 s_target、不清 dJ/c、不复位 L1),
+        同时**退出机动**转保守悬停,把问题交给上层/操作员。
+        """
+        if not getattr(self, 'grip_drop_pending', False):
+            return
+        if self.payload_unresolved:
+            return
+        if self._drop_cmd_wall is None:
+            return
+        if (self.get_clock().now().nanoseconds * 1e-9 - self._drop_cmd_wall
+                < self.drop_unresolved_timeout_sec):
+            return
+        self.payload_unresolved = True
+        # 退出机动:figure-8 在 unresolved 下没有意义,而且高机动正是让证据
+        # 变脏的原因。转悬停既降低风险,也给估计器一个安静窗口把 ratio 判出来。
+        self.grip_dynamic_active = False
+        self.get_logger().error(
+            f'PAYLOAD STATE UNRESOLVED: drop 指令后 '
+            f'{self.drop_unresolved_timeout_sec:.0f}s 未取得 moment 证据。'
+            f'**不清模型、不切 s_target、不复位 L1**,退出 figure-8 转保守悬停。'
+            f'(conf={self.no_payload_confidence:.3f}) '
+            f'—— 载荷是否仍在机上未知,需上层介入/降落中止')
+
     def _confirm_no_payload_if_persistent(self):
         """Reset adaptive states only after persistent MHE empty confidence."""
+        self._check_drop_unresolved()
         if getattr(self, '_no_payload_latched', True):
             return
         if not self._payload_estimate_is_fresh():
@@ -1411,6 +1450,10 @@ class AcadosNMPCNode(Node):
             return
         self._no_payload_latched = True
         self._no_payload_conf_frames = 0
+        if self.payload_unresolved:
+            self.payload_unresolved = False
+            self.get_logger().info(
+                'PAYLOAD STATE RESOLVED: 迟到的 moment 证据到达,恢复正常卸载流程')
         if self.control_mode == 'l1':
             self.l1.reset()
             self.d_lumped = np.zeros(3)
@@ -2063,6 +2106,8 @@ class AcadosNMPCNode(Node):
             self.drop_triggered = True
             self.drop_trigger_time = self.get_clock().now()
             self.drop_pending_confirmation = self.continuous_payload_estimates
+            self._drop_cmd_wall = (
+                self.get_clock().now().nanoseconds * 1e-9)
             if self.continuous_payload_estimates:
                 # 与 _grip_drop_phase 同一处理:释放指令是明确边沿,无条件重新
                 # 武装空载检测。两条 drop 路径必须对称,漏一条就是下一次的坑。
@@ -2544,6 +2589,8 @@ class AcadosNMPCNode(Node):
             # Keep consuming the decaying MHE estimates; completion and L1 reset
             # happen only after persistent no-payload confidence.
             self.grip_drop_pending = True
+            self._drop_cmd_wall = (
+                self.get_clock().now().nanoseconds * 1e-9)
             # 无条件重新武装空载检测(2026-09-04):latch 是一次性的,而 re-arm
             # 只在收到"确有载荷"的估计帧时才发生(conf < 阈值-0.15)。attach 没
             # 成功的轮次里 conf 全程 1.0 → latch 在起飞后不久就被消耗掉,等真发

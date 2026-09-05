@@ -231,33 +231,37 @@ def release_decision(ev, load_armed, slow_frames, fast_frames,
     Pure function: the caller owns the counters, so the online node and the
     offline replay share exactly one implementation.
 
-    Three paths (2026-09-05; see module comment for why mass/inertia are one
-    channel, and why the normal residual vote may not pair with a collapse):
+    ★ **Every successful release must carry moment evidence.**  Two paths:
 
-      slow    : quantity empty AND moment collapsed, sustained;
-      fast A  : release residual AND quantity empty;
-      fast B  : *strong* release residual AND moment collapsed.
+      slow  : quantity empty  AND moment collapsed, sustained;
+      fastB : strong residual AND moment collapsed.
 
-    Fast B needs the strong vote because a plain residual dip is not separable
-    from a figure-8 thrust transient by amplitude alone — on 0.2 kg replay the
-    manoeuvre floor reaches -1.69 N while a 0.15 kg release is only -1.47 N.
-    Pairing a plain vote with an occasional ratio collapse would therefore be a
-    false release waiting to happen; the quantity channel in fast A does not
-    have that problem because it is false whenever the payload is still on.
+    2026-09-05 — the third path (plain residual AND quantity empty, no moment)
+    was **removed after it caused real premature releases**: 3 of 9 SITL runs
+    released while the payload was still attached, the earliest 51.1 s before
+    the drop command.  Its design assumption — "quantity_empty is false while
+    the payload is on" — is wrong at 4 m/s: ``m_est`` sits on its lower bound
+    ``m_min`` for whole stretches of a figure-8, so ``m_p`` is *persistently*
+    negative (loaded runs hold ``m_p < 0.03`` for a median of 14 s, worst 48 s).
+    Neither amplitude nor persistence separates it from a real drop, and the
+    plain residual vote is likewise false-positive during manoeuvres — so the
+    pair was two unreliable channels ANDed together, with nothing to veto them.
 
-    A single channel never releases, and mass/inertia never "vote twice".
+    The moment channel is the one that measured cleanly: loaded ``ratio``
+    bottomed at 0.789 against a 0.30 threshold (2.6x margin) with zero false
+    positives across those runs.  So it is now mandatory.
+
+    Cost, accepted deliberately: a drop whose ``ratio`` never collapses is not
+    detected here.  That is a *miss*, handled by the unresolved path in the
+    controller — never by releasing on weaker evidence.
     """
     if not load_armed:
         return False, '', 0, 0, 0
-    fast_ok = ev['residual_drop'] and ev['quantity_empty']
     strong_ok = ev.get('residual_strong', False) and ev['moment_collapsed']
     slow_ok = ev['quantity_empty'] and ev['moment_collapsed']
-    fast_frames = fast_frames + 1 if fast_ok else 0
     strong_frames = strong_frames + 1 if strong_ok else 0
     slow_frames = slow_frames + 1 if slow_ok else 0
-    if fast_frames >= fast_persist:
-        return (True, f"fastA: residual DROP + quantity empty x{fast_frames}帧",
-                slow_frames, fast_frames, strong_frames)
+    fast_frames = 0            # 保留字段以免调用方签名变动;fastA 已删除
     if strong_frames >= strong_persist:
         return (True,
                 f"fastB: strong residual + moment collapsed "

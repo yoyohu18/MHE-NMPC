@@ -231,19 +231,43 @@ def test_single_channel_never_releases():
     assert not _released(st2), '质量(含惯量)单通道不得释放'
 
 
-def test_residual_fast_path_handles_worst_case():
-    """对抗组合:残噪大 + peak 小 => ratio 0.35 越过阈值,慢路径检不出;
-    此时"残差 DROP + 质量为空"应当仍能释放(这是第三个信息源的价值)。"""
-    worst_peak, worst_resid = 0.0140, 0.0049      # 实测两个边界值的最坏组合
+def test_no_release_without_moment_evidence():
+    """★ 任何成功释放都必须带 moment 证据(2026-09-05 用户拍板)。
+
+    原 fastA(普通残差 + 质量为空,无 moment)已删除:9 轮 SITL 里 3 轮提前释放,
+    最早提前 51.1s。根因是"载荷还在时 quantity_empty 恒假"这个假设不成立 ——
+    4m/s figure-8 中 m_est 长时间贴在下界 m_min,m_p 持续为负(带载段
+    m_p<0.03 的连续时长中位 14s、最坏 48s),幅度与持续性都分不开。
+    于是那条路径是两个都不可靠的通道相与,没有任何东西能否决它。
+
+    代价是"ratio 不塌的 drop"检不出 —— 那是**有意接受的漏检**,交给控制器的
+    unresolved 路径,而不是靠更弱的证据去释放。
+    """
+    worst_peak, worst_resid = 0.0140, 0.0049      # ratio=0.35,moment 不成立
     st = _Stub()
     st._tick([0.0, -worst_peak], 0.15, n=5)
-    st._tick([worst_resid, 0.0], -0.005, n=20)
-    assert not _released(st), f'ratio={worst_resid/worst_peak:.2f} 本就该检不出'
+    st._arm_residual()                            # 普通票在场
+    st._tick([worst_resid, 0.0], -0.005, n=30)    # 质量也报空
+    assert not _released(st), '缺 moment 证据时不得释放(原 fastA 已删除)'
     st2 = _Stub()
     st2._tick([0.0, -worst_peak], 0.15, n=5)
-    st2._arm_residual()
-    st2._tick([worst_resid, 0.0], -0.005, n=st2.s_release_fast_persist)
-    assert _released(st2), '残差证据在场时,最坏组合也应能释放'
+    st2._arm_residual(strong=True)                # 强票 + moment 才行
+    st2._tick([0.0003, 0.0], -0.005, n=st2.s_release_strong_persist)
+    assert _released(st2), '强票 + moment 塌陷应当释放'
+
+
+def test_maneuver_mass_dip_with_residual_does_not_release():
+    """复现 20260905_152924 的误释放现场:m_p 探负 + 普通残差票,但 |s| 没塌。
+
+    实测那一帧:ratio=0.694 moment=0 quantity=1 resid=1 m_p=-0.0624。
+    删掉 fastA 之后这组证据必须**不**释放。
+    """
+    st = _Stub()
+    st._tick([0.0, -0.03283], 0.15, n=5)          # peak=0.03283(实测)
+    st._arm_residual()
+    # |s|=0.02278 -> ratio=0.694,远高于阈值;m_p=-0.0624 让质量通道报空
+    st._tick([0.0, -0.02278], -0.0624, n=40)
+    assert not _released(st), '这正是 152924 轮 drop 前 51s 的误释放现场'
 
 
 def test_plain_residual_must_not_pair_with_collapse():

@@ -229,13 +229,15 @@ def main():
         print(f'  实测 peak 最小 {p_min:.4f}, 卸载后残噪最大 {s_max:.4f}')
         print(f'  最坏组合 ratio = {s_max/p_min:.3f}  '
               f'=> {"漏检(退回死锁)" if s_max/p_min >= args.ratio else "仍可释放"}')
-        for name, rd in (('残差通道关(默认档)', None), ('残差通道开', 0.0)):
-            ev = release_evidence(0.0, s_max, p_min, rd is not None,
-                                  ratio_thr=args.ratio)
+        for name, strong in (('普通残差票', False), ('强残差票', True)):
+            ev = release_evidence(0.0, s_max, p_min, True,
+                                  ratio_thr=args.ratio, residual_strong=strong)
             fire, why, _, _, _ = release_decision(ev, True, 99, 99,
                                                   strong_frames=99)
             print(f'    {name}: {"可释放" if fire else "不释放"} '
                   f'{why.split("(")[0] if why else ""}')
+        print('    (2026-09-05 起任何释放都必须带 moment 证据,'
+              'ratio>阈值时两种票都不该释放)')
 
     # ---- 4. 留一轮交叉验证 ----
     if args.loocv:
