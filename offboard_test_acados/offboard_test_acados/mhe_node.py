@@ -794,6 +794,33 @@ class MHENode(Node):
             self.get_parameter('residual_evidence_hold_sec').value)
         self._residual_drop_evidence_until = -1.0
         self._residual_strong_evidence_until = -1.0
+        # --- moment reference(2026-09-05):取代 running max 作为 ratio 的分母 ---
+        # 物理上限 = 载荷包线 x attach 偏心上限。越界样本是动态失真,不是几何:
+        # 15 轮实测 7.6%~18.3% 的带载帧越界(max 0.052,反解 r_xy=0.35m)。
+        # ⚠️ 该缺陷在 ddfe9d2 之前就存在;A 修复只是让 detector 更早开始跑,把越界率
+        #    从 7.6% 抬到 18.3%,不是根因。
+        self.declare_parameter('moment_abs_max', 0.039)      # kg·m = 0.30 x 0.13
+        self.declare_parameter('moment_ref_window', 20)      # 帧,10Hz -> 2s
+        self.declare_parameter('moment_ref_omega_max', 0.15) # rad/s
+        self.declare_parameter('moment_ref_vel_max', 0.20)   # m/s
+        self.declare_parameter('moment_ref_max_cv', 0.25)    # 窗口离散度上限
+        self.declare_parameter('moment_ref_dir_min', 0.90)   # 方向一致度下限
+        self.moment_abs_max = float(self.get_parameter('moment_abs_max').value)
+        self.moment_ref_window = max(
+            3, int(self.get_parameter('moment_ref_window').value))
+        self.moment_ref_omega_max = float(
+            self.get_parameter('moment_ref_omega_max').value)
+        self.moment_ref_vel_max = float(
+            self.get_parameter('moment_ref_vel_max').value)
+        self.moment_ref_max_cv = float(
+            self.get_parameter('moment_ref_max_cv').value)
+        self.moment_ref_dir_min = float(
+            self.get_parameter('moment_ref_dir_min').value)
+        self._moment_ref_ready = False
+        self._s_ref_loaded = 0.0
+        self._moment_ref_buf = []
+        self._moment_ref_reject = 0       # estimator-quality 指标
+        self._dyn_overrange = 0           # 动态段越界帧计数(同上)
         self._s_peak = 0.0
         self._s_low = 0
         self._s_fast = 0
@@ -1196,6 +1223,13 @@ class MHENode(Node):
         self._present_hi = 0
         self._present_lo = 0
         self._s_peak = 0.0
+        # moment 基准随载荷一起作废:下一次任务必须重新建立自己的基准,
+        # 否则会拿上一轮的分母去判这一轮(2026-09-05)。
+        self._moment_ref_ready = False
+        self._s_ref_loaded = 0.0
+        self._moment_ref_buf = []
+        self._moment_ref_reject = 0
+        self._dyn_overrange = 0
         self._s_low = 0
         if self._c_xy_inited or bool(np.any(self.c_xy_est)):
             self.c_xy_est = np.zeros(2)
@@ -1677,6 +1711,73 @@ class MHENode(Node):
         self._armed_frame = None
         self._armed_baseline = None
 
+    def _update_moment_reference(self, s_vec, frame_ok):
+        """建立并**冻结**带载一阶矩基准 s_ref_loaded(2026-09-05)。
+
+        为什么不能再用 running max:ratio 的分母原来是 max_history(|s|),而
+        figure-8 段的 s 估计会**系统性越过物理上限** —— 15 轮实测 7.6%~18.3% 的
+        带载帧 |s| > m_P,max·r_xy,max = 0.30x0.13 = 0.039 kg·m(最大 0.052,
+        反解 r_xy 达 0.35m,远超 attach 上限 0.13m)。那些不是几何,是动态失真。
+        一旦进了分母,带载稳态的 ratio 就被压到阈值以下,moment_collapsed 会在
+        载荷还挂着时成立 —— 与 fastA 栽掉的结构同型。
+        (⚠️ 这个缺陷在 ddfe9d2 之前就存在;A 修复只是让 detector 更早开始跑,
+         把越界率从 7.6% 抬到 18.3%,并非根因。)
+
+        状态机:
+            LOADED(自主) -> healthy/fresh -> **自主识别**的低动态窗口
+            -> 剔除物理越界样本 -> 稳健统计 -> 冻结 -> 进入机动后不再更新
+
+        低动态窗口是**在线判据**(角速度/平移速度 + 估计健康度),不是
+        "attach 后等 N 秒" —— 后者只是当前脚本时序下的巧合区间。
+        """
+        if self._moment_ref_ready or not frame_ok:
+            return
+        s_norm = float(np.linalg.norm(s_vec))
+        # ① 物理越界样本:直接**剔除**,不裁剪后使用(裁剪仍是拿错误样本构造分母)
+        if s_norm > self.moment_abs_max:
+            self._moment_ref_reject += 1
+            self._moment_ref_buf.clear()
+            return
+        # ② 低动态窗口:自主判据,与 _mass_observable 同源但阈值独立
+        if self.x_meas is None:
+            return
+        om = float(np.linalg.norm(self.x_meas[10:13]))
+        v_xy = float(np.linalg.norm(self.x_meas[3:5]))
+        if om > self.moment_ref_omega_max or v_xy > self.moment_ref_vel_max:
+            self._moment_ref_buf.clear()      # 机动打断窗口,重新攒
+            return
+        self._moment_ref_buf.append(np.asarray(s_vec, dtype=float).copy())
+        if len(self._moment_ref_buf) < self.moment_ref_window:
+            return
+        buf = np.asarray(self._moment_ref_buf[-self.moment_ref_window:])
+        norms = np.linalg.norm(buf, axis=1)
+        med = float(np.median(norms))
+        if med <= 1e-6:
+            self._moment_ref_buf.clear()
+            return
+        # ③ 离散度:窗口内幅值要稳
+        mad = float(np.median(np.abs(norms - med)))
+        if (1.4826 * mad / med) > self.moment_ref_max_cv:
+            self._moment_ref_buf.clear()
+            return
+        # ④ 方向一致性:防"大小正常但方向乱跳"
+        unit = buf / np.maximum(norms[:, None], 1e-9)
+        mean_dir = unit.mean(axis=0)
+        if float(np.linalg.norm(mean_dir)) < self.moment_ref_dir_min:
+            self._moment_ref_buf.clear()
+            return
+        # ⑤ 稳健统计建立并**冻结**(截尾均值:去掉两端各 20% 后取均值)
+        k = max(1, int(round(0.2 * len(norms))))
+        trimmed = float(np.mean(np.sort(norms)[k:len(norms) - k])) if len(norms) > 2 * k else med
+        self._s_ref_loaded = trimmed
+        self._moment_ref_ready = True
+        self.get_logger().info(
+            f'[moment-ref] 基准已建立并冻结: |s_ref|={trimmed:.5f} kg·m '
+            f'(窗口 {self.moment_ref_window} 帧, 中位 {med:.5f}, '
+            f'离散 {1.4826*mad/max(med,1e-9):.2f}, 方向一致度 '
+            f'{float(np.linalg.norm(mean_dir)):.2f}, 越界剔除 '
+            f'{self._moment_ref_reject} 帧) — 此后不再更新')
+
     def _update_release_residual(self):
         """独立的 release-residual 投票(见 __init__ 里 release_resid_* 注释)。
 
@@ -2087,14 +2188,37 @@ class MHENode(Node):
                 self._s_ratio_log_n += 1
                 return
             s_norm = float(np.linalg.norm(self.s_est))
-            self._s_peak = max(self._s_peak, s_norm)
+            self._s_peak = max(self._s_peak, s_norm)   # 仅诊断,不再进 ratio
+            self._update_moment_reference(self.s_est, frame_ok)
+            if s_norm > self.moment_abs_max:
+                # 物理不可能值:不投 moment 票、清持续计数、只累计质量指标
+                self._dyn_overrange += 1
+                self._s_low = self._s_fast = self._s_strong = 0
+                if self._s_ratio_log_n % 10 == 1:
+                    self.get_logger().warn(
+                        f'[s-collapse] |s|={s_norm:.5f} > 物理上限 '
+                        f'{self.moment_abs_max:.3f} — 动态失真,不参与 moment '
+                        f'投票(本轮累计 {self._dyn_overrange} 帧)')
+                self._s_ratio_log_n += 1
+                return
+            if not self._moment_ref_ready:
+                # 基准未建立 ⇒ 不判决(ratio 没有可信分母)。持续下去最终走
+                # unresolved,**不**降低释放门槛。
+                self._s_low = self._s_fast = self._s_strong = 0
+                if self._s_ratio_log_n % 10 == 1:
+                    self.get_logger().info(
+                        f'[s-collapse] moment 基准未就绪(窗口 '
+                        f'{len(self._moment_ref_buf)}/{self.moment_ref_window}, '
+                        f'越界剔除 {self._moment_ref_reject}) — 暂不判决')
+                self._s_ratio_log_n += 1
+                return
             m_p_now = max(float(self.m_est) - mhe_p.m_B, 0.0)
             resid_ev = (self.get_clock().now().nanoseconds * 1e-9
                         < self._residual_drop_evidence_until)
             _now = self.get_clock().now().nanoseconds * 1e-9
             strong_ev = _now < self._residual_strong_evidence_until
             ev = release_evidence(
-                m_p_now, s_norm, self._s_peak, resid_ev,
+                m_p_now, s_norm, self._s_ref_loaded, resid_ev,
                 ratio_thr=self.s_release_ratio,
                 s_abs_max=self.s_release_abs_max,
                 mass_release_mp=self.c_xy_mass_release_mp,
@@ -2111,7 +2235,8 @@ class MHENode(Node):
             self._s_ratio_log_n += 1
             if self._s_ratio_log_n % 10 == 1:      # 10Hz -> 每 1s 一行
                 self.get_logger().info(
-                    f'[s-collapse] |s|={s_norm:.5f} peak={self._s_peak:.5f} '
+                    f'[s-collapse] |s|={s_norm:.5f} ref={self._s_ref_loaded:.5f} '
+                    f'peak={self._s_peak:.5f} ovr={self._dyn_overrange} '
                     f'ratio={ev["ratio"]:.3f} (thr {self.s_release_ratio:.2f}) '
                     f'moment={int(ev["moment_collapsed"])} '
                     f'quantity={int(ev["quantity_empty"])} '
