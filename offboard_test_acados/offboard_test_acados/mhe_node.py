@@ -154,6 +154,8 @@ class MHENode(Node):
         self._last_u_rx_sec = None
         self._last_solve_success_sec = None
         self._last_solve_ok = False
+        # re-anchor 把 s_est 清成 0 之后、下一次成功解之前,那个 0 不是证据。
+        self._s_reanchored = False
         self._payload_inputs_were_fresh = False
         # attach 实测几何 [rx,ry,rz](box-drone,机体系,rz<0),来自
         # /gripper/attach_offset;喂 _payload_geometry 算 dJ/c_xy 给 MHE 自己的
@@ -2053,6 +2055,30 @@ class MHENode(Node):
             # 见该模块注释。
             if (self._c_xy_mass_armed and self.s_release_ratio > 0.0
                     and mhe_p.ns and self._load_armed):
+                # ★★ health/freshness 门控(2026-09-05):估计不可信时**不判决**。
+                # 根因链(20260905_152924):连续 5 次 solve failure -> re-anchor
+                # 把 s_est 清成 0 -> 释放判据在下一次成功解之前照常运行 ->
+                # ratio=0.000 被当成 moment_collapsed -> 恰好 m_p 也探负 ->
+                # slow 误释放。而这条判据跑在 _solve_window **之前**,却完全没有
+                # 用上节点已有的 health/freshness 状态。
+                # 不健康时:立即清持续计数(不是暂停——跨盲区拼出来的持续是假的),
+                # 且不允许释放;等下一次 fresh 且成功的解才恢复判决。
+                # ⚠️ _s_peak **不清**:短暂求解失败不该丢掉本轮的带载基准,
+                #    否则重新立峰会把判据的分母搞错。
+                frame_ok, _sol_age = self._payload_frame_health()
+                frame_ok = frame_ok and not self._s_reanchored
+                if not frame_ok:
+                    self._s_low = 0
+                    self._s_fast = 0
+                    self._s_strong = 0
+                    if self._s_ratio_log_n % 10 == 1:
+                        self.get_logger().warn(
+                            f'[s-collapse] 估计不健康,释放判决暂停 '
+                            f'(solve_ok={int(self._last_solve_ok)} '
+                            f'reanchored={int(self._s_reanchored)} '
+                            f'age={_sol_age:.2f}s) — 持续计数已清零')
+                    self._s_ratio_log_n += 1
+                    return
                 s_norm = float(np.linalg.norm(self.s_est))
                 self._s_peak = max(self._s_peak, s_norm)
                 m_p_now = max(float(self.m_est) - mhe_p.m_B, 0.0)
@@ -2084,6 +2110,9 @@ class MHENode(Node):
                         f'quantity={int(ev["quantity_empty"])} '
                         f'resid={int(ev["residual_drop"])}'
                         f'{"S" if ev["residual_strong"] else ""} '
+                        f'health=1 age={_sol_age:.2f} '
+                        f'solve_ok={int(self._last_solve_ok)} '
+                        f'reanch={int(self._s_reanchored)} '
                         f'm_p={float(self.m_est) - mhe_p.m_B:+.4f} '
                         f'slow={self._s_low}/{self.s_release_persist}')
                 if fire:
@@ -2313,6 +2342,11 @@ class MHENode(Node):
                     self._aug(y_win[min(i, N)], m_seed)
                     for i in range(N + 1)]
                 self.s_est = np.zeros(mhe_p.ns)
+                # ★ 2026-09-05:这个 0 是**初始化值**,不是"一阶矩塌了"。
+                # 它曾经直接喂进释放判据的 moment 通道(ratio=0.000),再撞上
+                # m_p 探负 => slow 误释放。标记它,由 health 门控挡住,直到下一次
+                # 成功解产生真实的 s。
+                self._s_reanchored = True
                 self.get_logger().warn(
                     f're-anchored arrival prior to current window after '
                     f'{self._fail_streak} consecutive failures '
@@ -2337,6 +2371,7 @@ class MHENode(Node):
         self._last_solve_success_sec = (
             self.get_clock().now().nanoseconds * 1e-9)
         self._fail_streak = 0
+        self._s_reanchored = False      # 拿到真实 s 了,释放判决可以恢复
 
         # 事件后逐帧打日志(平时 2s 一条太粗,量不出亚秒级收敛)。窗口由
         # _on_mass_event 设定、与调度开关解耦——对照组(触发关)也照打,

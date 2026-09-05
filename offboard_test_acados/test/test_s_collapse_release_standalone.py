@@ -82,6 +82,11 @@ class _Stub:
         self._s_strong = 0
         self._residual_drop_evidence_until = -1.0
         self._residual_strong_evidence_until = -1.0
+        # health 门控(2026-09-05)
+        self._last_solve_ok = True
+        self._last_solve_success_sec = 0.0
+        self._s_reanchored = False
+        self._frame_healthy = True
         self._t = 0.0
         self._s_peak = 0.0
         self._s_low = 0
@@ -122,6 +127,9 @@ class _Stub:
 
     def get_logger(self):
         return self._log
+
+    def _payload_frame_health(self):
+        return bool(self._frame_healthy), 0.0
 
     def get_clock(self):
         stub = self
@@ -289,6 +297,55 @@ def test_plain_residual_must_not_pair_with_collapse():
     st2._arm_residual(strong=True)
     st2._tick([0.0005, 0.0], 0.15, n=st2.s_release_strong_persist)
     assert _released(st2), '强票 + moment 塌陷应当释放'
+
+
+def test_unhealthy_frame_blocks_release():
+    """★ 20260905_152924 的根因回归:re-anchor 的 s_est=0 不得当成 moment 证据。
+
+    根因链:连续 5 次 solve failure -> re-anchor 把 s_est 清成 0 -> 释放判据
+    (跑在 _solve_window 之前)照常运行 -> ratio=0.000 被读成 moment_collapsed
+    -> 恰好 m_p 也探负 -> slow 误释放。
+    这一格锁的是:health=false 时,即使 ratio=0 且 quantity empty,也必须零释放。
+    """
+    st = _Stub()
+    st._tick([0.0, -0.03283], 0.15, n=5)          # 立带载峰值
+    peak = st._s_peak
+    # re-anchor:s 被清零、标志置位,解还没成功
+    st._s_reanchored = True
+    st._frame_healthy = False
+    st._tick([0.0, 0.0], -0.0624, n=60)           # ratio=0 且 m_p 探负
+    assert not _released(st), 'health=false 时不得释放(这正是 152924 的现场)'
+    assert st._s_low == 0 and st._s_strong == 0, '不健康时持续计数必须清零'
+    assert abs(st._s_peak - peak) < 1e-9, '_s_peak 不该被短暂求解失败清掉'
+
+
+def test_release_resumes_after_health_returns():
+    """健康恢复后判决要能正常继续 —— 门控不是永久封锁。"""
+    st = _Stub()
+    st._tick([0.0, -0.0229], 0.15, n=5)
+    st._s_reanchored = True; st._frame_healthy = False
+    st._tick([0.0, 0.0], -0.05, n=20)
+    assert not _released(st)
+    # 下一次成功解:标志清掉、健康恢复,且 s 是真实的塌陷值
+    st._s_reanchored = False; st._frame_healthy = True
+    st._tick([0.0032, 0.0], -0.005, n=st.s_release_persist)
+    assert _released(st), '健康恢复且证据充分时应当释放'
+
+
+def test_counters_do_not_span_unhealthy_gap():
+    """不健康帧要**打断**持续,不能跨盲区把两段拼成一次达标。"""
+    st = _Stub()
+    st._tick([0.0, -0.0229], 0.15, n=5)
+    st._tick([0.0032, 0.0], -0.005, n=st.s_release_persist - 1)   # 差一帧
+    assert not _released(st)
+    st._frame_healthy = False
+    st._tick([0.0032, 0.0], -0.005, n=1)                          # 盲区一帧
+    assert st._s_low == 0
+    st._frame_healthy = True
+    st._tick([0.0032, 0.0], -0.005, n=st.s_release_persist - 1)   # 又差一帧
+    assert not _released(st), '跨盲区拼出来的持续不算数'
+    st._tick([0.0032, 0.0], -0.005, n=1)
+    assert _released(st)
 
 
 def _run():
