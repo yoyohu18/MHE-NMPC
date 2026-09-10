@@ -244,6 +244,7 @@ mkdir -p "$LOGDIR"
 
 echo "cleaning up leftover sim processes..."
 for pat in "px4_sitl_default/bin/px4" "gz sim" "/gz " "ruby" "mavros/mavros_node" \
+           "transport13/gz-transport-topic" \
            "lib/offboard_test_acados/proximity_gripper_node" \
            "lib/offboard_test_acados/acados_nmpc_node" \
            "lib/offboard_test_acados/mhe_node" \
@@ -400,11 +401,31 @@ nohup bash -c "source /opt/ros/jazzy/setup.bash && source '$WS/install/setup.bas
   > "$NODE_LOG" 2>&1 &
 
 # 9. MHE(主配置:x500_0 + θ* 调度 + α 无真值确认 + floor + c_xy 在线估计)
+# --- MHE 已知力矩来源:与 run_gripper_headless.sh 对齐(2026-09-10)---
+# 节点默认是 phys_full + motor_window_avg=True,而 headless 一直显式覆盖成
+# command + false —— 两个入口长期不一致,**演示看到的和批次统计的不是同一个
+# 估计器输入**。2026-09-05 用 n=8 配对判掉,结论是留在 command 这一档:
+#   · physfull 臂 1/8 轮在 **drop 之前**发散(peak 40.6m、attach 后 4.3s 起
+#     solve failed、推力塌到下界 0.50N),command 臂 0/8、同底座历史再 0/12;
+#     这是 2026-08-24 那个失效模式的复现,配 motor_window_avg=1 也没消掉。
+#   · 质量精度**未检出差异**(带载稳态偏差配对差 +0.21pp,95% CI [−0.05,+0.47],
+#     5/7 同向 p=.45;跑前功效可检出 0.23pp)——不能反过来说两者等价。
+#   · physfull 唯一显著的好处是 MHE 求解 9.09→7.41ms(−17.5%,7/7 同向 p=.0067),
+#     但 10Hz MHE 预算 100ms,占比 9.1%→7.4%,没有实际意义。
+#   判负的力量来自预注册的一票否决 + 08-24 先验 + viz 历史旁证(23 份 gviz 日志
+#   里 2 份 drop 前 peak 就到 45.7/70.4m),**不是**本批的统计功效:单看计数
+#   1/8 vs 0/8 Fisher p=1.0。所以措辞是"physfull 有 drop 前发散实例且无可测收益"。
+#   记忆 tau-source-viz-headless-ab;设施 run_tau_source_ab.sh。
+# ⚠️ 节点默认仍是 phys_full:两个入口都靠**显式覆盖**才一致,任何新写的入口或
+#    裸 `ros2 run mhe_node` 仍会走 phys_full。留 MHE_TAU_SOURCE/MHE_MOTOR_AVG
+#    两个环境变量是为了让对照实验还能 opt-in 回去(与 headless 同名同语义)。
 MHE_LOG="$LOGDIR/gviz_mhe_$TS.log"; echo "MHE log: $MHE_LOG"
 nohup bash -c "source /opt/ros/jazzy/setup.bash && source '$WS/install/setup.bash' && \
   $ACADOS_ENV && export PYTHONUNBUFFERED=1 && \
   ros2 run offboard_test_acados mhe_node --ros-args \
     --params-file '$PKG/config/gripper/gripper_params.yaml' \
+    -p mhe_tau_source:=${MHE_TAU_SOURCE:-command} \
+    -p motor_window_avg:=$(_b "${MHE_MOTOR_AVG:-false}") \
     -p maneuver_gate_enable:=$MANEUVER_GATE \
     -p resid_release_geom:=$RESID_RELEASE_GEOM \
     -p resid_step_enable:=$RESID_STEP \

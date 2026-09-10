@@ -41,7 +41,14 @@ from .straight_reference import (
     build_reference_window_straight,
 )
 
-from .acados_params import YAW_RATE_K, p, scaled_stage_terminal_W
+from .acados_params import (
+    OMEGA_MIN as ACT_OMEGA_MIN,
+    OMEGA_SPAN as ACT_OMEGA_SPAN,
+    THROTTLE_MAX as ACT_THROTTLE_MAX,
+    THROTTLE_MIN as ACT_THROTTLE_MIN,
+    THRUST_K as ACT_THRUST_K,
+    YAW_RATE_K, p, scaled_stage_terminal_W,
+)
 from .acados_solver_builder import ensure_acados_ocp_solver
 from .l1_adaptive import L1Augmentation
 from .payload_estimate import PayloadEstimate, headroom_limited_scale, slew
@@ -95,9 +102,12 @@ class AcadosNMPCNode(Node):
         # 飞机全程 2.064kg,见 mhe_node.py THRUST_CAL_GAIN 注释的四组互证),
         # 已回退。与 mhe_node 的 MOTOR_CONSTANT×THRUST_CAL_GAIN 同源,两边必须
         # 一致,否则 MHE 的质量读数和 NMPC 的推力反解会互相打架。
-        self.OMEGA_MIN  = 150.0    # SIM_GZ_EC_MIN
-        self.OMEGA_SPAN = 850.0    # SIM_GZ_EC_MAX(1000) - SIM_GZ_EC_MIN(150)
-        self.THRUST_K   = 4.0 * 8.54858e-06   # T=THRUST_K*ω² [N/(rad/s)²], 4 电机合计
+        # 2026-09-10:这三个数搬去 acados_params 当单一真相源了 —— p.Tmin/p.Tmax
+        # 现在就是由它们派生的执行器包线,clip 边界与 NMPC 的箱式约束必须同源,
+        # 否则又会出现"约束说能发 40.5N、这里只发得出 31.3N"那种规划-执行脱钩。
+        self.OMEGA_MIN  = ACT_OMEGA_MIN     # SIM_GZ_EC_MIN
+        self.OMEGA_SPAN = ACT_OMEGA_SPAN    # SIM_GZ_EC_MAX(1000) - SIM_GZ_EC_MIN(150)
+        self.THRUST_K   = ACT_THRUST_K      # T=THRUST_K*ω² [N/(rad/s)²], 4 电机合计
         self.omega_cmd_max = 2.0
         self.bodyrate_ramp_time = 0.8
         # 先跑悬停测试,跟当年 CasADi 节点的验证顺序一样:先确认能稳定悬停,
@@ -283,9 +293,21 @@ class AcadosNMPCNode(Node):
         self.declare_parameter(
             'geom_source', 'estimate' if self.continuous_payload_estimates else 'truth')
         self.geom_source = str(self.get_parameter('geom_source').value).lower()
+        self._geom_source_requested = self.geom_source      # 覆盖前的原值,供启动告警对表
         if self.geom_source not in ('truth', 'online', 'estimate'):
+            self.get_logger().warn(
+                f"geom_source='{self.geom_source}' 不是 truth/online/estimate 之一,"
+                f"已退回默认")
             self.geom_source = ('estimate' if self.continuous_payload_estimates else 'truth')
         if self.continuous_payload_estimates:
+            if self._geom_source_requested != 'estimate':
+                # 原来这条覆盖是**静默**的:传 truth 却跑着 estimate,日志上看不出来。
+                # 反方向的"日志说谎"同样要治 —— 两个方向都会让人对着错的档位读数据。
+                self.get_logger().warn(
+                    f"geom_source='{self._geom_source_requested}' 被 "
+                    f"continuous_payload_estimates=true 覆盖为 'estimate' "
+                    f"(连续估计路径下几何只能来自 MHE)。要跑 "
+                    f"'{self._geom_source_requested}' 档必须同时关掉连续估计。")
             self.geom_source = 'estimate'
         self.c_xy_online = np.zeros(2)     # 最新在线 c_xy 估计(订阅)
         self.geom_online_active = False    # attach 后 online 几何是否已接管
@@ -349,7 +371,8 @@ class AcadosNMPCNode(Node):
         # a_nom 的推力项用**电机转速反算的实际推力**,绝不用 last_u_opt(NMPC
         # 指令)——首版实测(2026-07-23,grip_nmpc_162421)用指令推力在 lift 段
         # 自激炸机:T 快变时 10Hz 零阶保持的指令与实际差一大截 → a_nom 错 →
-        # 垃圾进 d̂ → d̂ 喂回模型 → 推力更错 → bang-bang(40.5↔0.5N)。这正是
+        # 垃圾进 d̂ → d̂ 喂回模型 → 推力更错 → bang-bang(40.5↔0.5N,那是
+        # **当时**的箱式约束;2026-09-10 起是 31.35↔1.27N,故障描述本身不变)。这正是
         # 07-13 拍板"观测量用电机转速反算、不用 NMPC 指令"要避开的"估计↔模型"
         # 自举,在 L1 上重演了一次。口径与 mhe_node 完全同源:
         # T_phys = MOTOR_CONSTANT·Σω²(k 两侧抵消性质同样成立)。
@@ -879,7 +902,18 @@ class AcadosNMPCNode(Node):
             self.grip_drop_done = False   # gripper drop 是否已触发(一次)
             self.grip_drop_pending = False  # 已发 release,等待 MHE 无载荷置信度确认
             self.grip_dropped = False     # box 已释放(online 几何归零标志)
-            self.grip_dynamic_active = False  # 是否已切到 figure8 动态跟踪(B.5)
+            self.grip_dynamic_active = False  # 当前是否在飞 figure8(可被兜底清掉)
+            # ★ 2026-09-07:"只切一次"的哨兵必须与"当前是否在机动"分开。
+            # 原先两件事共用 grip_dynamic_active,而 _check_drop_unresolved 会把它
+            # 清成 False 来表达"退出机动" —— 下一拍(50ms 后)_grip_dynamic_phase
+            # 的守卫就失效了,figure-8 被**原地重启**:圆心重置到当前位置、相位 t0
+            # 归零、ramp 从头,而 build_reference_figure8 的 hover_time=2.0 让重启后
+            # 头 2s 的速度参考=0 → 要求一架 4m/s 的飞机瞬间刹停 → 大倾角 → NMPC
+            # 求解失败 → omega 归零冻结姿态 → 垂直分量不足 → 自由落体穿地。
+            # 实测 5/5 失败轮时序逐位一致(UNRESOLVED +12.00s → 重启 +12.05s →
+            # 首次 solve failed +12.75s → +14.0s 穿地),重启延迟恒为 48.5~49.0ms
+            # = 正好一个 20Hz 控制周期。走该路径的 10 轮崩 5 轮,未走的 10 轮 0 崩。
+            self._grip_dyn_latched = False    # 切过就永久置位,只读不清
             self.grip_dyn_t0 = None       # figure8 起始 nmpc_time
             self.grip_dyn_cx = 0.0        # figure8 xy 偏移(切换瞬间 drone 位置)
             self.grip_dyn_cy = 0.0
@@ -1030,6 +1064,32 @@ class AcadosNMPCNode(Node):
             self.get_logger().info(
                 f'Decoupled publish enabled: solve @{1.0/p.dt:.0f}Hz, '
                 f'body_rate/thrust @{publish_hz:.0f}Hz (trajectory interpolation)')
+        # --- 真值进模型的显著告警(2026-09-10)---
+        # geom_source='truth' 会把 proximity 实测的 attach_offset(仿真里等于载荷
+        # 几何真值)直接算成模型的 dJ/c_est,并用它缩 PX4 内环增益 —— 那是**估计器
+        # 不该知道的信息**。这个档位是 2026-07 的旧默认、至今仍在代码里,而两个入口
+        # 都显式传 'estimate',所以它靠"没人去传它"保证安全。一旦有人传了(或
+        # continuous_payload_estimates 被关掉、默认回落到 'truth'),此前日志上
+        # **没有任何显眼提示**,事后无法自证这一轮没作弊。
+        # 标签 [GEOM-TRUTH] 便于 grep:任何用于论文/演示的轮次都该 grep 一遍确认没有。
+        if self.geom_source == 'truth' and self.gripper_mode:
+            self.get_logger().error(
+                '[GEOM-TRUTH] ⚠️⚠️ geom_source=truth:载荷几何(dJ/c_xy)直接取自 '
+                'attach_offset **真值**,并用于 PX4 内环增益缩放 —— 估计器被喂了'
+                '它本不该知道的信息。**这一轮不可用于论文/演示/任何声称"自主估计"'
+                '的结论**。要跑自主路径请用 geom_source=estimate(主线)或 online。')
+        elif self.geom_source == 'truth':
+            # truth 档但非 gripper:_payload_geometry 那条路根本不启用,真值没进模型。
+            # 这里**不能**也打"检查通过 geom_source=truth" —— 那句自相矛盾,
+            # 正是本次要治的"日志说谎"。
+            self.get_logger().warn(
+                '[GEOM-TRUTH] geom_source=truth,但 gripper_mode=false:'
+                '载荷几何路径未启用,本轮没有真值进模型。若打算跑带载实验,'
+                '请改用 estimate/online。')
+        else:
+            self.get_logger().info(
+                f'[GEOM-TRUTH] 检查通过:geom_source={self.geom_source} '
+                f'(载荷几何不来自真值)')
         self.get_logger().info('acados NMPC node initialized! Waiting for EKF2 convergence...')
 
     def state_cb(self, msg):
@@ -1204,6 +1264,11 @@ class AcadosNMPCNode(Node):
                     and self.geom_source == 'truth'
                     and self.control_mode != 'l1'):
                 dJ, _ = self._payload_geometry(data)
+                # 真值**此刻**进模型:启动期那条告警可能已被几百行日志淹没,
+                # 在实际消费点再喊一次,时间戳也正好标出"从这一刻起不干净"。
+                self.get_logger().error(
+                    f'[GEOM-TRUTH] ⚠️ 正在用 attach_offset **真值**算模型几何并缩'
+                    f'内环增益 (dJ={dJ:.4f} kg·m²) —— 见启动期告警。')
                 self._scale_px4_rate_gains(dJ)
 
     def payload_lost_cb(self, msg):
@@ -1423,11 +1488,20 @@ class AcadosNMPCNode(Node):
         self.payload_unresolved = True
         # 退出机动:figure-8 在 unresolved 下没有意义,而且高机动正是让证据
         # 变脏的原因。转悬停既降低风险,也给估计器一个安静窗口把 ratio 判出来。
+        # ⚠️ 2026-09-07 实测更正:这一行**并没有**让飞机转悬停 —— ref_fn/
+        # ref_window_fn/hover_test_mode 全都没动,参考轨迹仍是 _grip_dyn_ref,
+        # 飞机继续飞 8 字。它当时唯一的实际效果是清掉 _grip_dynamic_phase 的
+        # 哨兵、把 figure-8 原地重启(=与本意相反,且 50% 概率坠机)。哨兵已换成
+        # 独立的 _grip_dyn_latched,重启不再发生;但"转保守悬停"这个语义**仍未
+        # 兑现**,下面的日志文案因此按实情改写。真正的平滑退出(振幅 ramp-down
+        # 到 0、相位继续推进)是待办 —— 注意不能瞬间切静止参考,那正是本次事故
+        # 的伤害来源。
         self.grip_dynamic_active = False
         self.get_logger().error(
             f'PAYLOAD STATE UNRESOLVED: drop 指令后 '
             f'{self.drop_unresolved_timeout_sec:.0f}s 未取得 moment 证据。'
-            f'**不清模型、不切 s_target、不复位 L1**,退出 figure-8 转保守悬停。'
+            f'**不清模型、不切 s_target、不复位 L1**,继续按当前参考飞行'
+            f'(平滑退出机动尚未实现,见 _check_drop_unresolved 注释)。'
             f'(conf={self.no_payload_confidence:.3f}) '
             f'—— 载荷是否仍在机上未知,需上层介入/降落中止')
 
@@ -1855,9 +1929,15 @@ class AcadosNMPCNode(Node):
         """逐帧累积飞行安全诊断量。**只读**:不回写任何控制状态。
 
         倾角用机体 z 轴与世界 z 的夹角 cos(tilt)=1-2(qx²+qy²)(x_cur[6:10] 在
-        odom_cb 里已归一化)。饱和按约束值算而不是按"看着挺大":T 的上界是
-        p.Tmax=2mg,roll/pitch 是 p.tau_max,yaw 是小得多的 p.tau_psi——三者
-        混在一个 tau[] 里比大小会把 yaw 的饱和整个漏掉。
+        odom_cb 里已归一化)。饱和按约束值算而不是按"看着挺大":roll/pitch 的上界
+        是 p.tau_max,yaw 是小得多的 p.tau_psi——三者混在一个 tau[] 里比大小会
+        把 yaw 的饱和整个漏掉。
+
+        ⚠️ 2026-09-10 起 p.Tmax 是**执行器真实上限**(31.35N,95% 油门)而不再是
+        2mg=40.50N。此前 u_frac[T] 拿 40.50 当分母,真实饱和点落在 0.774,于是
+        u_sat[T] 常年 0.0% —— 推力从来没"显示"饱和过。现在 u_frac[T]→1.0 才
+        真正等于推力打满,这一列开始可信;跟历史日志的 T 列**不可直接比大小**。
+        (力矩那两列一直是对的:u_sat[r]/[p] 早就在报 21%/47%。)
         """
         if not self.flight_diag_enable or self.x_cur is None:
             return
@@ -1983,7 +2063,19 @@ class AcadosNMPCNode(Node):
             norm = (omega_req - self.OMEGA_MIN) / self.OMEGA_SPAN
         else:
             norm = 0.0
-        msg.thrust = float(np.clip(norm, 0.05, 0.95))
+        # 边界与 p.Tmin/p.Tmax 同源(见 acados_params 的执行器包线那段)。对齐之后
+        # 正常情况下 u_opt[0] 已经被 NMPC 约束在 [Tmin,Tmax] 内,这个 clip 退化成
+        # 纯兜底;真夹到了说明有人绕过了约束(legacy 档 / 求解器越界),记一笔。
+        norm_raw = norm
+        norm = float(np.clip(norm, ACT_THROTTLE_MIN, ACT_THROTTLE_MAX))
+        if abs(norm_raw - norm) > 1e-9:
+            self._thr_clip_n = getattr(self, '_thr_clip_n', 0) + 1
+            if self._thr_clip_n % 20 == 1:
+                self.get_logger().warn(
+                    f'[thr-clip] NMPC 求得 T={T:.2f}N → norm={norm_raw:.3f},'
+                    f'被夹到 {norm:.3f}(=T {self.THRUST_K * (self.OMEGA_MIN + self.OMEGA_SPAN * norm) ** 2:.2f}N)。'
+                    f'箱式约束是 [{p.Tmin:.2f},{p.Tmax:.2f}]N,本轮累计 {self._thr_clip_n} 次')
+        msg.thrust = norm
         wmax = self.omega_cmd_max
         w_cmd = np.asarray(omega_cmd, dtype=float).copy()
         if self.omega_scale_enable:
@@ -2163,8 +2255,11 @@ class AcadosNMPCNode(Node):
         """B.5:lift 完成 + grip_dyn_settle_sec 秒后,从悬停切到 figure8 跟踪
         (偏移到切换瞬间 drone 的 xy,平滑过渡),带偏心载荷飞机动。之后 drop 落在
         figure8 中途。只切一次;grip_dynamic_after_lift=false 时禁用。"""
+        # 守卫用 _grip_dyn_latched 而**不是** grip_dynamic_active:后者会被
+        # _check_drop_unresolved 清掉,拿它当"只切一次"的哨兵会导致 figure-8
+        # 被重启(见 __init__ 里 _grip_dyn_latched 处的注释)。
         if (not self.gripper_mode or not self.grip_dynamic_after_lift
-                or self.grip_dynamic_active or not self.grip_lift_started
+                or self._grip_dyn_latched or not self.grip_lift_started
                 or self.attach_time is None or self.x_cur is None):
             return
         lift_done_t = (self.attach_time + self.grip_lift_after_sec
@@ -2172,6 +2267,7 @@ class AcadosNMPCNode(Node):
         if nmpc_time < lift_done_t + self.grip_dyn_settle_sec:
             return
         self.grip_dynamic_active = True
+        self._grip_dyn_latched = True     # 本轮飞行不再进入本分支
         self.grip_dyn_t0 = nmpc_time
         self.grip_dyn_cx = float(self.x_cur[0])
         self.grip_dyn_cy = float(self.x_cur[1])

@@ -56,7 +56,8 @@ flock -n 9 || { echo "[批次] 另一个批次正持锁,退出"; exit 1; }
 
 cleanup() {
   for pat in "run_gripper[_]headless.sh" "px4_sitl_default/bin/px4" "make px4_sitl" \
-             "gz sim" "gz_bridge" "ros_gz_bridge" "mavros/mavros_node" \
+             "gz sim" "gz_bridge" "transport13/gz-transport-topic" \
+             "ros_gz_bridge" "mavros/mavros_node" \
              "lib/offboard_test_acados/acados_nmpc_node" \
              "lib/offboard_test_acados/mhe_node" \
              "lib/offboard_test_acados/proximity_gripper_node" \

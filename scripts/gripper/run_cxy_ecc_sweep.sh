@@ -23,6 +23,7 @@ echo "# ecc_y  <最后一条 [c_xy_est] 行(含 est 与 truth)>" >> "$SUMMARY"
 
 cleanup() {
   for pat in "px4_sitl_default/bin/px4" "gz sim" "/gz " "ruby" "mavros/mavros_node" \
+             "transport13/gz-transport-topic" \
              "lib/offboard_test_acados/proximity_gripper_node" \
              "lib/offboard_test_acados/acados_nmpc_node" \
              "lib/offboard_test_acados/mhe_node" \

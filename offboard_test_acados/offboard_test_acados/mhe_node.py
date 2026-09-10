@@ -286,10 +286,30 @@ class MHENode(Node):
         # 既有实验的输入,属于重大静默行为改变。本仓惯例:没有 n>=8 的实测
         # 不改默认值(2026-08-25 dJ 先验去除刚栽在这条上)。先当显式 opt-in,
         # 用来验 2026-08-24 那条"准但混叠"假说;验过再谈默认。
-        self.declare_parameter('motor_window_avg', True)
+        # 【2026-09-10 翻回 False】上面这段注释("默认关"、"没有 n>=8 的实测不改
+        # 默认")说的才是本仓的规矩,但代码在 2026-08-25 前后被改成了 True 而注释
+        # 没同步 —— 那次改动没有实测背书。09-05 的 n=8 配对把这一档判掉了
+        # (见下面 mhe_tau_source 处),现在把这一对默认一起翻回已验证的组合。
+        self.declare_parameter('motor_window_avg', False)
         self.motor_window_avg = bool(
             self.get_parameter('motor_window_avg').value)
-        self.declare_parameter('mhe_tau_source', 'phys_full')
+        # 【2026-09-10 翻回 'command'】上面"⚠️ 默认恒为 'command'"那段是原始规矩,
+        # 代码却在 2026-08-25 前后被改成 'phys_full'(注释没同步,也没有实测背书)。
+        # 2026-09-05 的 n=8 配对(run_tau_source_ab.sh,4m/s 主线档)判定留在 command:
+        #   · phys_full+avg 臂 **1/8 轮在 drop 之前发散**(peak 40.6m、attach 后 4.3s
+        #     起 solve failed、推力塌到下界 0.50N),command 臂 0/8、同底座历史再 0/12;
+        #     即 2026-08-24 那个失效模式的复现 —— 配 motor_window_avg=1 也没消掉,
+        #     所以上面那条"准但混叠"假说**不足以**为 phys_full 翻案。
+        #   · 质量精度**未检出差异**(带载稳态偏差配对差 +0.21pp,95% CI [−0.05,+0.47],
+        #     5/7 同向 p=.45;跑前功效可检出 0.23pp)—— 不能反过来说两者等价。
+        #   · phys_full 唯一显著的好处是 MHE 求解 9.09→7.41ms(−17.5%,7/7 同向
+        #     p=.0067),但 10Hz MHE 预算 100ms,占比 9.1%→7.4%,没有实际意义。
+        #   判负的力量来自预注册的一票否决 + 08-24 先验 + viz 历史旁证,**不是**本批
+        #   的统计功效(单看计数 1/8 vs 0/8 Fisher p=1.0)。记忆 tau-source-viz-headless-ab。
+        # ⚠️ 'phys'/'phys_full' 两档保留为显式 opt-in(既有实验靠它复现),只是不再是默认。
+        # ⚠️ 连带影响:src/scripts/masschanger/ 的三个脚本不传本参数,会跟着默认走 ——
+        #    它们是 07 月阶段 A 的设施,当时默认就是 'command',所以这次是**恢复**其历史口径。
+        self.declare_parameter('mhe_tau_source', 'command')
         self.tau_source = str(
             self.get_parameter('mhe_tau_source').value).lower()
         if self.tau_source not in ('command', 'phys', 'phys_full'):
@@ -827,6 +847,17 @@ class MHENode(Node):
             self.get_logger().info(
                 f'[moment-ref] 物理上限由平台包线派生: {_derived:.4f} kg·m '
                 f'= {_m_env:.2f}kg x {_r_env:.2f}m')
+        # 越界剔除开关(2026-09-10)。默认开 = 不再把物理不可能的 s 喂给 NMPC。
+        # 置 false 退回旧行为,仅用于复现 2026-09-10 之前的批次。
+        self.declare_parameter('c_xy_clamp_enable', True)
+        self.c_xy_clamp_enable = bool(
+            self.get_parameter('c_xy_clamp_enable').value)
+        self._c_xy_reject = 0     # 因越界被剔除的帧数
+        self._c_xy_total = 0      # 走过 c_xy 一阶矩路径的总帧数
+        if not self.c_xy_clamp_enable:
+            self.get_logger().warn(
+                '⚠️ c_xy_clamp_enable=false:|s|>moment_abs_max 的帧会原样进 '
+                'NMPC 的 c_xy —— 这是 2026-09-10 之前的旧行为,仅供复现历史批次。')
         self.moment_ref_window = max(
             3, int(self.get_parameter('moment_ref_window').value))
         self.moment_ref_omega_max = float(
@@ -2276,8 +2307,50 @@ class MHENode(Node):
         # 放在最前:这条路不依赖 tau_phys/稳态,s 本身就是窗口解算出来的。
         if self.c_xy_from_moment and mhe_p.ns:
             m_t = max(float(self.m_est), mhe_p.m_min)
-            self.c_xy_est = np.asarray(self.s_est, dtype=float) / m_t
-            self._c_xy_inited = True
+            # ★ 2026-09-10:同一个 s_est,两条消费路径待遇必须一致。
+            # 释放判据(_check_s_collapse)明确剔除 |s|>moment_abs_max 的帧,理由写着
+            # "物理不可能值、动态失真,不参与 moment 投票",figure-8 下实测 7.6%~18.3%
+            # 的帧越界。而这条路**原本零门控**:同样那批帧,除以 m_t 之后原样发给
+            # NMPC 当 model.p 的 c_xy —— 于是 1/6 左右的帧在给控制器编造物理上不可能
+            # 的偏心量,生成假的 τ=c×T 补偿力矩。而 roll/pitch 力矩本来就有 21%/47%
+            # 的帧打在约束上(见 nmpc 的 [flight-diag] u_sat),没有余量消化这种噪声。
+            # (讽刺的是被它取代的 tau_phys 路径反而有稳态门控+EMA,见下面 else 分支。)
+            #
+            # 处理:越界帧**保持上一拍**并照常 publish —— 与释放判据"不投票"同语义,
+            # 且维持话题速率不变(下游不会因为掉帧触发任何超时/freshness 逻辑)。
+            # 上限用 moment_abs_max(=payload_mass_envelope × payload_rxy_envelope,
+            # 平台包线派生),是机架规格不是任务信息,不泄露载荷真值。
+            s_vec = np.asarray(self.s_est, dtype=float)
+            s_norm = float(np.linalg.norm(s_vec))
+            if self.c_xy_clamp_enable and s_norm > self.moment_abs_max:
+                self._c_xy_reject += 1
+                if not self._c_xy_inited:
+                    # 还没有任何合法值可保持 —— 不发,等第一个物理可能的帧。
+                    if self._c_xy_reject % 20 == 1:
+                        self.get_logger().warn(
+                            f'[c_xy-clamp] |s|={s_norm:.5f} > 上限 '
+                            f'{self.moment_abs_max:.4f} 且尚无合法初值 — 暂不发布 '
+                            f'(累计剔除 {self._c_xy_reject} 帧)')
+                    return
+                if self._c_xy_reject % 20 == 1:
+                    self.get_logger().warn(
+                        f'[c_xy-clamp] |s|={s_norm:.5f} > 上限 '
+                        f'{self.moment_abs_max:.4f} — 动态失真,保持上一拍 '
+                        f'c_xy=[{self.c_xy_est[0]*100:+.2f},'
+                        f'{self.c_xy_est[1]*100:+.2f}]cm '
+                        f'(累计剔除 {self._c_xy_reject}/{self._c_xy_total} 帧)')
+            else:
+                self.c_xy_est = s_vec / m_t
+                self._c_xy_inited = True
+            self._c_xy_total += 1
+            # 低频汇总:剔除率为 0 的轮次也要留痕,否则 grep 不到就分不清
+            # "这轮很干净"和"这轮根本没跑到这条路"。300 帧 @10Hz = 每 30s 一行。
+            if self._c_xy_total % 300 == 0:
+                self.get_logger().info(
+                    f'[c_xy-clamp] 越界剔除 {self._c_xy_reject}/{self._c_xy_total} '
+                    f'({100.0 * self._c_xy_reject / self._c_xy_total:.1f}%) '
+                    f'上限 {self.moment_abs_max:.4f} kg·m '
+                    f'clamp={int(self.c_xy_clamp_enable)}')
             self.c_xy_est_pub.publish(
                 Float64MultiArray(data=[float(self.c_xy_est[0]),
                                         float(self.c_xy_est[1])]))

@@ -50,9 +50,31 @@ def main():
             ecc = math.hypot(float(m.group(1)), float(m.group(2)))
         if 'DYNAMIC: switch to figure8' in line and t_dyn is None:
             t_dyn = _stamp(line)
-        if ('DROP: released gripper' in line or 'PAYLOAD LOST' in line) \
-                and t_drop is None:
+        # ⚠️ 2026-09-05 修:连续主线(continuous_payload_estimates)下 NMPC 打的是
+        #    "DROP command issued"(物理释放指令)+"DROP complete"(确认),legacy
+        #    事件档才打 "DROP: released gripper"。只认旧串会把**成功的轮次**
+        #    判成 NO_DROP,并让稳态窗口拿不到 → m_err 全 nan(实测 20260905_204345)。
+        #    锚点取**指令时刻**而非 complete:那 3s 确认期载荷已经脱手,
+        #    算进"带载稳态"会污染。legacy 日志没有新串,行为不变。
+        if ('DROP: released gripper' in line or 'DROP command issued' in line
+                or 'PAYLOAD LOST' in line) and t_drop is None:
             t_drop = _stamp(line)
+
+    # attach 偏心:主线档(无 attach 通知订阅)的 NMPC 日志不再打 "attach offset
+    # received",回退到同 stamp 的 proximity 节点日志(它打 "offset (box - drone)")。
+    # 这一列是混杂变量的记录,必须拿得到,否则事后查不了两臂平不平衡
+    # (见记忆 grip-attach-eccentricity-roll-saturation)。
+    if math.isnan(ecc):
+        prox = nmpc_log.replace('grip_nmpc_', 'grip_proximity_')
+        try:
+            for line in open(prox, errors='ignore'):
+                m = re.search(r'offset \(box - drone\) = '
+                              r'\[([-+0-9.]+), ([-+0-9.]+), ([-+0-9.]+)\]', line)
+                if m:
+                    ecc = math.hypot(float(m.group(1)), float(m.group(2)))
+                    break
+        except OSError:
+            pass
 
     # 结局判定优先于一切:先确认飞机还在天上,别的列才有意义。
     if nfail > 100 or peak > 5.0:

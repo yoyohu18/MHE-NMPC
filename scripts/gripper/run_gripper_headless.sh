@@ -35,8 +35,15 @@
 #                        w=0.424→3m/s(10.4° / ramp 14.0°) RAMP=-1 (6.25s)
 #                        w=0.566→4m/s(18.1° / ramp 23.9°) RAMP=-1 (4.68s)
 #                        w=0.707→5m/s(27.0° / ramp 34.6°) RAMP=-1 (4.00s)
-#                      这些档位的推力/力矩需求都远在约束内(5m/s 峰值需 26N,
-#                      Tmax=40.5N;yaw 力矩需 ~0.06Nm,tau_psi=0.2)。
+#                      ⚠️ 2026-09-10 更正:原注释写"这些档位的推力/力矩需求都远
+#                      在约束内(5m/s 峰值需 26N,Tmax=40.5N)"——那个 40.5N(=2·m·g)
+#                      是**按飞机重量拍的、飞机根本发不出来的数**。执行器真实上限
+#                      是 31.35N(95% 油门,见 acados_params 的执行器包线),Tmax 已
+#                      改成它。5m/s 档峰值 26N 对应的真实余量因此是 5.4N 而不是
+#                      14.5N,并不"远"在约束内。力矩那半句本来就说反了:实测
+#                      [flight-diag] 里 roll/pitch 有 21%/47% 的帧打在 tau_max 上、
+#                      yaw 有 20% 打在 tau_psi 上,力矩才是真瓶颈(与 08-18 的结论
+#                      一致)。跨档提速前请先看那三列 u_sat,别再引用这两个旧数字。
 #   GRIP_DYN_RAMP      振幅渐增时长。0=写死的 4.0s;-1=auto_ramp_time(w) 自适应;
 #                      >0=显式秒数。**每档取值见上表**,别一律用 -1:
 #                      auto 是个纯相对判据(把 ramp 额外速度压到轨迹特征速度的
@@ -128,6 +135,10 @@ EVAL_TRUE_PAYLOAD_D=$(_f2d "${EVAL_TRUE_PAYLOAD_MASS:-$GRIP_PAYLOAD_KG}")
 L1_A_GAIN_D=$(_f2d "${L1_A_GAIN:-10.0}")
 L1_OMEGA_C_D=$(_f2d "${L1_OMEGA_C:-0.5}")
 GRIP_DROP_AFTER_D=$(_f2d "${GRIP_DROP_AFTER:-0.0}")
+# DROP_UNRES_TIMEOUT:卸载未证实(UNRESOLVED)兜底的超时 [s],默认 12.0 与节点一致。
+# 暴露出来是为了**构造回归轮**:调到 2s 可让每一轮都走 UNRESOLVED 路径,把
+# 自然发生率 ~50% 提到接近 100%,n=6 就有决定性功效(见 run_drop_unresolved_ab.sh)。
+DROP_UNRES_TIMEOUT_D=$(_f2d "${DROP_UNRES_TIMEOUT:-12.0}")
 ATTACH_WINDOW_SEC_D=$(_f2d "${ATTACH_WINDOW_SEC:-40.0}")
 MHE_CONFIRM_THRESH_D=$(_f2d "${MHE_CONFIRM_THRESH:-1.5}")
 # 残差自触发的确认阈值。confirm_thresh_alpha>=0 时生效的是 α·g·包线(不含任务
@@ -231,6 +242,7 @@ find "$RUNDIR" -maxdepth 1 -type f \( -name 'grip_px4_*.log' -o -name 'px4_*.log
 
 echo "cleaning up leftover sim processes..."
 for pat in "px4_sitl_default/bin/px4" "gz sim" "/gz " "ruby" "mavros/mavros_node" \
+           "transport13/gz-transport-topic" \
            "lib/offboard_test_acados/proximity_gripper_node" \
            "lib/offboard_test_acados/acados_nmpc_node" \
            "lib/offboard_test_acados/mhe_node" \
@@ -342,6 +354,7 @@ nohup ros2 run offboard_test_acados acados_nmpc_node --ros-args \
     -p l1_a_gain:=$L1_A_GAIN_D \
     -p l1_omega_c:=$L1_OMEGA_C_D \
     -p grip_drop_after_sec:=$GRIP_DROP_AFTER_D \
+    -p drop_unresolved_timeout_sec:=$DROP_UNRES_TIMEOUT_D \
     -p grip_dynamic_after_lift:=${GRIP_DYNAMIC:-false} \
     -p grip_dyn_r:=$GRIP_DYN_R_D -p grip_dyn_w:=$GRIP_DYN_W_D \
     -p grip_dyn_ramp:=$GRIP_DYN_RAMP_D \

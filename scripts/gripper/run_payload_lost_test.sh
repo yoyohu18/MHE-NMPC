@@ -37,6 +37,7 @@ if ! flock -n 9; then echo "[pl] 已有实例在跑,退出。"; exit 1; fi
 
 cleanup() {
   for pat in "run_gripper[_]headless.sh" "px4_sitl_default/bin/px4" "gz sim" "/gz " \
+             "transport13/gz-transport-topic" \
              "mavros/mavros_node" "lib/offboard_test_acados/proximity_gripper_node" \
              "lib/offboard_test_acados/acados_nmpc_node" \
              "lib/offboard_test_acados/mhe_node" \

@@ -94,6 +94,7 @@ echo "# 措辞纪律: CI含0 只能写\"3.7%分辨率下未检出差异\",不能
 
 cleanup() {
   for pat in "px4_sitl_default/bin/px4" "make px4_sitl" "gz sim" "ruby" \
+             "transport13/gz-transport-topic" \
              "mavros/mavros_node" "mavros px4.launch" "ros_gz_bridge" "parameter_bridge" \
              "offboard_test_acados" "robot_state_publisher" "rviz2" \
              "gcs_heartbeat.py" "topic pub -r 2 /gripper/enable" "ninja gz_x500"; do

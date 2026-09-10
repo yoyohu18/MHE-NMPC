@@ -32,6 +32,7 @@ cleanup() {
   pkill -9 -f 'make px4_sitl'
   pkill -9 -f 'gz_bridge'
   pkill -9 -f 'gz sim'
+  pkill -9 -f 'transport13/gz-transport-topic'
   pkill -9 -f 'offboard_test_acados/acados_nmpc_node'
   pkill -9 -f 'offboard_test_acados/mhe_node'
   pkill -9 -f 'offboard_test_acados/proximity_gripper_node'

@@ -11,6 +11,56 @@ from offboard_test.nmpc_node import Params as _BaseParams
 
 _base = _BaseParams()
 
+# ===== 执行器真实推力包线(2026-09-10)=====
+# 原来 Tmin/Tmax 直接取 _base 的 0.5N / 2·m·g=40.50N,那是**按飞机重量拍的**,
+# 跟执行器实际能发出多少推力没有关系。真实链路(与 acados_nmpc_node.publish_attitude
+# 里那条物理映射同源,见该处注释)是:
+#   norm(归一化油门,发给 PX4 的 AttitudeTarget.thrust)
+#     → ω = OMEGA_MIN + OMEGA_SPAN·norm      (GZMixingInterfaceESC, SIM_GZ_EC_MIN/MAX)
+#     → T = THRUST_K·ω²                       (gz MulticopterMotorModel, 4 电机合计)
+# 而 publish_attitude 又把 norm 夹在 [0.05, 0.95](上界留 5% 给姿态环做差动,
+# 否则四个电机全打满时力矩权限归零 —— 这个 0.95 是对的,不该动)。于是:
+#
+#   NMPC 以为的上限   2·m_B·g   = 40.50 N
+#   实际能发的上限   norm=0.95 = 31.35 N      ← 差 29%
+#   硬件极限         norm=1.00 = 34.19 N
+#   NMPC 以为的下限   _base.Tmin = 0.50 N
+#   实际能发的下限   norm=0.05 =  1.27 N      ← 差 2.5×
+#
+# 后果不是"约束保守了一点",是**规划与执行脱钩**:带 0.3kg 载荷时悬停 23.2N,
+# NMPC 以为还有 17.3N 余量(0.75g),真实只有 8.2N(0.35g)—— 它规划的恢复加速度
+# 可以是实际的 2.1 倍。规划跟不上 → 误差扩大 → 下一拍要更多推力 → 仍被 clip,
+# 正是"闭环失稳而非求解器发散"所需的正反馈条件。下界同理:那些"推力塌到下界
+# 0.50N"的发散案例里,0.50N 这个数飞机根本发不出来。
+#
+# clip 还是**静默**的:飞行诊断的 u_frac[T] 拿 40.50 当分母,真实饱和点落在
+# u_frac=0.774,所以日志里 u_sat[T] 恒为 0.0% —— 推力从来没"显示"饱和过。
+# 对齐之后 u_frac[T]=1.0 才真正等于"推力打满",那条诊断随之变得可信。
+#
+# ⚠️ 改这两个数会让 acados 重新生成+编译 solver(ubu/lbu 变了,
+#    is_code_reuse_possible 会判定不可复用),首次启动多花 10-30 秒,自动发生。
+# ⚠️ 这是**行为改变**:历史批次是在 40.50/0.50 的箱子里跑出来的。要逐位复现
+#    历史结果,置 NMPC_THRUST_BOX_LEGACY=1 退回旧值。
+THRUST_K     = 4.0 * 8.54858e-06  # T=THRUST_K·ω² [N/(rad/s)²],4 电机合计
+OMEGA_MIN    = 150.0              # SIM_GZ_EC_MIN
+OMEGA_SPAN   = 850.0              # SIM_GZ_EC_MAX(1000) − SIM_GZ_EC_MIN(150)
+THROTTLE_MIN = 0.05               # publish_attitude 的 clip 下界
+THROTTLE_MAX = 0.95               # publish_attitude 的 clip 上界(留给姿态环差动)
+
+
+def thrust_at_throttle(norm: float) -> float:
+    """归一化油门 → 总推力(N)。publish_attitude 的正向映射,单一真相源。"""
+    w = OMEGA_MIN + OMEGA_SPAN * float(norm)
+    return THRUST_K * w * w
+
+
+T_ACT_MIN = thrust_at_throttle(THROTTLE_MIN)   # 1.27 N
+T_ACT_MAX = thrust_at_throttle(THROTTLE_MAX)   # 31.35 N
+
+# 回退开关:1 = 用回 _base 的 0.5/2mg(复现 2026-09-10 之前的批次)
+THRUST_BOX_LEGACY = os.environ.get(
+    'NMPC_THRUST_BOX_LEGACY', '0') not in ('0', '', 'false', 'False')
+
 
 class AcadosParams:
     # --- 物理常数,跟 offboard_test 共享(数值定义在 offboard_test/nmpc_node.py
@@ -30,10 +80,14 @@ class AcadosParams:
                       # Moment of inertia about body z-axis (yaw, kg*m^2); larger than Jxx/Jyy
     kd  = _base.kd   # 线性空气阻力系数,vel_dot 里的 -kd*vel 项,模拟桨叶/机身阻力
                       # Linear drag coefficient, the -kd*vel term in vel_dot (models prop/airframe drag)
-    Tmin    = _base.Tmin    # 总推力下限(N),四个电机合力最小值,留给 acados 的输入约束 lbu[0]
-                              # Min total thrust (N), feeds acados input constraint lbu[0]
-    Tmax    = _base.Tmax    # 总推力上限(N) = 2*m*g,即最大能输出悬停推力的 2 倍(留够机动余量)
-                              # Max total thrust (N) = 2*m*g, i.e. 2x hover thrust for maneuvering margin
+    # 推力箱式约束 = 执行器真实包线(见文件头 T_ACT_MIN/MAX 那段)。
+    # legacy 档退回 _base 的 0.5N / 2·m·g,仅用于复现历史批次。
+    Tmin    = _base.Tmin if THRUST_BOX_LEGACY else T_ACT_MIN
+                            # 总推力下限(N),acados 输入约束 lbu[0]。
+                            # Min total thrust (N) = actuator floor at 5% throttle
+    Tmax    = _base.Tmax if THRUST_BOX_LEGACY else T_ACT_MAX
+                            # 总推力上限(N),acados 输入约束 ubu[0]。
+                            # Max total thrust (N) = actuator ceiling at 95% throttle
     tau_max = _base.tau_max # roll/pitch 力矩约束上限(Nm),输入约束 ubu[1],ubu[2]
                               # Roll/pitch torque limit (Nm), input constraint ubu[1], ubu[2]
     tau_psi = _base.tau_psi # yaw 力矩约束上限(Nm),比 tau_max 小很多(0.2 vs 0.5)——
