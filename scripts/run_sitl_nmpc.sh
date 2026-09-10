@@ -18,6 +18,11 @@ set -e
 WS="/home/clear/ros2_ws_HJH"
 PX4_DIR="/home/clear/PX4-Autopilot"
 RVIZ_CONFIG="$WS/src/offboard_test/config/nmpc_view.rviz"
+LOGDIR="$WS/nmpc_test_results"
+TS=$(date +%Y%m%d_%H%M%S)
+mkdir -p "$LOGDIR"
+bash "$WS/src/scripts/record_experiment_provenance.sh" \
+  "$LOGDIR/provenance_$TS" "nmpc-sitl:$TS"
 
 # Rebuild so the latest nmpc_node.py changes are installed
 source /opt/ros/jazzy/setup.bash

@@ -33,6 +33,8 @@ PX4_WORLDS="$PX4_DIR/Tools/simulation/gz/worlds"
 LOGDIR="$WS/nmpc_test_results"
 TS=$(date +%Y%m%d_%H%M%S)
 mkdir -p "$LOGDIR"
+bash "$WS/src/scripts/record_experiment_provenance.sh" \
+  "$LOGDIR/provenance_$TS" "gripper-mechanism:$TS"
 
 # 启动前彻底清掉上一次的残留 —— 否则 px4-rc.gzsim 会检测到"已有 world 在跑"
 # 直接接上旧 gz 服务器,新 PX4 的 EKF 与实际 gz 无人机脱节;或残留的旧飞行/

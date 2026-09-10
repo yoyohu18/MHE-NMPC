@@ -232,6 +232,8 @@ PX4_WORLDS="$PX4_DIR/Tools/simulation/gz/worlds"
 RUNDIR="$WS/nmpc_test_results"
 STAMP=$(date +%Y%m%d_%H%M%S)
 mkdir -p "$RUNDIR"
+bash "$WS/src/scripts/record_experiment_provenance.sh" \
+  "$RUNDIR/provenance_$STAMP" "gripper-headless:$STAMP"
 
 # 磁盘护栏(2026-07-08 加):PX4/gz 的 stdout 是无分析价值的 verbose 刷屏,
 # 单次长跑(如 CEM 训练)能把 grip_px4_*.log 涨到数十 GB,344 个文件曾累计
@@ -506,6 +508,7 @@ nohup ros2 run offboard_test_acados mhe_node --ros-args \
     > "$MHE_LOG" 2>&1 &
 
 echo "gripper headless stack up: nmpc=$NODE_LOG mhe=$MHE_LOG"
+echo "  provenance=$RUNDIR/provenance_$STAMP"
 echo "  payload=${GRIP_PAYLOAD_KG}kg ecc_y=${GRIP_ECC_Y}m r_xy=$R_XY"
 echo "  event_trigger=${MHE_EVENT_TRIGGER:-true} signal=${MHE_SIGNAL_MODE:-residual} drop_publish=${DROP_PUBLISH_MASS_EVENT:-false}"
 echo "  geom_release: NMPC=${NMPC_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-event}} MHE=${MHE_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-self}} cxy_release_mp=${MHE_CXY_MASS_RELEASE_MP:-0.03}"

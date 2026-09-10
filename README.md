@@ -84,6 +84,19 @@ src/
 
 > 各脚本头部有详细的设计说明与注意事项(如 Gazebo headless、负载质量阶跃的实现取舍等),运行前建议先阅读。
 
+### 实验版本溯源
+
+所有当前实验入口都会在 `nmpc_test_results/provenance_<时间戳>/` 调用统一的
+`scripts/record_experiment_provenance.sh`。记录包含工作区、PX4 和 acados 三个
+运行时代码仓的完整 HEAD、分支、commit 时间、dirty 清单、tracked binary patch、
+未跟踪文件清单/哈希/归档、submodule 状态，以及经过白名单过滤的实验环境变量。
+
+每个目录的 `VERDICT.txt` 是引用口径的唯一判据：只有三个代码仓都存在且 clean 时，
+`exact_commit_claim=ALLOWED`；任何仓库缺失或 dirty 都是 `PROHIBITED`。后一种情况可用
+HEAD + patch + untracked archive 重建当时的运行时源码，但论文仍不得声称实验“由某个
+exact commit 运行”。`paper/data/**` 是不参与仿真执行的冻结论文数据，为避免每轮重复
+约 48 MiB，明确排除在未跟踪源码归档之外。
+
 ---
 
 ## 依赖

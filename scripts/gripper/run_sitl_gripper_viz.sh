@@ -241,6 +241,8 @@ LOGDIR="$WS/nmpc_test_results"
 TS=$(date +%Y%m%d_%H%M%S)
 ACADOS_ENV="export ACADOS_SOURCE_DIR=/home/clear/acados && export LD_LIBRARY_PATH=/home/clear/acados/lib:\$LD_LIBRARY_PATH"
 mkdir -p "$LOGDIR"
+bash "$WS/src/scripts/record_experiment_provenance.sh" \
+  "$LOGDIR/provenance_$TS" "gripper-viz:$TS"
 
 echo "cleaning up leftover sim processes..."
 for pat in "px4_sitl_default/bin/px4" "gz sim" "/gz " "ruby" "mavros/mavros_node" \

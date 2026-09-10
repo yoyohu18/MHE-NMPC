@@ -86,12 +86,12 @@ timing/event/learned/L1/wind 与 Figs.3--5 的证据，因此应保留并诚实�
 |---|---|---|---|---|
 | Fig.1 architecture | `paper/figs/fig_gen.py` | S; 09-10 审计时 `src`=`a38ceed` | 当前 deployed 架构，非数据图 | 一致 |
 | Fig.2 window deweight | `paper/figs/fig_gen.py` | S; 机制最早见 `e5c0c32` | 示意图，柱高 0.18 不是实验权重 | 一致；不得把示意值当数据 |
-| Table timing | `grip_nmpc_2026073*.log` 冻结集（141 文件/1009 solve 样本）；`grip_mhe_20260803_144036.log` | R; NMPC 设施首收口 `a7b87f1`，MHE timing 首收口 `196cd9a` | **legacy mass-only MHE**，不是正文的 16-state moment MHE；NMPC 13/4、20 Hz 一致，MHE 当时为 14-state mass-only | **已修正**表注、state dim 和正文 headroom 声明；当前 MHE 仍待重测 |
+| Table timing | `grip_nmpc_2026073*.log` 冻结集（141 文件/1009 solve 样本）；`grip_mhe_20260803_144036.log` | R; NMPC 设施首收口 `a7b87f1`，MHE timing 首收口 `196cd9a` | **legacy mass-only MHE**，不是正文的 16-state moment MHE；NMPC 13/4、20 Hz 一致，MHE 当时为 14-state mass-only | **已修正**表注、state dim 和正文 headroom 声明;**16-state MHE 已于 09-11 实测并写入正文**(`grip_mhe_2026091*.log`,n=3740,弃每轮前 20 帧:中位 9.2ms / p90 24.6 / p99 59.2 / max 72.8,周期 100ms)⇒ 比 14-state 慢约 7×、尾部占周期 60%,**正文明确不作 onboard-headroom 声称** |
 | Table event trigger | `nosignal_ablation_20260713_182612.txt` + manifest 所列 36 对 MHE/NMPC 日志 | R; 执行设施首收口 `e5c0c32`，控制指标聚合为 `10efa34` | wrench；mass-only；M0 1.5 N；fixed=不降权，signal=外部事件武装，nosignal=残差自触发 | 一致；与最终 eventless interface 无关 |
 | Fig.3 mass timeline | `mhe_node_20260703_162003.log` (fixed) + `mhe_node_20260703_031851.log` (event) | R; 当日最近已提交快照 `71810ab`，日志无 HEAD；同日 metadata 记 `git_rev=71810ab dirty=17`，仅为间接旁证（见上文例外小节） | wrench；mass-only；外部事件触发 | **已修正** Simulation Setup 曾误将它列入 DetachableJoint |
 | Table learned schedule | `alpha_only_20260730_214611.txt` 及其 64 轮日志；10 Hz 补充用 `alpha_only_10hz_20260731_150621.txt` | R; 首个包含设施 `a7b87f1` | mass-only；外部 event；`geom_source=online`，但 `geom_prior_mode=truth`；M0/alpha/rhythm/$\theta^*$ 四臂如 manifest | 正文已标注 geometry prior at truth；不代表最终 estimate-only 主线 |
 | Fig.4 $c_{xy}$ sweep | `cxy_ecc_sweep_20260714_143710.txt` | R; estimator=`8fa0fd8`，批次脚本首收口=`7afb97b` | mass-only MHE + **窗外慢滤波的 motor-torque inversion precursor**；非 moment-state MHE；0.08 m 格为旧 `grip_geom_mp_floor=.15` 重跑 | 正文已称 precursor；绘图脚本已改为从该文件解析，不再硬编四个点 |
-| autonomous completion/performance/void tables | **已于 2026-09-11 在最终代码上重跑**:`mainline_ab3_manifest.csv`(W3)+ `mainline_ab3b_manifest.csv`(W4/W5),77 架次 / 29 个有效 B 臂轮次。旧数据 `mainline_ab2_manifest.csv`(09-04, 76 架次)保留备查但**不再是表 II 的来源** | **E**;`git_head=483db88`,运行时写入 `mainline_ab3{,b}_manifest.provenance.txt`(含三个源文件 sha256 与 dirty 清单) | 最终默认档(`ESTIMATE_MOMENT=1`/`frozen`、`external_event=false`、`geom=estimate`、brake-to-hover 已实现) | **表 II 已按双峰改写**:in-maneuver 3.84 s vs via brake-to-hover 16.48 s,完成 29/29。⚠️ 旧表的单峰"中位 2.70 s / max 4.54 s"描述的是**没有 UNRESOLVED→brake-to-hover 路径的旧代码**,已作废 |
+| autonomous completion/performance/void tables | **已于 2026-09-11 在最终代码上重跑**:`mainline_ab3_manifest.csv`(W3)+ `mainline_ab3b_manifest.csv`(W4/W5),77 架次 / **21 个完整配对**(B 臂有效轮次 29,两者口径不同)。旧数据 `mainline_ab2_manifest.csv`(09-04, 76 架次)保留备查但**不再是表 II 的来源** | **E**;`git_head=483db88`,运行时写入 `mainline_ab3{,b}_manifest.provenance.txt`(含三个源文件 sha256 与 dirty 清单) | 最终默认档(`ESTIMATE_MOMENT=1`/`frozen`、`external_event=false`、`geom=estimate`、brake-to-hover 已实现) | **表 II 已按双峰改写**:in-maneuver 3.76 s vs via brake-to-hover 16.46 s,完成 21/21。⚠️ 旧表的单峰"中位 2.70 s / max 4.54 s"描述的是**没有 UNRESOLVED→brake-to-hover 路径的旧代码**,已作废 |
 | Table release replay | **已冻结**：`paper/manifests/release_replay_20260905.csv`（73 行有序清单 + 每文件 SHA-256，覆盖 `20260904_032225`–`20260905_000352`） | E（判决代码）=`078b054`；被回放日志的生成代码异质且多数为 R | detector 是 078 口径；输入队列混合历史配置 | **09-10 已恢复并核验**（七项指纹逐位一致，见 `manifests/release_replay_20260905.md`）；顺带修掉表内 48/59→53/59 的串阈值错误 |
 | Table fastA smoke | `20260905_{150124,...,152924}` 九轮 MHE/NMPC 日志 | R; 运行时 HEAD 候选 `d73fe4a`，日志未写 HEAD | moment=1/frozen；external=false；geom=estimate；ratchet=false；floor=.05；tau=command；motor avg=false | 与表述一致；fastA 已否决，不是当前 detector |
 | corrected 12-flight smoke (text) | `20260905_{160013,...,164135}` 十二轮 MHE/NMPC 日志 | R; 最近代码提交 `c43781d` | 同上；fastA 删除 + health gate；尚未加 frozen moment reference | 正文已限定为 fail-safe semantics，不冒充最终 detector 鲁棒验收 |
@@ -134,6 +134,10 @@ motor_avg=false`；B 臂 `geom=estimate`，A 臂是明示的 legacy event/online
 2. **大多数 07--08 月批次无 E 级 commit**：可用首个包含提交审计算法，但不可
    声称当时工作区 clean。无法追溯时应标 `R`，不得猜成 exact commit。少数写了
    `git_rev` 的批次同样是 `R`（全部 dirty，无 diff 快照），理由见上文例外小节。
+   2026-09-11 起，当前四个底层实验入口统一调用 `scripts/record_experiment_provenance.sh`：
+   每轮冻结 workspace/PX4/acados 的 HEAD、dirty 清单、tracked binary patch、未跟踪
+   文件及 submodule 状态，并写出 `VERDICT.txt`。只有三个仓库均 clean 时才允许
+   exact-commit 表述；dirty 轮次即使已有完整源码快照，也必须明确标为 `PROHIBITED`。
 3. **正文 §"post-fix four flights" 尚无审计行**：main.tex 报告 `ddfe9d2`（09-05
    17:38）之后的头四轮飞行（越包线 49/268 帧, 18.3%），但本表无对应条目。时间上
    紧邻的候选是 `grip_{mhe,nmpc}_20260905_{175935,180315,180710,181106}`（此后至
@@ -326,8 +330,10 @@ grep -oP "solve=\K[0-9.]+" ../nmpc_test_results/grip_mhe_<stamp>.log    # MHE
    论文正文也已就此显式声明幸存者偏差。
 
 > ⚠️ **2026-09-11 更新**:以下 09-04 的数字**已被最终代码上的重跑取代**(见审计矩阵该行)。
-> 新结果:**29/29 完成**,CP 双侧 95% 区间 **[88.1%, 100%]**;延迟**双峰**——
-> in-maneuver **3.84 s** [2.86, 6.96](38%)、via brake-to-hover **16.48 s** [16.36, 16.60](62%),max 16.70 s。
+> 新结果:**21/21 完成**,CP 双侧 95% 区间 **[83.9%, 100%]**;延迟**双峰**——
+> in-maneuver **3.76 s** [2.86, 7.20](38%)、via brake-to-hover **16.46 s** [16.36, 16.60](62%),max 16.60 s。
+> ⚠️ 口径:表题为 "valid **pairs** only",故 n=21 是**完整配对数**(A/B 两臂都有效),
+> 不是 B 臂有效轮次数(29)。两者不可混用 —— 29 那个数一度被误填进表,已更正。
 > **不得把两支合并成单一中位数**。以下保留为历史记录。
 
 **统计**:22/22 的 Clopper--Pearson 双侧 95% 区间 = [84.6%, 100%],论文按此表述,
