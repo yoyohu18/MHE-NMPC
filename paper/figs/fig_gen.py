@@ -3,7 +3,8 @@
 配色=dataviz 参考调色板已验证前三槽(blue/orange/aqua,固定顺序,CVD ΔE9.1≥8/常视19.6≥15)。
 数据源:图3=冻结事件时间线解析器(031851事件 vs 162003固定);图4=冻结偏心扫格;
 图5=grip B.5 全流程 attach-window 逐帧。图1/2=示意图(无数据)。
-IEEE 风格:serif、8pt、细线、recessive grid、≥2 series 必有图例。"""
+IEEE 风格:Times-compatible serif、最终版面不小于约 7pt、细线、recessive grid、
+≥2 series 必有图例；PDF 使用可搜索/可复制的 TrueType(Type 42)字体，禁用 Type 3。"""
 import os
 import re
 import sys
@@ -27,13 +28,18 @@ BLUE, ORANGE, AQUA = '#2a78d6', '#eb6834', '#1baf7a'
 INK, INK2, GRID, SURF = '#0b0b0b', '#52514e', '#e6e6e3', '#fcfcfb'
 
 plt.rcParams.update({
-    'font.family': 'serif', 'font.serif': ['DejaVu Serif'],
-    'font.size': 8, 'axes.titlesize': 8, 'axes.labelsize': 8,
-    'xtick.labelsize': 7, 'ytick.labelsize': 7, 'legend.fontsize': 7,
-    'axes.edgecolor': INK2, 'axes.linewidth': 0.6,
+    # Nimbus Roman 与正文使用的 Times 风格一致；后备字体保证精简环境仍可复现。
+    'font.family': 'serif',
+    'font.serif': ['Nimbus Roman', 'Tinos', 'Times New Roman', 'DejaVu Serif'],
+    'mathtext.fontset': 'stix',
+    'font.size': 8.5, 'axes.titlesize': 8.5, 'axes.labelsize': 8.5,
+    'xtick.labelsize': 7.5, 'ytick.labelsize': 7.5, 'legend.fontsize': 7.5,
+    'axes.edgecolor': INK2, 'axes.linewidth': 0.7,
     'xtick.color': INK2, 'ytick.color': INK2,
     'text.color': INK, 'axes.labelcolor': INK,
-    'grid.color': GRID, 'grid.linewidth': 0.5,
+    'grid.color': GRID, 'grid.linewidth': 0.55,
+    'lines.linewidth': 1.25,
+    'pdf.fonttype': 42, 'ps.fonttype': 42,
     'figure.dpi': 150, 'savefig.bbox': 'tight', 'savefig.pad_inches': 0.02,
 })
 COL1, COL2 = 3.45, 7.0   # IEEE 单/双栏宽 [in]
@@ -63,21 +69,21 @@ def fig1():
     def box(x, y, w, h, text, fc, ec):
         ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle='round,pad=0.02,rounding_size=0.12',
                                     fc=fc, ec=ec, lw=1.0, zorder=2))
-        ax.text(x + w / 2, y + h / 2, text, ha='center', va='center', fontsize=7.5, zorder=3)
+        ax.text(x + w / 2, y + h / 2, text, ha='center', va='center', fontsize=8.0, zorder=3)
 
     def arrow(x1, y1, x2, y2, label='', col=INK2, off=0.12):
         ax.add_patch(FancyArrowPatch((x1, y1), (x2, y2), arrowstyle='-|>',
                      mutation_scale=9, lw=1.0, color=col, zorder=1))
         if label:
             ax.text((x1 + x2) / 2, (y1 + y2) / 2 + off, label, ha='center', va='bottom',
-                    fontsize=6.3, color=INK2, style='italic')
+                    fontsize=7.0, color=INK2, style='italic')
 
     # 三层背景带
     for y, lab, c in [(4.2, 'ROS 2 outer loop', '#eef4fb'),
                       (2.3, 'PX4 inner loop', '#fdf1ea'),
                       (0.4, 'Gazebo physics', '#eaf7f1')]:
         ax.add_patch(plt.Rectangle((0.1, y), 9.8, 1.55, fc=c, ec='none', zorder=0))
-        ax.text(-0.05, y + 0.775, lab, fontsize=6.5, color=INK2, style='italic',
+        ax.text(-0.05, y + 0.775, lab, fontsize=7.0, color=INK2, style='italic',
                 va='center', ha='right')
 
     # 频率标注:每个环标出实际运行速率(实测见 Table VI)。审稿人和读者判断实时性
@@ -93,10 +99,10 @@ def fig1():
     arrow(5.0, 2.45, 5.0, 1.65, 'motor cmd', ORANGE)
     arrow(3.7, 0.95, 1.15, 4.35, '', AQUA)   # Gazebo -> MHE, label placed clear below
     # 贴在 Gazebo→MHE 那条反馈箭头左侧(箭头在 y=2.55 处约 x=2.5),右对齐避让
-    ax.text(2.02, 2.55, 'motor speeds\n+ odometry', ha='right', fontsize=6.3, color=AQUA,
+    ax.text(2.02, 2.55, 'motor speeds\n+ odometry', ha='right', fontsize=7.0, color=AQUA,
             style='italic')
     ax.text(9.7, 0.75, 'sensing-minimal:\nonly motor speeds + odometry', ha='right',
-            fontsize=6.2, color=AQUA, style='italic')
+            fontsize=7.0, color=AQUA, style='italic')
     save(fig, 'fig1_architecture.pdf')
 
 
@@ -110,11 +116,11 @@ def fig2():
     ax.bar(stages, w, width=0.8, color=colors, edgecolor=SURF, linewidth=0.5, zorder=2)
     ax.axvline(ev - 0.5, color=INK, lw=1.2, ls='--', zorder=3)
     ax.text(ev - 0.5, 1.12, 'payload event\n(T$_{phys}$ > $\\alpha g m$)', ha='center',
-            fontsize=6.5, color=INK)
-    ax.text(ev / 2 - 0.5, 0.30, 'pre-event\nstages\ndeweighted', ha='center', fontsize=6.3,
+            fontsize=7.0, color=INK)
+    ax.text(ev / 2 - 0.5, 0.30, 'pre-event\nstages\ndeweighted', ha='center', fontsize=7.0,
             color=ORANGE)
     ax.text((ev + N) / 2 - 0.5, 0.5, 'post-event\nnominal', ha='center', va='center',
-            fontsize=6.3, color='white')
+            fontsize=7.0, color='white')
     ax.set_xlabel('MHE window stage (oldest $\\rightarrow$ newest)')
     ax.set_ylabel('measurement weight')
     ax.set_ylim(0, 1.35); ax.set_xlim(-0.7, N - 0.3)
@@ -133,12 +139,12 @@ def fig3():
     ax.axhspan(P.M_TRUE - P.BAND, P.M_TRUE + P.BAND, color=AQUA, alpha=0.15, zorder=0)
     ax.axhline(P.M_TRUE, color=AQUA, lw=0.8, ls=':', zorder=1)
     ax.text(ax.get_xlim()[1] if False else 3.2, P.M_TRUE + 0.012, 'truth $\\pm$0.08 kg band',
-            fontsize=6.2, color='#0f7a55', ha='right')
+            fontsize=7.0, color='#0f7a55', ha='right')
     for r, c, lab in [(fixed, ORANGE, 'fixed weights'), (event, BLUE, 'event-triggered')]:
         m = (r['t'] >= -0.5)
         ax.plot(r['t'][m], r['m'][m], color=c, lw=1.4, label=lab, zorder=3)
     ax.axvline(0, color=INK2, lw=0.8, ls='--', zorder=1)
-    ax.text(0.05, 1.30, 't=0: event\nphysically effective', fontsize=6.0, color=INK2)
+    ax.text(0.05, 1.30, 't=0: event\nphysically effective', fontsize=7.0, color=INK2)
     ax.set_xlabel('time relative to physical effectiveness [s]')
     ax.set_ylabel('mass estimate [kg]')
     ax.set_xlim(-0.5, 3.5); ax.set_ylim(1.28, 2.15)
@@ -169,19 +175,19 @@ def fig4():
     fig, ax = plt.subplots(figsize=(COL1, 2.4))
     lim = [-0.019, 0.002]
     ax.plot(lim, lim, color=INK2, lw=0.8, ls='--', zorder=1)
-    ax.text(-0.0035, -0.0060, 'y = x', fontsize=6.3, color=INK2, rotation=38)
+    ax.text(-0.0035, -0.0060, 'y = x', fontsize=7.0, color=INK2, rotation=38)
     ax.scatter(truth, est, s=42, color=BLUE, edgecolor=SURF, lw=0.6, zorder=3)
     # 点标签统一放右下,唯独最密的 0.10m(左下角)放左上避让 y=x 线
     for e, t, s in zip(ecc, truth, est):
         dx, dy = (5, -8) if e != 0.10 else (-24, 6)
         ax.annotate(f'{e:.2f} m', (t, s), textcoords='offset points', xytext=(dx, dy),
-                    fontsize=6.0, color=INK2)
+                    fontsize=7.0, color=INK2)
     ax.set_xlabel('true CoM offset $c_y$ [m]')
     ax.set_ylabel('online estimate $\\hat{c}_y$ [m]')
     ax.set_xlim(lim); ax.set_ylim(lim)
     ax.set_aspect('equal')
     ax.text(0.05, 0.93, 'dominant component tracks truth < 5%', transform=ax.transAxes,
-            fontsize=6.3, color=BLUE, va='top')
+            fontsize=7.0, color=BLUE, va='top')
     _style(ax)
     save(fig, 'fig4_cxy_vs_truth.pdf')
 
@@ -207,15 +213,15 @@ def fig5():
     axs[1].plot(t, me, color=ORANGE, lw=0.9); axs[1].set_ylabel('$\\hat{m}$ [kg]')
     for yv, lab in [(2.364, 'loaded 2.364'), (2.064, 'empty 2.064')]:
         axs[1].axhline(yv, color=AQUA, lw=0.6, ls=':')
-        axs[1].text(2, yv, lab, fontsize=5.6, color='#0f7a55', va='bottom')
+        axs[1].text(2, yv, lab, fontsize=7.0, color='#0f7a55', va='bottom')
     axs[2].plot(t, z, color=AQUA, lw=0.9); axs[2].set_ylabel('height z [m]')
     axs[2].set_xlabel('time since NMPC handoff [s]')
     for x, lab in [(8.6, 'grasp/lift'), (85.4, 'release')]:
         for ax in axs:
             ax.axvline(x, color=INK2, lw=0.7, ls='--', alpha=0.6, zorder=1)
-        axs[0].text(x + 1.2, axs[0].get_ylim()[1] * 0.80, lab, fontsize=6.0, color=INK2)
+        axs[0].text(x + 1.2, axs[0].get_ylim()[1] * 0.80, lab, fontsize=7.0, color=INK2)
     axs[0].annotate('release transient\n0.21 m, ${\\sim}$2.5 s', xy=(85.4, 0.214),
-                    xytext=(60, 0.17), fontsize=5.8, color=INK2,
+                    xytext=(60, 0.17), fontsize=7.0, color=INK2,
                     arrowprops=dict(arrowstyle='->', lw=0.6, color=INK2))
     for ax in axs:
         _style(ax)

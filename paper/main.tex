@@ -35,20 +35,20 @@
 \begin{abstract}
 A release command does not guarantee physical payload detachment, so switching a controller's
 model from an attach/drop signal can be unsafe. We present an eventless payload-adaptive control
-framework in which a moving horizon estimator (MHE) uses only motor speeds and odometry to publish
+framework in which a moving horizon estimator (MHE) \cite{rao2003} uses only motor speeds and odometry to publish
 an atomic, health-gated frame of composite mass, first mass moment $s=m_P r_{xy}$, and inertia to
 an outer-loop nonlinear model predictive controller (NMPC). The first-moment representation
 remains well defined as the payload vanishes, while bounded filtering and continuous body-rate
 scheduling prevent discontinuous model updates. A thrust-residual self-trigger deweights stale
 pre-change stages in the MHE window and reduces mass-estimate settling time by up to
-\SI{4}{\times}. In PX4 software-in-the-loop experiments with physically attached eccentric
+\SI{4}{\times}. In PX4 \cite{px4} software-in-the-loop experiments with physically attached eccentric
 payloads, the eventless interface completes release confirmation in 22/22 valid paired flights,
 with no observed post-release instability and a median confirmation delay of \SI{2.70}{s}.
 A safety ablation shows that payload quantity and thrust residual are individually unreliable
 during aggressive flight: their fast release branch causes premature model clearing in 3/9
 flights. Requiring fresh moment-collapse evidence eliminates premature declarations in a
 12-flight smoke test, yielding 11 confirmations and one conservative unresolved outcome.
-Against an L1-adaptive NMPC baseline, the proposed method provides comparable transient tracking,
+Against an L1-adaptive \cite{l1theory} NMPC baseline, the proposed method provides comparable transient tracking,
 recovers \SIrange{15}{35}{\percent} faster, and retains interpretable physical parameters. These
 results demonstrate the eventless control interface and its fail-safe semantics, while not
 claiming distribution-wide robustness of the release detector.
@@ -109,11 +109,23 @@ identified online is a weak vertical-arm prior $r_z$, which is structurally unob
 the thrust-moment channel.
 
 \section{Related Work}
+\textbf{Aerial manipulation and transport.} Aerial robots that physically interact with their
+environment---grasping, carrying, and releasing objects---are surveyed in \cite{ollero2022};
+dynamic aerial grasping, where the gripper dynamics must be explicitly modeled and controlled,
+was demonstrated in \cite{thomas2014}.
+Our setting is the transport-and-release subproblem, where the payload is rigidly attached and
+the resulting change in mass, inertia, and center of mass must be handled by the controller.
+
 \textbf{Control under changing payload.} Adaptive and robust designs---L1-adaptive NMPC
 \cite{hanover2021}, INDI \cite{smeur}---treat the load as a lumped disturbance and are the
 standard baselines for payload-carrying flight; L1-NMPC in particular reports large
-tracking-error reductions under unknown load on aggressive trajectories. Slung-load control
-addresses the swinging-payload case explicitly. These methods do not produce a physical
+tracking-error reductions under unknown load on aggressive trajectories. A parallel line
+learns the residual dynamics instead: \cite{torrente2021} fits unmodeled aerodynamic effects
+with Gaussian processes inside the MPC, which improves tracking without yielding a named
+physical parameter either. Slung-load control
+addresses the swinging-payload case explicitly \cite{sreenath2013}, exploiting differential
+flatness of the cable-suspended system; a rigidly attached payload instead changes the
+vehicle's own inertial parameters. These methods do not produce a physical
 parameter and cannot, e.g., update a thrust-margin constraint from the estimate.
 
 \textbf{MHE and online parameter estimation.} Filter- and optimization-based estimators
@@ -124,7 +136,7 @@ bias--variance trade-off but estimating a lumped disturbance force rather than e
 parameters.
 
 \textbf{Event-triggered and change detection.} Residual-based fault/change detection (CUSUM
-and related) underlies our self-trigger. Our positioning: we do not learn dynamics and add no
+and related \cite{basseville1993}) underlies our self-trigger. Our positioning: we do not learn dynamics and add no
 sensing; every deployed signal derives from motor speeds and odometry. We separately test,
 as a supporting ablation, whether numerical tuning improves the handcrafted transient-period
 schedule.
@@ -137,7 +149,7 @@ and a body-rate setpoint; PX4 tracks the body rate.
 
 \begin{figure*}[t]
 \centering
-\includegraphics[width=0.86\textwidth]{figs/fig1_architecture.pdf}
+\includegraphics[width=0.95\textwidth]{figs/fig1_architecture.pdf}
 \caption{System architecture and information flow. The full pipeline consumes only motor
 speeds and odometry; one atomic, health-gated $m/s/J$ frame drives both the NMPC model and
 continuous rate-command scheduling. No attach/drop notification enters this path.}
@@ -168,7 +180,9 @@ and includes the eccentric trim torque, avoiding a stale operating-point bias.
 
 \textbf{Model-independent physical inputs.} We reconstruct the collective thrust
 $T_{\text{phys}} = k \sum_i \omega_i^2$ and the body torques from rotor speeds and arm
-geometry. Feeding the NMPC's \emph{commanded} input back into the estimator instead creates a
+geometry. The quadratic coefficient $k$ is a static-thrust constant; it is known to lose
+validity under large induced inflow during fast translation \cite{bangura2012}, which we do
+not model and which is one source of the estimator bias discussed in Sec.~\ref{sec:limits}. Feeding the NMPC's \emph{commanded} input back into the estimator instead creates a
 self-consistent blind spot: at hover $m \approx T/g$ is self-consistent for any $m$, so the
 mass is unobservable from the commanded thrust. The motor-speed reconstruction breaks this
 because it is decoupled from the controller/estimator state.
@@ -260,7 +274,8 @@ log-scale weight multipliers. The hand-designed rule M0 is the point $\theta = [
 this family, so the parameterization costs nothing even if learning fails---it is the runtime
 representation of the rule itself.
 
-We optimize $\theta$ by simulation-in-the-loop CEM in which every candidate evaluation is a
+We optimize $\theta$ by simulation-in-the-loop cross-entropy method (CEM)
+\cite{cemtutorial}, in which every candidate evaluation is a
 complete PX4 SITL closed-loop episode (${\sim}\SI{85}{s}$ wall clock), scored on a $2\times2$
 training roster of \{payload 0.15, \SI{0.30}{kg}\} $\times$ \{eccentricity 0.05,
 \SI{0.10}{m}\}. Budget: population 4, 6 generations, elite fraction $1/2$, per-dimension
@@ -311,7 +326,7 @@ consecutive solver failures, so that initialization is invalid evidence rather t
 collapse.
 
 \section{Simulation Setup}\label{sec:sim}
-PX4 SITL with Gazebo (Harmonic), an x500 quadrotor, and a magnetic DetachableJoint gripper
+PX4 SITL with Gazebo \cite{gazebo} (Harmonic), an x500 quadrotor, and a magnetic DetachableJoint gripper
 that produces genuine inertia and CoM changes.
 
 \emph{Two payload-change mechanisms, by design.} The physical DetachableJoint gripper attaches
@@ -347,8 +362,8 @@ explicitly set it to \texttt{true}. The reported detector results therefore appl
 frozen configurations, not to an unparameterized node launch; without the override, no release
 decision is evaluated and the controller reaches the conservative \textsc{unresolved} timeout.
 
-\emph{Real-time budget.} Both optimizers are acados SQP-RTI (one real-time-iteration SQP step
-per call, HPIPM QP solver). Table~\ref{tab:timing} reports measured wall-clock solve times
+\emph{Real-time budget.} Both optimizers are acados \cite{acados} SQP-RTI (one
+real-time-iteration SQP step per call, HPIPM \cite{hpipm} QP solver). Table~\ref{tab:timing} reports measured wall-clock solve times
 against the period each loop must meet. The NMPC measurements apply to the deployed 13-state
 controller: it consumes ${\sim}\SI{3}{\percent}$ of its period at the median and stays under
 \SI{5}{\percent} at the 99th percentile. The MHE timing column is retained as a historical
@@ -437,7 +452,7 @@ the physical-rigid-body slung experiments).
 
 \subsection{Supporting schedule-tuning ablation}\label{sec:tuning-ablation}
 We additionally tested whether the handcrafted transient schedule required numerical
-optimization. A simulation-in-the-loop cross-entropy search embedded M0 in a five-parameter
+optimization. A simulation-in-the-loop cross-entropy search \cite{cemtutorial} embedded M0 in a five-parameter
 family and evaluated 96 closed-loop episodes. The surviving candidate was then compared with
 M0 in a pre-registered paired $2\times2$ factorial ($n=8$ per cell). Its median settling-time
 gain was \SI{-0.05}{s} for a \SI{0.2}{kg} payload and \SI{0.00}{s} for a \SI{0.3}{kg}
@@ -547,7 +562,7 @@ payloads.
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.82\linewidth]{figs/fig4_cxy_vs_truth.pdf}
+\includegraphics[width=\linewidth]{figs/fig4_cxy_vs_truth.pdf}
 \caption{Online CoM-offset estimate vs.\ ground truth across an eccentricity sweep. The
 dominant ($c_y$) component tracks truth to $<5\%$ with no attachment measurement---the
 estimate uses only motor-speed-reconstructed torques.}
