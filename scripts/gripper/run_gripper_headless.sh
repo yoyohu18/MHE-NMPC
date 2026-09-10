@@ -139,6 +139,8 @@ GRIP_DROP_AFTER_D=$(_f2d "${GRIP_DROP_AFTER:-0.0}")
 # 暴露出来是为了**构造回归轮**:调到 2s 可让每一轮都走 UNRESOLVED 路径,把
 # 自然发生率 ~50% 提到接近 100%,n=6 就有决定性功效(见 run_drop_unresolved_ab.sh)。
 DROP_UNRES_TIMEOUT_D=$(_f2d "${DROP_UNRES_TIMEOUT:-12.0}")
+# DROP_UNRES_STOP_SEC:UNRESOLVED 后从当前速度平滑制动到悬停的时长。
+DROP_UNRES_STOP_D=$(_f2d "${DROP_UNRES_STOP_SEC:-3.0}")
 ATTACH_WINDOW_SEC_D=$(_f2d "${ATTACH_WINDOW_SEC:-40.0}")
 MHE_CONFIRM_THRESH_D=$(_f2d "${MHE_CONFIRM_THRESH:-1.5}")
 # 残差自触发的确认阈值。confirm_thresh_alpha>=0 时生效的是 α·g·包线(不含任务
@@ -355,6 +357,7 @@ nohup ros2 run offboard_test_acados acados_nmpc_node --ros-args \
     -p l1_omega_c:=$L1_OMEGA_C_D \
     -p grip_drop_after_sec:=$GRIP_DROP_AFTER_D \
     -p drop_unresolved_timeout_sec:=$DROP_UNRES_TIMEOUT_D \
+    -p drop_unresolved_stop_sec:=$DROP_UNRES_STOP_D \
     -p grip_dynamic_after_lift:=${GRIP_DYNAMIC:-false} \
     -p grip_dyn_r:=$GRIP_DYN_R_D -p grip_dyn_w:=$GRIP_DYN_W_D \
     -p grip_dyn_ramp:=$GRIP_DYN_RAMP_D \

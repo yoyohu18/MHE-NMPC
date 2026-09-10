@@ -157,6 +157,10 @@ class _NMPCStub:
     _confirm_no_payload_if_persistent = (
         mn_nmpc.AcadosNMPCNode._confirm_no_payload_if_persistent)
     _check_drop_unresolved = mn_nmpc.AcadosNMPCNode._check_drop_unresolved
+    _begin_unresolved_hover = mn_nmpc.AcadosNMPCNode._begin_unresolved_hover
+    _grip_unresolved_ref = mn_nmpc.AcadosNMPCNode._grip_unresolved_ref
+    _grip_unresolved_ref_window = (
+        mn_nmpc.AcadosNMPCNode._grip_unresolved_ref_window)
     _payload_estimate_is_fresh = (
         mn_nmpc.AcadosNMPCNode._payload_estimate_is_fresh)
 
@@ -183,9 +187,24 @@ class _NMPCStub:
         self.now_sec = 100.0
         # unresolved 路径(2026-09-05)
         self.drop_unresolved_timeout_sec = 12.0
+        self.drop_unresolved_stop_sec = 3.0
         self.payload_unresolved = False
         self._drop_cmd_wall = None
         self.grip_dynamic_active = True
+        self.hover_test_mode = False
+        self.x_cur = np.array([
+            10.0, -2.0, 6.0,       # position
+            4.0, -1.0, 0.2,        # velocity at UNRESOLVED
+            1.0, 0.0, 0.0, 0.0,    # attitude
+            0.1, -0.2, 0.3])       # body rate
+        self._unresolved_ref_t0 = None
+        self._unresolved_ref_x0 = None
+        self._unresolved_ref_p1 = None
+        self._unresolved_ref_q1 = None
+        self._traj_omega = np.ones((3, 2))
+        self._traj_thrust = np.ones(2)
+        self.ref_fn = lambda t: np.full(13, 99.0)
+        self.ref_window_fn = lambda t, N, dt, z_hover=None: np.full((13, N+1), 99.0)
         self._log = _Logger()
 
     def get_clock(self):
@@ -322,6 +341,56 @@ def test_timeout_goes_unresolved_not_empty():
     assert not node.grip_dropped, 'unresolved 不得清模型'
     assert not node.grip_drop_done
     assert node.grip_drop_pending, 'pending 保持,交给上层处理'
+
+
+def test_unresolved_reference_brakes_continuously_then_hovers():
+    """UNRESOLVED 必须替换单点+窗口参考，无速度阶跃地制动到悬停。"""
+    node = _NMPCStub()
+    node.no_payload_confidence = 0.30
+    node._no_payload_latched = False
+    node.grip_drop_pending = True
+    node._drop_cmd_wall = node.now_sec
+    node.now_sec += node.drop_unresolved_timeout_sec + 0.1
+    node._check_drop_unresolved()
+
+    assert node.payload_unresolved
+    assert node.ref_fn.__func__ is mn_nmpc.AcadosNMPCNode._grip_unresolved_ref
+    assert node.ref_window_fn.__func__ is mn_nmpc.AcadosNMPCNode._grip_unresolved_ref_window
+    assert node._traj_omega is None and node._traj_thrust is None
+
+    t0 = 123.0
+    start = node.ref_fn(t0)
+    assert np.allclose(start, node.x_cur), 'reference switch introduced a state step'
+    end = node.ref_fn(t0 + node.drop_unresolved_stop_sec)
+    expected_p = (node.x_cur[0:3] + 0.5 * node.drop_unresolved_stop_sec
+                  * node.x_cur[3:6])
+    assert np.allclose(end[0:3], expected_p)
+    assert np.allclose(end[3:6], 0.0, atol=1e-10)
+    assert np.allclose(end[10:13], 0.0, atol=1e-10)
+    assert np.allclose(node.ref_fn(t0 + 100.0), end), 'hover endpoint must remain fixed'
+
+    win = node.ref_window_fn(t0, 5, 0.1)
+    assert win.shape == (13, 6)
+    assert np.allclose(win[:, 0], start), 'window/single-point references disagree'
+
+
+def test_unresolved_invalid_state_fails_loud_without_false_hover_claim():
+    """状态无效时不得假称已经切到悬停，也不得破坏原参考。"""
+    node = _NMPCStub()
+    old_ref, old_window = node.ref_fn, node.ref_window_fn
+    node.x_cur[6:10] = 0.0
+    node.no_payload_confidence = 0.30
+    node._no_payload_latched = False
+    node.grip_drop_pending = True
+    node._drop_cmd_wall = node.now_sec
+    node.now_sec += node.drop_unresolved_timeout_sec + 0.1
+    node._check_drop_unresolved()
+
+    assert node.payload_unresolved
+    assert node.grip_dynamic_active, '未成功构造制动参考时不应伪造退出状态'
+    assert node.ref_fn is old_ref and node.ref_window_fn is old_window
+    assert any('未能切换制动参考' in msg for msg in node._log.msgs)
+    assert not any('平滑制动后在停止点悬停' in msg for msg in node._log.msgs)
 
 
 def test_late_evidence_resolves_unresolved():

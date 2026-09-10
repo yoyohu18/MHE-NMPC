@@ -1,7 +1,7 @@
 #!/bin/bash
 # UNRESOLVED 兜底路径的**构造回归**(2026-09-07)。
 #
-# 【要验的缺陷】`_check_drop_unresolved()` 用 `grip_dynamic_active=False` 表达
+# 【历史缺陷】`_check_drop_unresolved()` 曾只用 `grip_dynamic_active=False` 表达
 # "退出 figure-8",而该标志同时是 `_grip_dynamic_phase()` 的"只切一次"哨兵 →
 # 清掉它的下一拍(50ms 后)figure-8 被**原地重启**:圆心重置到当前位置、相位 t0
 # 归零、ramp 从头,而 build_reference_figure8 的 hover_time=2.0 让重启后头 2s
@@ -15,9 +15,9 @@
 # 让**每轮**都走该路径,发生率提到接近 100%,n=6 即有决定性功效。
 #
 # 【预注册判据】
-#  ① 机制判据(确定性,n=1 即可判):修复后日志里 UNRESOLVED 仍应出现,但其后
-#     **不应**再跟一条 "DYNAMIC: switch to figure8"。这条不受随机性影响,
-#     是本修复是否生效的直接证据。
+#  ① 机制判据(确定性,n=1 即可判):UNRESOLVED 日志必须明确写出“平滑制动后在
+#     停止点悬停”,且其后**不应**再跟一条 "DYNAMIC: switch to figure8"。
+#     前者验证 ref_fn/ref_window_fn 的语义切换版本在场,后者验证不会重入机动。
 #  ② 结局判据(计数):drop 后穿地率(peak_post>5m)。修复前预期 ≥5/6,修复后 0/6。
 #  ③ 前置:drop **之前**必须正常(peak_pre<2m),否则该轮作废 —— 本回归只问
 #     drop 后的事,drop 前的发散(如 08-24 那类)是另一个问题。
@@ -40,6 +40,7 @@ fi
 TAG="${TAG:-before}"
 REPS="${REPS:-6}"
 UNRES_TIMEOUT="${UNRES_TIMEOUT:-2.0}"   # ★ 构造:让每轮都走 UNRESOLVED
+UNRES_STOP_SEC="${UNRES_STOP_SEC:-3.0}"
 RECOVER_SEC="${RECOVER_SEC:-45}"
 TIMEOUT="${TIMEOUT:-300}"
 STAMP=$(date +%Y%m%d_%H%M%S)
@@ -48,8 +49,9 @@ MANIFEST="$RUNDIR/drop_unresolved_${TAG}_${STAMP}.txt"
   echo "# UNRESOLVED 构造回归  tag=$TAG  $STAMP"
   echo "# 列: tag rep nmpc_stamp status peak_pos_err nmpc_failed attach_ecc m_err_p50 m_err_p90 solve_med traj n_samples"
   echo "# 构造: drop_unresolved_timeout_sec=$UNRES_TIMEOUT (默认 12.0) → 每轮强制走 UNRESOLVED 路径"
+  echo "# 制动: drop_unresolved_stop_sec=$UNRES_STOP_SEC"
   echo "# 底座: 4m/s 主线档,与 run_cxy_mass_repeat.sh 逐字对齐"
-  echo "# 判据①机制: UNRESOLVED 之后不应再有 'DYNAMIC: switch to figure8'"
+  echo "# 判据①机制: 日志声明平滑制动到停止点,且 UNRESOLVED 后不再进入 figure8"
   echo "# 判据②结局: drop 后 peak_post>5m 的轮次数"
 } > "$MANIFEST"
 echo "[reg] tag=$TAG manifest: $MANIFEST"
@@ -74,6 +76,7 @@ run_one() {
   echo "[reg] === $TAG rep=$rep $(date +%T) ==="
   cleanup
   DROP_UNRES_TIMEOUT=$UNRES_TIMEOUT \
+  DROP_UNRES_STOP_SEC=$UNRES_STOP_SEC \
   GRIP_PAYLOAD_KG=0.15 GRIP_PAYLOAD_ENVELOPE=0.3 GRIP_ECC_Y=0.10 \
     GRIP_DYN_R=10.0 GRIP_DYN_W=0.283 GRIP_DYN_RAMP=9.36 GRIP_DYN_DZ=0.8 \
     GRIP_Z_HIGH=6.0 GRIP_LIFT_DUR=8.4 \

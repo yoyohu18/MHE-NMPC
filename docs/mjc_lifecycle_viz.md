@@ -76,6 +76,7 @@ tags: [MHE, NMPC, gripper, payload]
 | `payload_mass_slew_kg_s` / `moment` / `dj`     | 0.60 / 0.080 / 0.080           | 每秒最大变化                                                      |
 | `no_payload_confidence_threshold` / `_hold_sec`  | 0.90 / 1.0 s                   | drop 完成判据                                                     |
 | `drop_unresolved_timeout_sec` | **12.0** s | ★ 超时 ⇒ unresolved（**不等于**已卸载，见 §3.4） |
+| `drop_unresolved_stop_sec` | **3.0** s | ★ unresolved 后从当前状态平滑制动至停止点悬停 |
 | `payload_estimate_fresh_sec`                       | 0.35 s                         | ROS 收帧新鲜度                                                    |
 
 **MHE**
@@ -672,11 +673,20 @@ if not frame_ok:
 ```text
 moment 未确认 → payload state = unresolved
   → 不切 s_target、不清模型、不复位 L1/ξ、不置 grip_dropped
-  → 退出 figure-8 转保守悬停，交上层介入 / 降落中止
+  → 同周期切换 ref_fn + ref_window_fn
+  → 从当前 p/v/q/ω 连续进入 3 s 制动参考，之后在停止点悬停
+  → 交上层介入 / 降落中止
 ```
 
 两边都不猜：猜"已卸载"会在载荷还挂着时按空机构型飞；继续按带载飞则可能带着
 幽灵偏心（07-02 实测 2/2 坠机）。迟到的 moment 证据到达可解除 unresolved。
+
+> [!warning] 历史配置与当前实现不同
+> 09-05 的 12 轮 smoke 代码只清了 `grip_dynamic_active`，没有切换 `ref_fn` /
+> `ref_window_fn`；因此飞机仍按动态参考飞，不能把这些日志当作“保守悬停”的实测
+> 验证。独立 `_grip_dyn_latched` 后只消除了 figure-8 重入，仍未兑现退出机动。
+> 当前实现才新增连续 brake-to-hover 参考；必须另跑构造 SITL 回归后才能宣称飞行
+> 结局得到验证。
 
 ##### 验收：12 轮 fastA-free smoke（`160013` ~ `164135`）
 
@@ -695,8 +705,9 @@ moment 未确认 → payload state = unresolved
 1 轮进 unresolved 终态且不释放、不清模型。路径分布 fastB 9 / slow 2 —— 两条都
 在实际工作，互为备份；3 轮进过 unresolved，其中 2 轮拿到迟到证据后 RESOLVED。
 
-`161743` 是 unresolved 全流程的完整案例：
-`+12 s UNRESOLVED → 退出 figure-8 转悬停 → +16 s RESOLVED → DROP complete`。
+`161743` 是 unresolved 状态判决的完整案例：
+`+12 s UNRESOLVED → +16 s RESOLVED → DROP complete`。它验证迟到证据恢复，
+**不验证**转悬停；该版本的 `ref_fn` 从未切离动态参考。
 
 > [!warning] 旧日志不能用于 FPR
 > `152924` **不能**作为删除 fastA 后的干净反事实 —— 那份日志产生于旧版 fastA
@@ -815,7 +826,7 @@ MHE 全程没看到载荷（$m_{est}$ 恒 1.9611 = 下界），而当时**没有
 |---|---|---|
 | **A** | **武装门控串联**：统一 detector 被旧的 `_c_xy_mass_armed` 挡住。`162459` 那轮自主状态机已 `EMPTY→LOADED`（`_load_armed=True`，靠残差 attach 事件），但 $m_{est}$ 全程偏低（进 LOADED 时 $m_p=-0.103$），旧的"质量持续过 0.09 kg"路径从未武装 ⇒ `[s-collapse]` 一行都没有，detector 整段没运行 | **已修**（`ddfe9d2`）：外层门控只保留 `_load_armed` + 内层 health/freshness；`_c_xy_mass_armed` 只留给旧质量域释放路径。**不是**新增 attach 阈值 —— 问题是两个武装状态被串回了一起。释放证据未放宽：仍必须满足 moment 且估计健康 |
 | **B** | **drop 后 $s$ 不收敛回零**：$m_{est}$ 正确回到 2.049，$\hat s$ 仍在 −0.018 kg·m ⇒ moment 证据永不成立 | **按设计保留为安全漏检**。这是真实的估计覆盖问题，但**不能**依据 NMPC 的 drop 命令、超时或质量结果去强制清零 —— 那等于把事件捷径重新引回估计器，破坏无事件主线。当前的正确结果就是：moment 不成立 → 不释放估计器状态 → unresolved → 保留模型 → 安全悬停/降落。MHE 可观测性单独研究 |
-| **C** | **保守悬停对 $s$ 可观测性的影响方向不明**：`161743` 转悬停后 4 s RESOLVED，`162459` 转悬停后一直没恢复 | **保留保守悬停**。两轮相反的结果不足以判断悬停促进还是延缓 $s$ 收敛；而且**悬停的职责是降低飞行风险，不是保证辨识恢复**。即使可观测性因此下降，也应优先安全降落，不能为了等 moment 继续高速 figure-8 |
+| **C** | **保守悬停对 $s$ 可观测性的影响尚未测量**：旧代码没有切换 `ref_fn`，所以 `161743` / `162459` 都不能作为 hover 样本 | **当前代码实现 brake-to-hover，但结局仍待专门 A/B**。悬停的职责是降低飞行风险，不是保证辨识恢复；不能为了等 moment 继续高速 figure-8 |
 
 > [!note] C 的后续实验设计（待做，不阻塞主线）
 > 小型**配对**实验，第一阶段 6~8 对即可判方向，再决定是否扩大：

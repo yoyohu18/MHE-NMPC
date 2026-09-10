@@ -596,7 +596,12 @@ class MHENode(Node):
         # 打日志,不喂任何模型。稳态门控:只在悬停稳(|ω|/|v_xy| 小)时更新 EMA,
         # 避开 descend/LIFT/drop 暂态的力矩污染(思路同无信号消融的预热门控)。
         # 不进 MHE 状态(窗外慢滤波),符合长期计划"两个新变量不同时上线"。
-        self.declare_parameter('c_xy_est_enable', False)   # 默认关(不扰其它实验);B.3 实验显式开
+        # IMPORTANT: despite its historical name, this is currently also the
+        # master gate for all online release decisions because _update_c_xy_est()
+        # contains the mass-domain path and the sole release_decision() call.
+        # Release-validation launchers must explicitly enable it; a bare launch
+        # leaves release unclassified until the NMPC unresolved timeout.
+        self.declare_parameter('c_xy_est_enable', False)   # legacy-safe default
         self.declare_parameter('c_xy_est_tau_sec', 2.0)    # EMA 时间常数
         self.declare_parameter('c_xy_steady_omega', 0.15)  # 稳态门控角速度阈 rad/s
         self.declare_parameter('c_xy_steady_vel', 0.20)    # 稳态门控水平速度阈 m/s

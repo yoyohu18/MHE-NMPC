@@ -338,6 +338,14 @@ Headless batch infrastructure with a GCS-heartbeat stand-in; the physical-effect
 timestamp $t = 0$ is defined by $T_{\text{phys}}$ crossing the baseline, and in-band is defined
 as \SI{\pm0.08}{kg}.
 
+\emph{Frozen release configuration.} In the evaluated implementation,
+\texttt{c\_xy\_est\_enable} gates the update routine that contains both the legacy mass-domain
+test and the unified call to \texttt{release\_decision()}. The node and generic launcher retain
+\texttt{false} as a backward-compatible default, but all 13 release-evaluation batch drivers
+explicitly set it to \texttt{true}. The reported detector results therefore apply to those
+frozen configurations, not to an unparameterized node launch; without the override, no release
+decision is evaluated and the controller reaches the conservative \textsc{unresolved} timeout.
+
 \emph{Real-time budget.} Both optimizers are acados SQP-RTI (one real-time-iteration SQP step
 per call, HPIPM QP solver). Table~\ref{tab:timing} reports measured wall-clock solve times
 against the period each loop must meet. The NMPC measurements apply to the deployed 13-state
@@ -708,6 +716,13 @@ ordinary loaded moment appear collapsed. Future validation will form this refere
 a healthy, low-dynamic, in-envelope interval and freeze it before aggressive flight. Until that
 revision is validated across broader conditions, our claim is an eventless, fail-safe control
 interface rather than a fully robust autonomous release detector.
+
+The current software also has a configuration-coupling defect: the historically named
+\texttt{c\_xy\_est\_enable} parameter is the effective master switch for all release evidence.
+Although every reported release batch explicitly enabled it, the bare default is
+\texttt{false} and therefore falls through to \textsc{unresolved}. Before deployment, release
+decision execution must receive its own explicit enable parameter (or be unconditional in the
+eventless profile), with startup validation that rejects inconsistent configurations.
 
 \emph{Selection and pre-release failures.} The main performance tables condition on successful
 attachment and survival to the release command. Eighteen of 76 flights were voided; arm~A had

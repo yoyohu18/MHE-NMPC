@@ -2,8 +2,8 @@
 """UNRESOLVED 构造回归的聚合(2026-09-07),配 run_drop_unresolved_regress.sh。
 
 判据(与驱动脚本头一致,跑前钉死):
-  ① 机制判据(确定性):UNRESOLVED 之后**不应**再出现 "DYNAMIC: switch to figure8"。
-     修复前每轮都应命中(缺陷在场),修复后每轮都不应命中。n=1 即可判,不受随机性影响。
+  ① 机制判据(确定性):UNRESOLVED 行必须声明平滑制动到停止点，且之后**不应**
+     再出现 "DYNAMIC: switch to figure8"。n=1 即可判,不受随机性影响。
   ② 结局判据(计数):drop 后 peak_post>5m 的轮次数。
   ③ 前置:drop 之前必须正常(peak_pre<2m),否则该轮作废(drop 前的发散是另一个问题)。
 
@@ -39,9 +39,10 @@ def per_run(stamp):
             # colcon build,批次跑到一半改 src 会让后续轮次换成新代码,而
             # manifest 与日志名**完全看不出来**(实测一批 6 轮里 rep1 旧、
             # rep2~6 新)。这一行的文案随补丁改过,拿它当逐轮的版本标记。
-            code_ver = ('fixed' if '继续按当前参考飞行' in ln
-                        else ('buggy' if '退出 figure-8 转保守悬停' in ln
-                              else '?'))
+            code_ver = ('brake-hover' if '平滑制动后在停止点悬停' in ln
+                        else ('latch-only' if '继续按当前参考飞行' in ln
+                              else ('buggy' if '退出 figure-8 转保守悬停' in ln
+                                    else '?')))
             fingerprint.append(code_ver)
         if 'DYNAMIC: switch to figure8' in ln:
             # ★ 机制判据:只数 UNRESOLVED **之后**那一次(第一次是正常的进入机动)

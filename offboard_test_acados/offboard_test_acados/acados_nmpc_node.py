@@ -514,8 +514,17 @@ class AcadosNMPCNode(Node):
         self.declare_parameter('drop_unresolved_timeout_sec', 12.0)
         self.drop_unresolved_timeout_sec = float(
             self.get_parameter('drop_unresolved_timeout_sec').value)
+        # UNRESOLVED 后不能把 4m/s 的动态参考瞬间换成零速悬停；
+        # 用一段有限时长、端点零加速度的制动参考退出机动。
+        self.declare_parameter('drop_unresolved_stop_sec', 3.0)
+        self.drop_unresolved_stop_sec = max(0.5, float(
+            self.get_parameter('drop_unresolved_stop_sec').value))
         self.payload_unresolved = False
         self._drop_cmd_wall = None
+        self._unresolved_ref_t0 = None
+        self._unresolved_ref_x0 = None
+        self._unresolved_ref_p1 = None
+        self._unresolved_ref_q1 = None
 
         # ============ 夹爪吊挂实验模式(默认关;关闭时下面全部不生效,
         # 现有 mass_changer/figure8 行为逐字节不变)============
@@ -1486,24 +1495,93 @@ class AcadosNMPCNode(Node):
                 < self.drop_unresolved_timeout_sec):
             return
         self.payload_unresolved = True
-        # 退出机动:figure-8 在 unresolved 下没有意义,而且高机动正是让证据
-        # 变脏的原因。转悬停既降低风险,也给估计器一个安静窗口把 ratio 判出来。
-        # ⚠️ 2026-09-07 实测更正:这一行**并没有**让飞机转悬停 —— ref_fn/
-        # ref_window_fn/hover_test_mode 全都没动,参考轨迹仍是 _grip_dyn_ref,
-        # 飞机继续飞 8 字。它当时唯一的实际效果是清掉 _grip_dynamic_phase 的
-        # 哨兵、把 figure-8 原地重启(=与本意相反,且 50% 概率坠机)。哨兵已换成
-        # 独立的 _grip_dyn_latched,重启不再发生;但"转保守悬停"这个语义**仍未
-        # 兑现**,下面的日志文案因此按实情改写。真正的平滑退出(振幅 ramp-down
-        # 到 0、相位继续推进)是待办 —— 注意不能瞬间切静止参考,那正是本次事故
-        # 的伤害来源。
-        self.grip_dynamic_active = False
+        hover_armed = self._begin_unresolved_hover()
+        action = (f'用 {self.drop_unresolved_stop_sec:.1f}s 平滑制动后在停止点悬停'
+                  if hover_armed else
+                  '当前状态无效，未能切换制动参考，保持原参考并要求立即上层接管')
         self.get_logger().error(
             f'PAYLOAD STATE UNRESOLVED: drop 指令后 '
             f'{self.drop_unresolved_timeout_sec:.0f}s 未取得 moment 证据。'
-            f'**不清模型、不切 s_target、不复位 L1**,继续按当前参考飞行'
-            f'(平滑退出机动尚未实现,见 _check_drop_unresolved 注释)。'
+            f'**不清模型、不切 s_target、不复位 L1**,{action}。'
             f'(conf={self.no_payload_confidence:.3f}) '
             f'—— 载荷是否仍在机上未知,需上层介入/降落中止')
+
+    def _begin_unresolved_hover(self):
+        """Replace the dynamic reference with a continuous stop-to-hover path.
+
+        Payload/model state is deliberately untouched.  The reference starts from the
+        measured state, decelerates with zero acceleration at both endpoints, then remains
+        stationary.  Capturing the measured state avoids the position/velocity step caused
+        by switching directly from ``_grip_dyn_ref`` to ``_grip_ref``.
+        """
+        x0 = np.asarray(self.x_cur, dtype=float).copy()
+        if (x0.shape != (13,) or not np.all(np.isfinite(x0))
+                or np.linalg.norm(x0[6:10]) < 1e-6):
+            # This should not occur in flight; retaining the current reference is safer than
+            # constructing a stop path from corrupt state.
+            self.get_logger().error(
+                'UNRESOLVED hover not armed: current state/quaternion is unavailable or invalid')
+            return False
+        self.grip_dynamic_active = False
+        self.hover_test_mode = False  # the braking reference needs advancing NMPC time
+        self._unresolved_ref_x0 = x0
+        T = self.drop_unresolved_stop_sec
+        # A half-duration velocity projection is the endpoint of a symmetric smooth stop.
+        self._unresolved_ref_p1 = x0[0:3] + 0.5 * T * x0[3:6]
+
+        q0 = x0[6:10] / max(np.linalg.norm(x0[6:10]), 1e-9)
+        # Level attitude while preserving current yaw; choose the same quaternion hemisphere
+        # so normalized interpolation cannot take the long way around.
+        qw, qx, qy, qz = q0
+        yaw = np.arctan2(2.0 * (qw*qz + qx*qy),
+                         1.0 - 2.0 * (qy*qy + qz*qz))
+        q1 = np.array([np.cos(0.5*yaw), 0.0, 0.0, np.sin(0.5*yaw)])
+        if np.dot(q0, q1) < 0.0:
+            q1 = -q1
+        self._unresolved_ref_x0[6:10] = q0
+        self._unresolved_ref_q1 = q1
+        # t0 is latched by the first single-point/window query, in the exact same t_ref clock
+        # used by solve_nmpc; no ROS-wall/NMPC-time conversion is needed here.
+        self._unresolved_ref_t0 = None
+        self.ref_fn = self._grip_unresolved_ref
+        self.ref_window_fn = self._grip_unresolved_ref_window
+        # In normal operation _check_drop_unresolved runs before this cycle's reference
+        # window is built, so the successful solve below immediately replaces these arrays.
+        # Clearing them also prevents reuse of the old figure-eight prediction if control
+        # flow changes; until a new solve succeeds the publisher uses its existing one-frame
+        # zero-order-hold fallback, preserving the PX4 offboard stream.
+        self._traj_omega = None
+        self._traj_thrust = None
+        return True
+
+    def _grip_unresolved_ref(self, t=0.0, **kw):
+        """Finite-time smooth braking followed by a stationary hover reference."""
+        if self._unresolved_ref_t0 is None:
+            self._unresolved_ref_t0 = float(t)
+        tau = np.clip(float(t) - self._unresolved_ref_t0,
+                      0.0, self.drop_unresolved_stop_sec)
+        T = self.drop_unresolved_stop_sec
+        u = tau / T
+        x0 = self._unresolved_ref_x0
+        p0, v0, p1 = x0[0:3], x0[3:6], self._unresolved_ref_p1
+
+        # Quintic Hermite trajectory: p/v continuous and acceleration is zero at both ends.
+        dp = p1 - p0
+        a3 = (10.0*dp - 6.0*T*v0) / T**3
+        a4 = (-15.0*dp + 8.0*T*v0) / T**4
+        a5 = (6.0*dp - 3.0*T*v0) / T**5
+        pos = p0 + v0*tau + a3*tau**3 + a4*tau**4 + a5*tau**5
+        vel = v0 + 3.0*a3*tau**2 + 4.0*a4*tau**3 + 5.0*a5*tau**4
+
+        blend = 10.0*u**3 - 15.0*u**4 + 6.0*u**5
+        q = (1.0 - blend) * x0[6:10] + blend * self._unresolved_ref_q1
+        q /= max(np.linalg.norm(q), 1e-9)
+        omega = (1.0 - blend) * x0[10:13]
+        return np.concatenate([pos, vel, q, omega])
+
+    def _grip_unresolved_ref_window(self, t_start, N, dt, z_hover=None):
+        return np.column_stack([
+            self._grip_unresolved_ref(t_start + i*dt) for i in range(N + 1)])
 
     def _confirm_no_payload_if_persistent(self):
         """Reset adaptive states only after persistent MHE empty confidence."""
@@ -1797,15 +1875,17 @@ class AcadosNMPCNode(Node):
         self.solver.set(p.N, 'x', Xref_win[:, p.N])
 
     def solve_nmpc(self, x_cur, t_ref):
-        Xref_win = self.ref_window_fn(t_ref, p.N, p.dt, z_hover=self.z_hover)
-
         # B.3 Phase2:online 几何接管后,每次 solve 前用最新 m_est+在线 c_xy
-        # 刷新 dJ_est/c_est(替代 attach 真值一次性赋值)
+        # 刷新 dJ_est/c_est(替代 attach 真值一次性赋值)。确认逻辑可能在
+        # UNRESOLVED 超时时替换 ref_fn/ref_window_fn，故必须先判决、再构造本周期
+        # 的窗口；否则仍会多解/发布一帧旧 figure-8 参考。
         if self.continuous_payload_estimates:
             self._update_continuous_payload_model()
             self._confirm_no_payload_if_persistent()
         elif self.geom_online_active and self.geom_source == 'online':
             self._update_online_geometry()
+
+        Xref_win = self.ref_window_fn(t_ref, p.N, p.dt, z_hover=self.z_hover)
 
         self.solver.set(0, 'lbx', x_cur)
         self.solver.set(0, 'ubx', x_cur)
