@@ -1,0 +1,217 @@
+%% Standalone preview wrapper for sec3_parameters.tex
+%% Build: latexmk -pdf preview_sec3.tex   (or pdflatex preview_sec3.tex x2)
+%% Same class/packages as main.tex, so the layout you see here is the layout
+%% you get after \input{sec3_parameters} into main.tex.
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage[utf8]{inputenc}   % harmless on modern TeX Live; needed on Overleaf legacy compilers
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{siunitx}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+
+\begin{document}
+\title{Model Parameter Accounting (Section III insert, preview)}
+\author{}
+\maketitle
+
+\section{System Overview and Problem Setup}\label{sec:setup}
+\section{Event-Triggered MHE with Learned Weight Scheduling}\label{sec:method}
+\section{Results}\label{sec:results}
+\setcounter{section}{2}
+
+%% =====================================================================
+%% sec3_parameters.tex -- Model parameter accounting (Section III insert)
+%% Generated 2026-07-29. Answers the advisor's question: "which parameters
+%% are actually estimated, and how does each enter the dynamics?"
+%%
+%% USAGE (two options):
+%%   (a) Drop-in replacement for the "Dynamics and parameterization" +
+%%       "MHE" paragraphs of \section{System Overview and Problem Setup}
+%%       in main.tex (currently lines ~148-158):  \input{sec3_parameters}
+%%   (b) Standalone preview:  latexmk -pdf preview_sec3.tex
+%%
+%% REQUIRES in the preamble (all already present in main.tex):
+%%   amsmath, booktabs, siunitx, multirow, array
+%%
+%% NOTE ON NOTATION: main.tex currently writes the inertia increment as
+%% "dJ" (\S III, \S IV-E, \S VI-C). This file uses \dJ -> \Delta J, which
+%% is unambiguous against the differential d. If you adopt it, sweep the
+%% remaining occurrences: grep -n "dJ" main.tex
+%% =====================================================================
+
+% ---- Notation macros (safe to move to the preamble) -----------------
+\providecommand{\dJ}{\Delta J}
+\providecommand{\cvec}{\mathbf{c}}
+\providecommand{\rp}{\mathbf{r}_p}
+\providecommand{\mpay}{\hat{m}_p}          % payload-mass scalar (prior)
+\providecommand{\mb}{m_b}                % bare-airframe mass
+\providecommand{\mt}{m_t}                % composite mass
+\providecommand{\Tphys}{T_{\mathrm{phys}}}
+\providecommand{\tauphys}{\boldsymbol{\tau}_{\mathrm{phys}}}
+\providecommand{\tcom}{\boldsymbol{\tau}_{\mathrm{com}}}
+
+% =====================================================================
+% TABLE I -- parameter identity ledger
+% Place early in Section III. Uses table* (two-column span); if space is
+% tight, switch to table and drop the "Value / source" column.
+% =====================================================================
+\begin{table*}[t]
+\caption{Model parameters: which are estimated online, which are algebraically
+derived, and which are fixed. \emph{Only the mass is a decision variable of the
+estimator}; the inertia increment and CoM offset enter the MHE as \emph{known}
+runtime parameters, on the same footing as the measured thrust and torque.}
+\label{tab:params}
+\centering
+\footnotesize
+\begin{tabular}{@{}l p{0.17\textwidth} c p{0.25\textwidth} p{0.28\textwidth}@{}}
+\toprule
+Symbol & Meaning & Dim. & Identity & Enters the model through \\
+\midrule
+$m$ & composite mass (airframe + payload) & 1 & \textbf{MHE decision variable} ($\dot m = 0$, state 14) & translational dynamics \eqref{eq:trans}; cost hover baseline \eqref{eq:hover} \\
+$\dJ$ & roll/pitch inertia increment & 1 & algebraically derived, \eqref{eq:dj} & rotational dynamics \eqref{eq:rot}; inner-loop gain scaling \eqref{eq:gain} \\
+$\cvec = [c_x, c_y]$ & composite-CoM horizontal offset & 2 & derived \eqref{eq:cxy}, or algebraically inverted online \eqref{eq:conline} & thrust eccentricity torque \eqref{eq:tcom}; cost torque baseline \eqref{eq:hover} \\
+\midrule
+$\mpay$ & payload-mass scalar (\emph{the single unknown behind $\dJ$ and $\cvec$}) & 1 & weak operational prior (nominal parcel mass) & \eqref{eq:dj}, \eqref{eq:cxy} \\
+$\rp = [r_x, r_y, r_z]$ & payload offset in body frame & 3 & known (gripper contact geometry) & \eqref{eq:dj}, \eqref{eq:cxy} \\
+\midrule
+$\mb$ & bare-airframe mass & 1 & fixed calibration & \SI{2.0643}{\kg} \\
+$J_b$ & bare-airframe inertia & 3 & fixed calibration & $\mathrm{diag}(0.0142, 0.0142, 0.0210)$ \si{\kg\meter\squared} \\
+$g$ & gravity & 1 & fixed constant & \SI{9.81}{\meter\per\second\squared} \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+% =====================================================================
+% Replacement for the "Dynamics and parameterization" paragraph
+% =====================================================================
+\textbf{Dynamics and parameterization.} With state
+$x = [\mathbf{p}; \mathbf{v}; \mathbf{q}; \boldsymbol{\omega}] \in \mathbb{R}^{13}$ and input
+$u = [T; \boldsymbol{\tau}] \in \mathbb{R}^{4}$ expressed in an ENU world frame, and with
+$\mathbf{e}_3 = [0, 0, 1]^{\!\top}$ the vertical basis vector, the model is
+\begin{align}
+\dot{\mathbf{p}} &= \mathbf{v}, \label{eq:kin}\\
+\dot{\mathbf{v}} &= \frac{1}{m}\, R(\mathbf{q})\,\mathbf{e}_3 T - g\,\mathbf{e}_3, \label{eq:trans}\\
+\dot{\boldsymbol{\omega}} &= J(\dJ)^{-1}\Bigl( \boldsymbol{\tau} + \tcom(\cvec) - \boldsymbol{\omega} \times J(\dJ)\boldsymbol{\omega} \Bigr), \label{eq:rot}
+\end{align}
+with the attitude kinematics, for $\mathbf{q} = [q_w, q_x, q_y, q_z]^{\!\top}$,
+\begin{equation}
+\dot{\mathbf{q}} = \frac{1}{2}
+\begin{bmatrix}
+-q_x & -q_y & -q_z \\
+ q_w & -q_z &  q_y \\
+ q_z &  q_w & -q_x \\
+-q_y &  q_x &  q_w
+\end{bmatrix} \boldsymbol{\omega},
+\label{eq:quat}
+\end{equation}
+and $J(\dJ) = \mathrm{diag}\bigl(J_{xx} + \dJ,\; J_{yy} + \dJ,\; J_{zz}\bigr)$. Thrust acts at
+the geometric center along the body $z$ axis, so about a composite CoM at
+$\mathbf{r}_c = [c_x, c_y, c_z]$ it produces
+\begin{equation}
+\tcom(\cvec) = (-\mathbf{r}_c) \times \mathbf{e}_3 T = \bigl[-c_y T,\; +c_x T,\; 0\bigr]^{\!\top}. \label{eq:tcom}
+\end{equation}
+Note that $c_z$ \emph{cannot} appear: a vertical CoM offset is collinear with the body-$z$
+thrust and their cross product vanishes identically, and gravity acts at the CoM itself. The
+CoM offset is therefore a two-parameter quantity by construction, not by truncation.
+
+Each parameter has exactly one point of entry: $m$ appears only as the thrust-to-acceleration
+gain $1/m$ in \eqref{eq:trans}, $\dJ$ only in $J(\dJ)$ in \eqref{eq:rot}, and $\cvec$ only in
+\eqref{eq:tcom}. This is what makes $m$ observable from a model-independent thrust
+reconstruction: given $\Tphys$, the measured $\dot{\mathbf{v}}$ pins $m$ uniquely.
+
+\textbf{Structured parameterization of the payload geometry.} $\dJ$ and $\cvec$ are
+\emph{not} additional estimated degrees of freedom. Modelling the payload as a point mass
+$\mpay$ rigidly attached at a known body-frame offset $\rp$, and writing
+$\mt = \mb + \mpay$ and the reduced mass $\mu = \mb\,\mpay / \mt$, the parallel-axis theorem and
+the CoM definition give them in closed form:
+\begin{align}
+\dJ &= \tfrac12\bigl(\dJ_{xx} + \dJ_{yy}\bigr) = \mu\Bigl( r_z^2 + \tfrac12\bigl(r_x^2 + r_y^2\bigr) \Bigr), \label{eq:dj}\\
+\cvec &= \frac{\mpay}{\mt}\,\bigl[r_x,\; r_y\bigr]. \label{eq:cxy}
+\end{align}
+Three numbers are thus generated from a \emph{single} unknown scalar $\mpay$ plus known
+geometry: the rigid-body constraint replaces two degrees of freedom that a naive
+augmentation would have to identify. For a \SI{0.3}{\kg} payload at
+$\rp = [0, 0.109, -0.47]\,$\si{\meter} this yields $\mu = \SI{0.262}{\kg}$,
+$\dJ = \SI{0.0594}{\kg\meter\squared}$ --- an inertia ratio $(J_{xx}+\dJ)/J_{xx} = 5.2$ ---
+and $c_y = \SI{13.8}{\milli\meter}$, i.e.\ a constant eccentric hover torque
+$|c_y| \mt g \approx \SI{0.32}{\newton\meter}$, about \SI{64}{\percent} of the available
+torque authority. Compensating mass alone is therefore insufficient.
+
+\textbf{MHE.} The estimator augments the mass into the state,
+$x_{\mathrm{aug}} = [x;\, m] \in \mathbb{R}^{14}$ with $\dot m = 0$ (constant over the window)
+and process noise on the 13 physical states only; the payload geometry is passed in as a
+\emph{known} runtime parameter vector alongside the measured input,
+\begin{equation}
+p_{\mathrm{MHE}} = \bigl[\, T,\; \boldsymbol{\tau},\; \dJ,\; c_x,\; c_y \,\bigr] \in \mathbb{R}^{7}. \label{eq:pmhe}
+\end{equation}
+Window $N = 20$, $dt = \SI{0.1}{s}$, terminal measurement excluded from the cost, and $m$
+bounded to $[\SI{1.961}{\kg}, \SI{5.0}{\kg}]$ (a physical floor at $0.95\mb$: the vehicle
+cannot be lighter than the bare airframe).
+
+\textbf{NMPC parameter consumption.} The controller carries
+$p_{\mathrm{NMPC}} = [x_{\mathrm{ref}}(13),\, m,\, \dJ,\, \cvec(2)] \in \mathbb{R}^{17}$.
+The hover baseline in the input cost is re-centred by the live parameters,
+\begin{equation}
+T_h = m\,g, \qquad
+u_{\mathrm{hover}} = \bigl[\, T_h,\; c_y T_h,\; -c_x T_h,\; 0 \,\bigr]^{\!\top}, \label{eq:hover}
+\end{equation}
+the torque entries being exactly $-\tcom$ of \eqref{eq:tcom}: hovering with an eccentric load
+\emph{requires} a constant trim torque, and a cost that does not admit this pulls the torque
+toward zero, producing the same class of steady-state bias as a stale hover-thrust baseline.
+Finally, model consistency cannot restore inner-loop bandwidth, so the PX4 rate gains are
+scaled at attach by the inertia ratio
+\begin{equation}
+K \leftarrow K_{\mathrm{nom}} \cdot \min\!\Bigl( \frac{J_{xx} + \dJ}{J_{xx}},\; 5.0 \Bigr). \label{eq:gain}
+\end{equation}
+
+% =====================================================================
+% Optional subsection for Section IV (place before \subsection{Ground-truth-free
+% online geometry}) -- pre-empts the reviewer/advisor question directly.
+% =====================================================================
+\subsection{Why the inertia and CoM are not augmented into the state}
+\label{sec:whynotaugment}
+Augmenting $\dJ$ and $\cvec$ into the MHE decision vector is the obvious alternative, and we
+argue against it on three grounds. \emph{(i) Asymmetric observability.} The mass is excited
+directly by the thrust--acceleration relation \eqref{eq:trans} and is observable in near-hover
+flight; $\dJ$ acts only through $\dot{\boldsymbol{\omega}}$ in \eqref{eq:rot}, which a delivery
+task in near-hover excites weakly. Making it free lets the optimizer explain noise with a
+near-unobservable quantity. \emph{(ii) They compete for the same residual.} Deriving the
+geometry from the \emph{instantaneous} mass estimate closes a feedback loop
+$m_{\mathrm{est}} \!\rightarrow\! \dJ,\cvec \!\rightarrow\! \text{attitude model} \!\rightarrow\! m_{\mathrm{est}}$;
+we observed this bootstrap fail structurally on light payloads (\S\ref{sec:method}-E), and the
+fix was to sever it, not to add more free parameters. \emph{(iii) Economy.} Equations
+\eqref{eq:dj}--\eqref{eq:cxy} obtain all three numbers from one scalar $\mpay$, and that scalar
+may be a weak operational prior: with the geometry prior set \SI{33}{\percent} wrong, the mass
+estimate still converges to within \SI{0.3}{\percent} (\S\ref{sec:results}-C). The online
+variant \eqref{eq:conline} then refines $\cvec$ through a channel that reads no model state at
+all:
+\begin{equation}
+c_x = -\,\tau_{\mathrm{pitch}}^{\mathrm{phys}} / \Tphys, \qquad
+c_y = +\,\tau_{\mathrm{roll}}^{\mathrm{phys}} / \Tphys, \label{eq:conline}
+\end{equation}
+gated to steady flight ($|\boldsymbol{\omega}| < \SI{0.15}{\radian\per\second}$,
+$|\mathbf{v}_{xy}| < \SI{0.20}{\meter\per\second}$) and low-pass filtered
+($\tau = \SI{2}{s}$). Both $\Tphys$ and $\tauphys$ come from rotor speeds
+($F_i = k_f \omega_i^2$), so \eqref{eq:conline} is an algebraic inversion, not an optimization,
+and is structurally decoupled from $m$.
+
+% =====================================================================
+% Two sentences for Section VII (Limitations) -- declare the one modelling
+% approximation that is genuinely non-negligible, before a reviewer finds it.
+% =====================================================================
+\textbf{[Limitations insert]} Two approximations in \eqref{eq:dj} are worth stating. The
+single scalar $\dJ$ replaces the pair $(\dJ_{xx}, \dJ_{yy})$ by their mean, an anisotropy
+error of $\tfrac12 \mu |r_x^2 - r_y^2|$, below \SI{1}{\percent} of $J_{xx}+\dJ$ at our offsets.
+More substantially, the yaw increment $\dJ_{zz} = \mu(r_x^2 + r_y^2)$ is neglected: at
+\SI{0.3}{\kg} and $r_{xy} = \SI{0.109}{\meter}$ it is \SI{0.0031}{\kg\meter\squared}, some
+\SI{15}{\percent} of $J_{zz}$. The yaw channel neither carries the payload compensation nor
+participates in \eqref{eq:conline}, so this does not affect the reported results; removing the
+approximation requires only replacing $J_{zz}$ by $J_{zz} + \mu(r_x^2+r_y^2)$ in
+\eqref{eq:rot} and introduces no new estimated quantity.
+
+\end{document}

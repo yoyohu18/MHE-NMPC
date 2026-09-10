@@ -1,0 +1,742 @@
+%% =====================================================================
+%% chap_model.tex -- Master's thesis chapter:
+%%   Kinematics, dynamics, and the parameter structure of the
+%%   payload-adaptive model.
+%%
+%% FORMAT: single-column thesis chapter (\chapter / \section /
+%% \subsection). Contains no \documentclass or preamble, so it drops
+%% into any thesis template with \input{chap_model}.
+%%
+%% REQUIRES in the preamble:
+%%   amsmath, amssymb, booktabs, siunitx, bm
+%%   (optional) \numberwithin{equation}{chapter}  for 3.1, 3.2, ...
+%%
+%% NOTE: the conference version of this material is sec_model.tex
+%% (two-column IEEEtran, condensed). Keep both; they diverge on
+%% purpose -- the thesis version carries the full derivations.
+%% =====================================================================
+
+% ---- Notation macros (move to the preamble if preferred) ------------
+\providecommand{\dJ}{\Delta J}
+\providecommand{\Jt}{J_t}
+\providecommand{\Jb}{J_b}
+\providecommand{\cvec}{\bm{c}}
+\providecommand{\rp}{\bm{r}_p}
+\providecommand{\rc}{\bm{r}_c}
+\providecommand{\mpay}{\hat{m}_p}
+\providecommand{\mb}{m_b}
+\providecommand{\mt}{m_t}
+\providecommand{\Tphys}{T_{\mathrm{phys}}}
+\providecommand{\tauphys}{\bm{\tau}_{\mathrm{phys}}}
+\providecommand{\tcom}{\bm{\tau}_{\mathrm{com}}}
+\providecommand{\ev}{\bm{e}_3}
+
+\chapter{Modeling and Parameter Structure}\label{ch:model}
+
+A quadrotor that picks up a parcel does not merely become heavier. It
+also becomes harder to rotate, and its centre of mass no longer lies on
+the thrust axis. These are three distinct changes to the equations of
+motion, and a controller that compensates only the first will fail in
+ways that mass adaptation cannot explain.
+
+This chapter derives the model that the estimator and the controller
+share, and then makes explicit which of its parameters are identified
+online and which are not. The central structural claim --- and the reason
+the method needs so little sensing --- is that the three payload-induced
+quantities are not three independent unknowns. Only the mass is a
+decision variable of the estimator; the inertia increment and the
+centre-of-mass offset are generated from it and from known contact
+geometry by rigid-body algebra, at the cost of no additional degrees of
+freedom.
+
+Section~\ref{sec:model:frames} fixes frames and conventions,
+Sections~\ref{sec:model:kin}--\ref{sec:model:dyn} derive the kinematics
+and dynamics, and Section~\ref{sec:model:payload} derives the payload
+parameterization. Sections~\ref{sec:model:phys}--\ref{sec:model:ctrl}
+describe how the parameters are measured and consumed, and
+Sections~\ref{sec:model:whynot}--\ref{sec:model:approx} defend the design
+and declare its approximations.
+
+\section{Frames, Notation, and Conventions}\label{sec:model:frames}
+
+Two reference frames are used throughout. The world frame $\mathcal{W}$
+is East--North--Up (ENU), so that gravity acts along $-z$. The body frame
+$\mathcal{B}$ is Front--Left--Up (FLU) with its origin at the geometric
+centre of the rotor disc --- \emph{not} at the centre of mass. This
+choice is deliberate and consequential: the thrust vector passes through
+the body origin by construction, so any offset between that origin and
+the true centre of mass appears explicitly as a moment
+(Section~\ref{sec:model:dyn}) rather than being absorbed silently into
+the frame definition.
+
+The state vector and the control input are
+\begin{equation}
+x = \bigl[\bm{p};\, \bm{v};\, \bm{q};\, \bm{\omega}\bigr] \in \mathbb{R}^{13},
+\qquad
+u = \bigl[T;\, \bm{\tau}\bigr] \in \mathbb{R}^{4},
+\label{eq:state}
+\end{equation}
+where $\bm{p}$ and $\bm{v}$ are the position and velocity in
+$\mathcal{W}$, $\bm{\omega}$ is the body rate in $\mathcal{B}$, $T$ is the
+collective thrust along the body $z$ axis, and $\bm{\tau}$ is the body
+torque. We abbreviate $\ev = [0,0,1]^{\!\top}$.
+
+\subsection{Attitude representation}\label{sec:model:quat}
+
+Attitude is represented by a unit quaternion under the \emph{Hamilton}
+convention with the scalar part first,
+\begin{equation}
+\bm{q} = [q_w,\, q_x,\, q_y,\, q_z]^{\!\top},
+\qquad \|\bm{q}\| = 1,
+\label{eq:quatdef}
+\end{equation}
+encoding the rotation from $\mathcal{B}$ to $\mathcal{W}$. The
+corresponding rotation matrix is
+\begin{equation}
+R(\bm{q}) =
+\begin{bmatrix}
+q_w^2 + q_x^2 - q_y^2 - q_z^2 & 2(q_xq_y - q_wq_z) & 2(q_xq_z + q_wq_y) \\[2pt]
+2(q_xq_y + q_wq_z) & q_w^2 - q_x^2 + q_y^2 - q_z^2 & 2(q_yq_z - q_wq_x) \\[2pt]
+2(q_xq_z - q_wq_y) & 2(q_yq_z + q_wq_x) & q_w^2 - q_x^2 - q_y^2 + q_z^2
+\end{bmatrix}.
+\label{eq:Rq}
+\end{equation}
+
+Three conventions have just been fixed, and all three matter. Hamilton
+versus JPL determines the sign of the vector part in the quaternion
+product; scalar-first versus scalar-last determines the layout of
+\eqref{eq:Rq}; and resolving $\bm{\omega}$ in $\mathcal{B}$ rather than
+$\mathcal{W}$ determines on which \emph{side} the product appears in the
+kinematics \eqref{eq:quat} below. A mismatch in any one of them
+integrates the attitude in the wrong direction while remaining
+dimensionally consistent, which makes such errors unusually difficult to
+detect. We state them here so that every later equation is unambiguous.
+
+\section{Rigid-Body Kinematics}\label{sec:model:kin}
+
+Translational kinematics is the definition of velocity,
+\begin{equation}
+\dot{\bm{p}} = \bm{v}.
+\label{eq:kin}
+\end{equation}
+
+Attitude kinematics follows from the quaternion product of the attitude
+with the pure quaternion formed from the body rate. Writing
+$\bm{q} = (q_w, \bm{q}_v)$ with $\bm{q}_v = [q_x, q_y, q_z]^{\!\top}$,
+and using the Hamilton product
+$(a_w, \bm{a}_v) \otimes (b_w, \bm{b}_v) =
+(a_w b_w - \bm{a}_v \!\cdot\! \bm{b}_v,\;
+a_w \bm{b}_v + b_w \bm{a}_v + \bm{a}_v \!\times\! \bm{b}_v)$,
+we obtain
+\begin{equation}
+\dot{\bm{q}} = \tfrac{1}{2}\, \bm{q} \otimes [0,\, \bm{\omega}]
+= \tfrac{1}{2}
+\begin{bmatrix}
+-\bm{q}_v \cdot \bm{\omega} \\[2pt]
+q_w \bm{\omega} + \bm{q}_v \times \bm{\omega}
+\end{bmatrix}
+= \tfrac{1}{2}\, \Xi(\bm{q})\, \bm{\omega},
+\label{eq:quat}
+\end{equation}
+where the second equality expands the product and the third collects the
+result into the $4 \times 3$ matrix
+\begin{equation}
+\Xi(\bm{q}) =
+\begin{bmatrix}
+-q_x & -q_y & -q_z \\
+ q_w & -q_z &  q_y \\
+ q_z &  q_w & -q_x \\
+-q_y &  q_x &  q_w
+\end{bmatrix}.
+\label{eq:Xi}
+\end{equation}
+The two forms are algebraically identical; the implementation uses
+\eqref{eq:Xi} because it is a plain matrix--vector product. Note that the
+body rate enters on the \emph{right} of the product in \eqref{eq:quat}.
+Had $\bm{\omega}$ been resolved in $\mathcal{W}$, the correct expression
+would be $\dot{\bm{q}} = \tfrac{1}{2} [0, \bm{\omega}] \otimes \bm{q}$
+instead, differing by a conjugation by $\bm{q}$.
+
+Neither \eqref{eq:kin} nor \eqref{eq:quat} contains a mass, an inertia, or
+any other physical parameter: kinematics is pure geometry. \emph{The
+payload therefore enters the model only through the dynamics}, which
+confines the entire parameter discussion of this chapter to the three
+equations of Section~\ref{sec:model:dyn}.
+
+\section{Rigid-Body Dynamics}\label{sec:model:dyn}
+
+\subsection{Translational dynamics}\label{sec:model:trans}
+
+Newton's second law in $\mathcal{W}$, with thrust rotated from the body
+frame and a linear aerodynamic drag term, gives
+\begin{equation}
+\dot{\bm{v}} = \frac{1}{m}\Bigl( R(\bm{q})\, \ev\, T - k_d\, \bm{v} \Bigr) - g\, \ev,
+\label{eq:trans}
+\end{equation}
+where $m$ is the \emph{composite} mass of airframe plus payload, $k_d$ is
+a fixed drag coefficient, and $g$ is the gravitational acceleration.
+
+Equation \eqref{eq:trans} is where the mass --- and \emph{only} the mass
+--- enters, and it enters in exactly one role: as the scalar gain $1/m$
+from thrust to acceleration. This single fact underwrites the
+observability argument of the whole method. If a thrust value can be
+obtained independently of the model, then the measured acceleration
+determines $m$ uniquely by \eqref{eq:trans}, and it does so in ordinary
+near-hover flight, with no dedicated excitation manoeuvre. The
+qualification ``independently of the model'' is essential and is the
+subject of Section~\ref{sec:model:phys}.
+
+\subsection{Rotational dynamics}\label{sec:model:rot}
+
+Let $\Jb = \mathrm{diag}(J_{xx}, J_{yy}, J_{zz})$ denote the
+bare-airframe inertia, and let the payload raise the roll and pitch axes
+by an increment $\dJ$. We write the resulting \emph{composite inertia} as
+\begin{equation}
+\Jt = \mathrm{diag}\bigl(J_{xx} + \dJ,\; J_{yy} + \dJ,\; J_{zz}\bigr),
+\label{eq:Jt}
+\end{equation}
+the subscript matching the composite mass $\mt$ introduced in
+Section~\ref{sec:model:payload}. Euler's equation for a rigid body,
+written about the composite centre of mass and in the body frame, is then
+\begin{equation}
+\dot{\bm{\omega}} = \Jt^{-1}\Bigl( \bm{\tau} + \tcom(\cvec) - \bm{\omega} \times \Jt \bm{\omega} \Bigr).
+\label{eq:rot}
+\end{equation}
+The term $\bm{\omega} \times \Jt \bm{\omega}$ is the usual gyroscopic
+coupling. The term $\tcom$ is derived next.
+
+That \eqref{eq:rot} is written \emph{about the composite centre of mass}
+is not a stylistic choice: Euler's equation takes this form only when the
+inertia tensor and the applied moments refer to the same point, and that
+point is the centre of mass. Both $\Jt$ in Section~\ref{sec:model:payload}
+and $\tcom$ below must therefore be computed about the composite CoM, not
+about the body origin. Mixing the two reference points is a common and
+silent modelling error.
+
+\subsection{The thrust eccentricity moment}\label{sec:model:tcom}
+
+Thrust acts at the rotor-disc centre, which by the frame convention of
+Section~\ref{sec:model:frames} is the body origin. When a payload is
+attached the composite centre of mass moves to some
+$\rc = [c_x, c_y, c_z]^{\!\top} \neq \bm{0}$, and the thrust therefore no
+longer passes through it. The moment about the CoM is the cross product
+of the position of the application point \emph{relative to the CoM},
+namely $-\rc$, with the force $\ev T$:
+\begin{align}
+\tcom(\cvec) &= (-\rc) \times \ev T
+= -\begin{bmatrix} c_x \\ c_y \\ c_z \end{bmatrix}
+\times \begin{bmatrix} 0 \\ 0 \\ T \end{bmatrix} \nonumber \\[4pt]
+&= -\begin{bmatrix} c_y T - 0 \\ 0 - c_x T \\ 0 - 0 \end{bmatrix}
+= \begin{bmatrix} -c_y T \\ +c_x T \\ 0 \end{bmatrix}.
+\label{eq:tcom}
+\end{align}
+
+Two properties of \eqref{eq:tcom} deserve emphasis.
+
+First, \textbf{$c_z$ cannot appear.} The third component of $\rc$
+multiplies only terms that vanish, because a vertical CoM offset is
+collinear with the body-$z$ thrust and the cross product of collinear
+vectors is identically zero. Gravity, likewise, acts \emph{at} the centre
+of mass and exerts no moment about it. The centre-of-mass offset is
+therefore a two-parameter quantity \emph{by construction, not by
+truncation} --- a distinction worth stating explicitly, since ``the
+offset is three-dimensional, yet only two components are modelled'' is an
+entirely natural objection to raise.
+
+Second, \textbf{$\tcom$ is a constant moment in level hover.} It does not
+average to zero, and it is not small: for the payload of
+Section~\ref{sec:model:payload} it consumes roughly two thirds of the
+available roll authority. Hovering on the spot with an off-centre load
+therefore \emph{requires} a persistent trim torque. A model that omits
+\eqref{eq:tcom} does not merely lose accuracy; it presents the controller
+with a standing disturbance that has no explanation, which the controller
+will then try to eliminate by manoeuvring. Section~\ref{sec:model:ctrl}
+shows that the cost function must admit the same fact independently.
+
+\subsection{Structure of the parameter entry points}\label{sec:model:entry}
+
+Collecting \eqref{eq:trans}, \eqref{eq:rot} and \eqref{eq:tcom}, the model
+has the property on which the rest of this thesis is built:
+
+\begin{quote}
+\emph{Each payload-dependent parameter has exactly one point of entry.}
+The mass appears only as $1/m$ in the translational dynamics; the inertia
+increment appears only inside $\Jt$ in the rotational dynamics; the
+centre-of-mass offset appears only in the eccentricity moment.
+\end{quote}
+
+This separation is what makes the parameters individually attributable to
+distinct physical channels --- the mass to the thrust--acceleration
+relation, the inertia to angular acceleration, the offset to the
+steady-state torque balance --- and it is exploited directly in
+Sections~\ref{sec:model:mhe} and \ref{sec:model:whynot}.
+
+\section{Payload-Induced Parameters}\label{sec:model:payload}
+
+We now derive $\dJ$ and $\cvec$. The payload is modelled as a point mass
+$\mpay$ rigidly attached at a known body-frame offset
+$\rp = [r_x, r_y, r_z]^{\!\top}$ with $r_z < 0$ (the load hangs below the
+airframe). Define the composite mass and the \emph{reduced mass}
+\begin{equation}
+\mt = \mb + \mpay,
+\qquad
+\mu = \frac{\mb\, \mpay}{\mb + \mpay} = \frac{\mb\, \mpay}{\mt},
+\label{eq:mu}
+\end{equation}
+where $\mb$ is the bare-airframe mass.
+
+\subsection{Centre-of-mass offset}\label{sec:model:com}
+
+The composite centre of mass is the mass-weighted mean of the two
+constituent positions. Taking the airframe centre of mass at the body
+origin and the payload at $\rp$,
+\begin{equation}
+\rc = \frac{\mb \cdot \bm{0} + \mpay \cdot \rp}{\mt}
+= \frac{\mpay}{\mt}\, \rp ,
+\label{eq:rc}
+\end{equation}
+whose horizontal components are the pair required by \eqref{eq:tcom}:
+\begin{equation}
+\cvec = [c_x,\, c_y] = \frac{\mpay}{\mt}\, [r_x,\, r_y].
+\label{eq:cxy}
+\end{equation}
+
+\subsection{Inertia increment and the reduced mass}\label{sec:model:paxis}
+
+The inertia increment requires more care than the parallel-axis theorem
+applied naively, because \emph{the centre of mass itself moves when the
+payload is attached}. The theorem must be applied about the \emph{new}
+centre of mass \eqref{eq:rc}, and both bodies contribute, since the
+airframe no longer sits at the CoM either.
+
+Consider a single axis and let $d$ denote the corresponding lever arm.
+From \eqref{eq:rc}, the distances of the two bodies from the composite
+centre of mass are
+\begin{equation}
+\underbrace{\bigl\| \bm{0} - \rc \bigr\| = \frac{\mpay}{\mt}\, d}_{\text{airframe}},
+\qquad
+\underbrace{\bigl\| \rp - \rc \bigr\| = \Bigl( 1 - \frac{\mpay}{\mt} \Bigr) d = \frac{\mb}{\mt}\, d}_{\text{payload}} .
+\label{eq:dists}
+\end{equation}
+Note that the payload's distance is \emph{smaller} than $d$. Adding the
+two parallel-axis contributions and simplifying,
+\begin{align}
+\Delta J^{(d)}
+&= \mb \Bigl( \frac{\mpay}{\mt} d \Bigr)^{\!2}
+ + \mpay \Bigl( \frac{\mb}{\mt} d \Bigr)^{\!2} \nonumber \\[4pt]
+&= \frac{d^2}{\mt^2}\Bigl( \mb\, \mpay^2 + \mpay\, \mb^2 \Bigr)
+ = \frac{d^2}{\mt^2}\, \mb\, \mpay \bigl( \mpay + \mb \bigr) \nonumber \\[4pt]
+&= \frac{\mb\, \mpay}{\mt}\, d^2
+ = \mu\, d^2 .
+\label{eq:reduced}
+\end{align}
+The factor $(\mb + \mpay)$ produced by the sum cancels one power of $\mt$
+in the denominator, and the two contributions collapse onto the reduced
+mass \eqref{eq:mu} --- the same quantity that governs the two-body
+problem in classical mechanics, and for the same reason: the inertia of a
+rigid pair depends only on their \emph{relative} configuration.
+
+Equation \eqref{eq:reduced} also identifies a natural error. Writing
+$\Delta J^{(d)} = \mpay d^2$ --- treating the payload as orbiting a fixed
+body origin, and forgetting both the airframe's own contribution and the
+displacement of the CoM --- overestimates the increment by the factor
+$\mt / \mb$, which is \SI{14.5}{\percent} at the payload considered
+below. Two limiting cases confirm \eqref{eq:reduced}: as
+$\mpay \!\ll\! \mb$ we recover $\mu \to \mpay$ (a light load barely moves
+the CoM, and the naive expression becomes correct), while as
+$\mpay \!\gg\! \mb$ we obtain $\mu \to \mb$ (a heavy load anchors the CoM
+and it is the airframe that revolves about it).
+
+Applying \eqref{eq:reduced} per axis with the appropriate arms gives
+\begin{equation}
+\dJ_{xx} = \mu\bigl(r_y^2 + r_z^2\bigr), \quad
+\dJ_{yy} = \mu\bigl(r_x^2 + r_z^2\bigr), \quad
+\dJ_{zz} = \mu\bigl(r_x^2 + r_y^2\bigr),
+\label{eq:djaxes}
+\end{equation}
+and the model carries the roll/pitch mean as a single scalar,
+\begin{equation}
+\dJ = \tfrac{1}{2}\bigl(\dJ_{xx} + \dJ_{yy}\bigr)
+    = \mu\Bigl( r_z^2 + \tfrac{1}{2}\bigl(r_x^2 + r_y^2\bigr) \Bigr).
+\label{eq:dj}
+\end{equation}
+The consequences of using one scalar in place of the pair, and of
+omitting $\dJ_{zz}$ from \eqref{eq:Jt}, are stated in
+Section~\ref{sec:model:approx}.
+
+\subsection{One unknown, three numbers}\label{sec:model:onescalar}
+
+Equations \eqref{eq:cxy} and \eqref{eq:dj} produce all three
+payload-dependent quantities --- $\dJ$, $c_x$, $c_y$ --- from a
+\emph{single} unknown scalar $\mpay$, together with geometry $\rp$ that
+is known from the gripper contact configuration. The rigid-attachment
+constraint thus supplies two degrees of freedom that a naive augmentation
+would otherwise have to identify from data. The estimator is not asked to
+rediscover the parallel-axis theorem from measurement noise; it is given
+the theorem and asked for one number.
+
+This is the structural claim of the chapter, and
+Table~\ref{tab:params} records the resulting parameter identities.
+Section~\ref{sec:model:whynot} defends the choice against the obvious
+alternative.
+
+\begin{table}[t]
+\caption{Model parameters, classified by identity. Only the mass is a
+decision variable of the estimator; the inertia increment and the CoM
+offset enter the estimator as \emph{known} runtime parameters, on the same
+footing as the measured thrust and torque.}
+\label{tab:params}
+\centering
+\footnotesize
+\begin{tabular}{@{}l p{0.23\textwidth} c p{0.235\textwidth} p{0.17\textwidth}@{}}
+\toprule
+Symbol & Meaning & Dim. & Identity & Enters through \\
+\midrule
+$m$ & composite mass & 1 & \textbf{MHE decision variable} & \eqref{eq:trans}, \eqref{eq:hover} \\
+$\dJ$ & roll/pitch inertia increment & 1 & derived, \eqref{eq:dj} & \eqref{eq:Jt}, \eqref{eq:gain} \\
+$\cvec$ & CoM horizontal offset & 2 & derived \eqref{eq:cxy}, or inverted online \eqref{eq:conline} & \eqref{eq:tcom}, \eqref{eq:hover} \\
+\midrule
+$\mpay$ & payload mass (\emph{sole unknown}) & 1 & weak operational prior & \eqref{eq:cxy}, \eqref{eq:dj} \\
+$\rp$ & payload offset in $\mathcal{B}$ & 3 & known (contact geometry) & \eqref{eq:cxy}, \eqref{eq:dj} \\
+\midrule
+$\mb$ & bare-airframe mass & 1 & calibration & \SI{2.0643}{\kg} \\
+$\Jb$ & bare-airframe inertia & 3 & calibration & $\mathrm{diag}(0.0142,$ $0.0142, 0.0210)$ \\
+$k_d$, $g$ & drag coefficient, gravity & 2 & constants & $0.05$, $9.81$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Magnitudes on the experimental platform}\label{sec:model:magnitudes}
+
+To fix ideas, consider a \SI{0.3}{\kg} payload attached at
+$\rp = [0,\, 0.109,\, -0.47]\,$\si{\meter} on the platform of this work
+($\mb = \SI{2.0643}{\kg}$, $J_{xx} = \SI{0.0142}{\kg\meter\squared}$,
+roll/pitch torque authority \SI{0.5}{\newton\meter}). Equations
+\eqref{eq:mu}, \eqref{eq:cxy} and \eqref{eq:dj} give
+\begin{align}
+\mu &= \SI{0.262}{\kg}, &
+\dJ &= \SI{0.0594}{\kg\meter\squared}, \nonumber \\
+\frac{J_{xx} + \dJ}{J_{xx}} &= 5.18, &
+c_y &= \SI{13.8}{\milli\meter},
+\label{eq:numbers}
+\end{align}
+and hence a constant hover trim torque
+\begin{equation}
+|c_y|\, \mt\, g = \SI{0.32}{\newton\meter} \approx \SI{64}{\percent}\ \text{of the roll authority.}
+\label{eq:trimtorque}
+\end{equation}
+
+These numbers state the problem this thesis addresses more sharply than
+any qualitative argument. A \SI{0.3}{\kg} parcel on a \SI{2.06}{\kg}
+airframe is a \SI{15}{\percent} change of mass --- but simultaneously a
+\emph{five-fold} change of roll inertia and a standing demand on two
+thirds of the torque margin. Adapting the mass alone accounts for neither
+of the latter two. Note also that the $r_z^2$ term contributes
+\SI{97.4}{\percent} of $\dJ$ in \eqref{eq:dj}: the increment is dominated
+by how far \emph{below} the airframe the load hangs, not by how far it is
+off-centre.
+
+\section{Model-Independent Reconstruction of the Physical Input}\label{sec:model:phys}
+
+The thrust and torque appearing in \eqref{eq:trans} and \eqref{eq:rot}
+must be known to the estimator. They are reconstructed from measured
+rotor speeds $\omega_i$ and the known rotor positions $(x_i, y_i)$ via the
+quadratic rotor model $F_i = k_f \omega_i^2$:
+\begin{equation}
+\Tphys = \sum_i F_i, \qquad
+\tau_{\mathrm{roll}} = \sum_i y_i F_i, \qquad
+\tau_{\mathrm{pitch}} = -\sum_i x_i F_i .
+\label{eq:phys}
+\end{equation}
+
+It is worth being precise about why the \emph{commanded} thrust cannot be
+used instead, since it is available for free and appears equivalent. Let
+the controller compute its thrust command from an assumed mass
+$\tilde{m}$, so that in hover $T_{\mathrm{cmd}} = \tilde{m} g$. Feeding
+$T_{\mathrm{cmd}}$ into \eqref{eq:trans} and solving for the mass yields
+$m = T_{\mathrm{cmd}} / g = \tilde{m}$ --- for \emph{any} $\tilde{m}$
+whatsoever. The relation is satisfied identically, the residual carries no
+information, and the mass is unobservable. The estimate would simply
+reproduce whatever the controller already believed.
+
+Equation \eqref{eq:phys} breaks this circularity because rotor speeds are
+a physical measurement into which no model state enters. This is a
+recurring principle in what follows: an adaptive loop must be fed by a
+signal that is not itself a product of the adaptation.
+
+\section{Estimation: The Mass as the Single Online Degree of Freedom}\label{sec:model:mhe}
+
+\subsection{Augmented state and estimator formulation}\label{sec:model:mheform}
+
+The moving-horizon estimator augments the mass into the state,
+\begin{equation}
+x_{\mathrm{aug}} = [x;\, m] \in \mathbb{R}^{14},
+\qquad \dot m = 0,
+\label{eq:xaug}
+\end{equation}
+holding it constant across the horizon so that a window of measurements
+constrains a single value rather than a free trajectory. Process noise
+$\bm{w} \in \mathbb{R}^{13}$ is admitted on the physical states only;
+adding noise to the mass channel would allow it to drift within the
+window and would dissolve precisely the constraint that makes the
+estimate meaningful.
+
+Over a horizon of $N$ stages the estimator solves
+\begin{align}
+\min_{x_0,\, \bm{w}} \quad
+& \sum_{k=0}^{N-1} \Bigl( \bigl\| \bm{y}_k - h(x_k) \bigr\|^2_{R}
++ \bigl\| \bm{w}_k \bigr\|^2_{Q} \Bigr)
++ \bigl\| x_0 - \bar{x}_0 \bigr\|^2_{Q_0} \nonumber \\
+\mathrm{s.t.} \quad
+& x_{k+1} = f\bigl( x_k,\, \bm{w}_k;\, p_{\mathrm{MHE}} \bigr), \nonumber \\
+& \underline{m} \le m \le \overline{m},
+\label{eq:mhe}
+\end{align}
+where $f$ is the discretisation of \eqref{eq:kin}--\eqref{eq:rot},
+$h$ selects the measured states, and the arrival cost
+$\| x_0 - \bar{x}_0 \|^2_{Q_0}$ anchors the start of the window to the
+estimate propagated from the previous solve.
+
+The payload geometry does \emph{not} appear in the decision vector. It is
+supplied as a runtime parameter, alongside the measured input:
+\begin{equation}
+p_{\mathrm{MHE}} = \bigl[\, T,\; \bm{\tau},\; \dJ,\; c_x,\; c_y \,\bigr] \in \mathbb{R}^{7}.
+\label{eq:pmhe}
+\end{equation}
+Within the estimator, therefore, $\dJ$ and $\cvec$ have exactly the same
+status as the measured thrust and torque: known inputs, not unknowns.
+
+We use $N = 20$ stages at $dt = \SI{0.1}{\second}$, a \SI{2.0}{\second}
+horizon, and bound the mass to
+$[\SI{1.961}{\kg},\, \SI{5.0}{\kg}]$. The lower bound is the physical
+floor $0.95\,\mb$: the vehicle cannot weigh less than its own airframe.
+That this bound is a \emph{hard constraint on a decision variable} is a
+concrete advantage of the moving-horizon formulation over a recursive
+filter such as an extended Kalman filter, which can be biased away from
+non-physical estimates but cannot be forbidden from producing them.
+
+\subsection{Ground-truth-free inversion of the CoM offset}\label{sec:model:conline}
+
+Where rotor speeds are available, the centre-of-mass offset need not come
+from the prior at all. In steady hover the eccentricity moment
+\eqref{eq:tcom} is balanced by the inner loop, so
+$\dot{\bm{\omega}} \approx 0$ and $\bm{\omega} \approx \bm{0}$ reduce
+\eqref{eq:rot} to $\bm{\tau} = -\tcom$. Substituting \eqref{eq:tcom} and
+solving componentwise,
+\begin{equation}
+c_x = -\,\frac{\tau_{\mathrm{pitch}}^{\mathrm{phys}}}{\Tphys},
+\qquad
+c_y = +\,\frac{\tau_{\mathrm{roll}}^{\mathrm{phys}}}{\Tphys}.
+\label{eq:conline}
+\end{equation}
+
+This is an algebraic inversion --- one division --- not an optimisation,
+and it introduces no decision variable. Three properties make it
+admissible within an adaptive loop.
+
+\begin{enumerate}
+\item \textbf{It reads no model state.} Both numerator and denominator
+come from \eqref{eq:phys}. The inversion therefore cannot close an
+estimate-to-model feedback path, which is the failure mode analysed in
+Section~\ref{sec:model:whynot}.
+
+\item \textbf{It is immune to thrust calibration.} Substituting
+$F_i = k_f \omega_i^2$ into \eqref{eq:phys} and \eqref{eq:conline}, the
+rotor coefficient cancels,
+\begin{equation}
+c_x = -\frac{-\sum_i x_i k_f \omega_i^2}{\sum_i k_f \omega_i^2}
+    = \frac{\sum_i x_i \omega_i^2}{\sum_i \omega_i^2},
+\label{eq:kfcancel}
+\end{equation}
+leaving a quantity that depends only on rotor geometry and the
+\emph{relative} distribution of rotor speeds. Any method that consumes an
+absolute thrust inherits the calibration error of $k_f$; this one does
+not.
+
+\item \textbf{Channels are assigned by identifiability.} The offset
+$\cvec$ possesses an independent observable and is estimated online,
+whereas $r_z$ is annihilated by the cross product in \eqref{eq:tcom} and
+cannot be identified from the torque channel at all. It must remain a
+prior. The split is dictated by the physics, not chosen for convenience.
+\end{enumerate}
+
+Two filtering stages precede use of \eqref{eq:conline}, and they address
+different error mechanisms. A \emph{gate} rejects samples taken outside
+steady flight ($\|\bm{\omega}\| < \SI{0.15}{\radian\per\second}$,
+$\|\bm{v}_{xy}\| < \SI{0.20}{\meter\per\second}$), because during
+manoeuvres the measured torque contains angular-acceleration terms and is
+not a trim torque at all --- a \emph{systematic} error that no amount of
+averaging would remove. An exponential moving average with time constant
+\SI{2}{\second} then suppresses \emph{random} error, which is
+substantial: the numerator of \eqref{eq:conline} is a differential-mode
+combination of rotor forces, in which the common-mode signal cancels and
+the noise does not. Low-pass filtering costs no information here because
+$\cvec$ is quasi-static once the load is grasped --- its signal lies at
+DC, while the rotor noise does not. The mass, by contrast, changes as a
+step at grasp and release, and could not be treated this way; that is
+precisely why $m$ is handled by the optimisation \eqref{eq:mhe} and
+$\cvec$ by a first-order filter.
+
+\section{Control: How the Parameters Re-centre the Cost}\label{sec:model:ctrl}
+
+The nonlinear model predictive controller carries the parameters as
+runtime values,
+\begin{equation}
+p_{\mathrm{NMPC}} = \bigl[\, x_{\mathrm{ref}}(13),\; m,\; \dJ,\; \cvec(2),\; \bm{d}(3) \,\bigr] \in \mathbb{R}^{20},
+\label{eq:pnmpc}
+\end{equation}
+where $\bm{d}$ is a lumped translational disturbance used only by the
+$\mathcal{L}_1$ comparison baseline and identically zero under the
+proposed method. Over a prediction horizon of $N$ stages it solves
+\begin{align}
+\min_{u_{0:N-1}} \quad
+& \sum_{k=0}^{N-1} \Bigl( \bigl\| e_{\mathrm{track}}(x_k, x_{\mathrm{ref},k}) \bigr\|^2_{Q}
++ \bigl\| u_k - u_{\mathrm{hover}} \bigr\|^2_{R} \Bigr) \nonumber \\
+& \qquad + \bigl\| e_{\mathrm{track}}(x_N, x_{\mathrm{ref},N}) \bigr\|^2_{P} \nonumber \\
+\mathrm{s.t.} \quad
+& x_{k+1} = f(x_k, u_k;\, p_{\mathrm{NMPC}}), \nonumber \\
+& \underline{T} \le T_k \le \overline{T}, \quad
+  |\tau_{k,i}| \le \overline{\tau}_i ,
+\label{eq:nmpc}
+\end{align}
+applying only $u_0$ and re-solving at the next step.
+
+\subsection{Why the input baseline must track the parameters}\label{sec:model:hover}
+
+The second term of \eqref{eq:nmpc} penalises the deviation of the input
+from a \emph{baseline} $u_{\mathrm{hover}}$, and that baseline is
+recomputed from the live parameters at every solve rather than fixed when
+the solver is generated:
+\begin{equation}
+T_h = m\,g,
+\qquad
+u_{\mathrm{hover}} = \bigl[\, T_h,\; c_y T_h,\; -c_x T_h,\; 0 \,\bigr]^{\!\top}.
+\label{eq:hover}
+\end{equation}
+
+Consider first why a baseline is needed at all. Penalising $\|u\|^2_R$
+outright would treat the thrust required merely to remain airborne as an
+expense to be minimised, biasing the solution toward insufficient thrust.
+The baseline recentres the penalty on the input that sustains
+equilibrium, so that $R$ penalises only genuine control effort.
+
+Consider next what happens when the baseline is \emph{stale}. Suppose
+$u_{\mathrm{hover}}$ is computed from the unloaded mass while the vehicle
+carries a parcel. The cost then pulls the thrust persistently toward a
+value below what equilibrium requires, and the optimum settles where the
+marginal tracking cost balances the marginal baseline-deviation cost ---
+at a nonzero steady-state error. The behaviour has a counter-intuitive
+signature that identifies it in practice: \emph{increasing $R$ makes the
+error worse}, because $R$ is precisely the strength with which the
+incorrect baseline pulls. No amount of weight tuning removes a bias of
+this kind; only correcting the baseline does.
+
+The torque entries of \eqref{eq:hover} are exactly $-\tcom$ from
+\eqref{eq:tcom}, and they exist for the same reason. Hovering with an
+eccentric load requires a constant trim torque
+(Section~\ref{sec:model:tcom}); a cost that does not admit this pulls the
+torque toward zero and produces the same class of steady-state bias in
+the attitude channel. The two equations are complementary and neither
+suffices alone: \eqref{eq:tcom} teaches the \emph{model} that the moment
+exists, while \eqref{eq:hover} teaches the \emph{objective} that it is
+necessary.
+
+\subsection{Inner-loop bandwidth}\label{sec:model:gain}
+
+Model consistency in the outer loop cannot restore inner-loop bandwidth.
+The rate controller running on the flight controller is tuned for the
+bare airframe; a payload that multiplies the roll and pitch inertia
+lowers its effective bandwidth, and for heavy eccentric loads the
+resulting attitude oscillation grows until the torque saturates. We
+therefore rescale the rate gains at attachment by the inertia ratio,
+\begin{equation}
+K \leftarrow K_{\mathrm{nom}} \cdot
+\min\!\Bigl( \frac{J_{xx} + \dJ}{J_{xx}},\; 5.0 \Bigr).
+\label{eq:gain}
+\end{equation}
+
+The cap is not incidental. From \eqref{eq:numbers}, a \SI{0.3}{\kg}
+payload already produces a ratio of $5.18$, so that payload sits at the
+ceiling of what inner-loop retuning alone can absorb on this airframe.
+Together with the torque budget \eqref{eq:trimtorque}, this defines a
+feasibility boundary on payload mass and eccentricity that is
+characterised experimentally in a later chapter.
+
+\section{Why the Inertia and CoM Are Not Augmented into the State}\label{sec:model:whynot}
+
+Augmenting $\dJ$ and $\cvec$ into the estimator's decision vector
+\eqref{eq:xaug} --- yielding a seventeen-dimensional augmented state and
+four online parameters instead of one --- is the obvious alternative, and
+it is the design most readers will expect. We argue against it on four
+grounds.
+
+\paragraph{Asymmetric observability} The mass is excited directly by the
+thrust--acceleration relation \eqref{eq:trans} and is observable in
+ordinary near-hover flight, as argued in
+Section~\ref{sec:model:trans}. The inertia increment acts only through
+$\dot{\bm{\omega}}$ in \eqref{eq:rot}, and a delivery task --- spent
+largely in near-hover, low-rate flight --- excites that channel weakly.
+Admitting $\dJ$ as a free variable therefore permits the optimiser to
+explain measurement noise using a nearly unobservable quantity, which
+degrades rather than improves the estimate.
+
+\paragraph{Competition for a single residual} Deriving the geometry from
+the \emph{instantaneous} mass estimate closes a feedback path,
+\begin{equation*}
+m_{\mathrm{est}} \;\longrightarrow\; \dJ,\, \cvec
+\;\longrightarrow\; \text{attitude model}
+\;\longrightarrow\; m_{\mathrm{est}},
+\end{equation*}
+in which two quantities compete to explain the same residual. This
+bootstrap was observed to fail structurally on light payloads: before
+lift-off the mass estimate reads low \emph{legitimately}, since the load
+still rests on the ground; that value is consumed as ``no geometry
+present''; the geometry channel closes; and after lift-off the model is
+mismatched and the estimate remains pinned at its lower bound. The remedy
+was to sever the path --- letting $\mpay$ read a fixed operational prior
+and never the running estimate --- not to add further free parameters.
+
+\paragraph{Economy of parameterisation} Equations \eqref{eq:cxy} and
+\eqref{eq:dj} obtain three numbers from one scalar. The two degrees of
+freedom thereby saved are not discarded information: they are recovered
+from a constraint, rigid attachment, that holds exactly.
+
+\paragraph{The remaining prior may be weak} The single scalar $\mpay$
+need not be accurate. With the geometry prior deliberately set
+\SI{33}{\percent} wrong, the mass estimate still converges to within
+\SI{0.3}{\percent}, so a nominal parcel mass --- a quantity a delivery
+operator knows anyway --- suffices, and no ground-truth measurement of
+the attachment is required. Where rotor speeds are available,
+\eqref{eq:conline} removes the prior from the $\cvec$ path entirely,
+leaving it to influence only $\dJ$.
+
+\section{Declared Modelling Approximations}\label{sec:model:approx}
+
+Three points are stated explicitly here rather than left to be
+discovered.
+
+\paragraph{Anisotropy of the inertia increment} The single scalar
+\eqref{eq:dj} replaces the pair $(\dJ_{xx}, \dJ_{yy})$ of
+\eqref{eq:djaxes} by their arithmetic mean. The resulting error is
+$\tfrac{1}{2}\mu\,|r_x^2 - r_y^2|$, which vanishes exactly when
+$r_x = r_y$ and remains below \SI{1}{\percent} of $J_{xx} + \dJ$ at the
+offsets used in this work.
+
+\paragraph{The yaw increment is neglected} The third expression in
+\eqref{eq:djaxes}, $\dJ_{zz} = \mu(r_x^2 + r_y^2)$, is not added to
+$J_{zz}$ in \eqref{eq:Jt}. At \SI{0.3}{\kg} and
+$r_{xy} = \SI{0.109}{\meter}$ it amounts to
+\SI{0.0031}{\kg\meter\squared}, or \SI{14.8}{\percent} of $J_{zz}$. This
+is a known and non-negligible approximation, and it is retained only
+because the yaw channel neither carries payload compensation nor
+participates in the inversion \eqref{eq:conline}, so it does not affect
+the results reported later. Removing it would require substituting
+$J_{zz} + \mu(r_x^2 + r_y^2)$ into \eqref{eq:Jt} and would introduce no
+new estimated quantity --- the correction is available at zero cost in
+identification, and is omitted only for consistency with the
+implementation as evaluated.
+
+\paragraph{The vertical CoM offset is absent by construction} As shown in
+Section~\ref{sec:model:tcom}, $c_z$ drops out of \eqref{eq:tcom} as an
+exact algebraic consequence of collinearity, not as a truncation. It is
+listed among the approximations only to forestall the opposite reading.

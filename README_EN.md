@@ -8,7 +8,7 @@ change at once. This project estimates those parameters *online* and feeds them 
 predictive controller, with no force/torque sensor, no external "payload attached" signal,
 and no ground-truth measurement of where the payload sits.
 
-![architecture](../paper/figs/fig1_architecture.png)
+![architecture](paper/figs/fig1_architecture.png)
 
 ## Results
 
@@ -20,7 +20,7 @@ and no ground-truth measurement of where the payload sits.
 | NMPC solve time @ 20 Hz | 1.3 ms median / 2.2 ms p99 (**4.4% of the control period**) |
 | Divergence across the 60-run baseline matrix | **0 / 60** |
 
-![result](../paper/figs/fig3_mest_timeline.png)
+![result](paper/figs/fig3_mest_timeline.png)
 
 The estimator deweights the pre-event stages of its sliding window the moment a thrust
 residual crosses a threshold, so stale measurements from before the discontinuity stop
@@ -33,7 +33,7 @@ pre-registered paired factorial ablation (n=8/cell, Latin-square order rotation,
 rates, 97% power) it produced **no measurable gain**. The mechanism is informative: the
 objective is flat over a broad neighbourhood of the hand-designed rule, so on this task
 *when* to reweight carries the benefit and *how much* is weakly determined. Details in
-[the paper](../paper/main.pdf) §VI-B.
+[the paper](paper/main.pdf) §VI-B.
 
 ## Run it
 
@@ -47,7 +47,7 @@ bash paper/reproduce.sh
 
 Requires ROS 2 Jazzy, PX4-Autopilot (SITL), Gazebo Harmonic, and
 [acados](https://github.com/acados/acados). Every number in the paper traces to a
-timestamped log — see [REPRODUCE.md](../paper/REPRODUCE.md) for the figure-by-figure map.
+timestamped log — see [REPRODUCE.md](paper/REPRODUCE.md) for the figure-by-figure map.
 
 ## How it works
 

@@ -1,0 +1,81 @@
+% Focused system-level validation for the eventless interface.
+% The complete detector-development record remains in sec_autonomous_release.tex.
+\subsection{Eventless grasp--release lifecycle}\label{sec:autorelease}
+
+The controller issues the gripper-release command itself, but deliberately does not use that
+command to clear its payload model: a commanded release is not proof of physical detachment.
+We compare an event-driven operational reference (arm~A), which resets payload geometry and
+inner-loop scaling with the command, against the proposed interface (arm~B), which consumes
+only healthy, fresh $m/s/J$ frames. Arm~B completes a release only after its no-payload
+confidence remains above 0.90 for \SI{1.0}{s}. The two arms were paired under three payload and
+trajectory conditions. A pre-registered pair was voided and re-flown if either arm crashed
+before release or lacked payload evidence; these exclusions are reported below and are not
+absorbed into the completion result.
+
+Among valid pairs, arm~B completed autonomous release confirmation in 22/22 flights with no
+observed post-release instability (Table~\ref{tab:complete}). The pooled median delay was
+\SI{2.70}{s}, including the \SI{1.0}{s} confidence hold. The two-sided \SI{95}{\percent}
+Clopper--Pearson interval is $[\SI{84.6}{\percent},\SI{100}{\percent}]$, so this result
+demonstrates closed-loop feasibility rather than a zero failure rate. In all 22 flights the
+payload-presence machine made exactly two transitions---one autonomous load declaration and
+one autonomous empty declaration---with no carrying-phase transition. The published first
+moment decayed continuously rather than stepping to zero, confirming that recovery used the
+intended estimator interface rather than the controller's release command.
+
+\begin{table}[t]
+\caption{Eventless release completion for arm~B (valid paired flights only). Delay includes
+the \SI{1.0}{s} confidence hold.}
+\label{tab:complete}
+\centering
+\begin{tabular}{@{}lccc@{}}
+\toprule
+condition & $n$ & completed & delay median [IQR] \\
+\midrule
+W3: \SI{0.15}{kg}, \SI{4}{m/s} & 8 & 8/8 & \SI{2.56}{s} [2.53, 2.85] \\
+W4: \SI{0.30}{kg}, \SI{4}{m/s} & 6 & 6/6 & \SI{3.00}{s} [2.75, 3.25] \\
+W5: \SI{0.15}{kg}, \SI{2}{m/s} & 8 & 8/8 & \SI{2.70}{s} [2.46, 2.95] \\
+\midrule
+pooled & 22 & 22/22 & \SI{2.70}{s} [2.55, 2.99] \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Safety boundary}
+The 22/22 batch validates the interface once its release evidence is accepted; it does not
+validate a universally robust detector. We therefore tested three physically distinct evidence
+sources: payload quantity, directional thrust residual, and collapse of the normalized first
+moment. A fast branch combining quantity and residual without moment evidence declared release
+prematurely in 3/9 randomized flights during a \SI{4}{m/s} figure-eight. Loaded-flight mass
+estimates could remain below the nominal empty threshold for up to \SI{48}{s}, while a dynamic
+thrust excursion reached \SI{-1.69}{N}, exceeding the \SI{-1.47}{N} weight change of the
+smallest payload. Neither source is therefore reliable on its own in this regime.
+
+We rejected that branch and require every release decision to include fresh, successful
+moment-collapse evidence. Ambiguous cases enter \textsc{unresolved}; a timeout does not clear
+the model or reset adaptive state. In a subsequent 12-flight smoke test, no flight declared
+release before the command: 11 releases were confirmed with a median detector delay of
+\SI{1.9}{s}, and one remained safely unresolved (Table~\ref{tab:release-safety}). This is the
+supported safety conclusion; broader detector robustness remains outside the present claim.
+
+\begin{table}[t]
+\caption{Targeted release-safety ablation.}
+\label{tab:release-safety}
+\centering
+\scriptsize
+\begin{tabular}{@{}lccc@{}}
+\toprule
+decision rule & flights & premature & confirmed / unresolved \\
+\midrule
+quantity + residual fast path & 9 & 3 & --- \\
+fresh moment-gated paths & 12 & 0 & 11 / 1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The paired performance comparison is conditional on successful attachment and survival to the
+release command. Of 76 flights, 18 were voided and re-flown: 15 crashed before release and three
+lacked MHE payload evidence. The available logs cannot distinguish physical capture failure
+from estimator non-recognition in those three cases. Among valid pairs, steady tracking RMS
+differed by at most \SI{0.8}{mm} between arms; no degradation of engineering significance was
+observed, although no equivalence test was pre-registered. The measurable cost of refusing the
+event shortcut is the \SIrange{2.6}{3.0}{s} median confirmation delay.

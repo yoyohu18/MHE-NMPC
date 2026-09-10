@@ -1,0 +1,290 @@
+% =====================================================================
+% §VI subsection: autonomous release confirmation (no self-drop consumption)
+% 2026-09-04.  \input{} this from main.tex inside \section{Results}.
+% Data: nmpc_test_results/mainline_ab2_manifest.csv (76 flights, 38 attempts)
+% Verification script: src/scripts/gripper/verify_mainline_ab2.py
+% =====================================================================
+\subsection{Autonomous release confirmation without self-drop consumption}
+\label{sec:autorelease}
+
+The controller in Sec.~\ref{sec:method} issues the gripper-release command itself, so it
+could trivially zero the payload terms in its own model the instant it commands a release.
+Doing so, however, makes the closed loop depend on an internal event flag rather than on the
+estimate, and that dependency is exactly what a real gripper failure invalidates. We
+therefore test the stricter interface: the controller consumes \emph{only} the continuous
+$m/s/J$ frame and its no-payload confidence, and never reacts to its own drop command.
+
+\paragraph{Arms and protocol} Arm~A (baseline) retains event consumption: the release command
+zeroes the payload geometry and resets the inner-loop scaling in the same frame. Arm~B
+consumes the continuous estimate alone; a release is \emph{complete} only after the
+no-payload confidence stays above \num{0.90} for \SI{1.0}{s}. The physical grasp procedure,
+trajectory, and payload are matched within each pair. The software arms are intentionally
+end-to-end architectures rather than a single-line ablation: arm~A uses its event-driven
+geometry/gain path, whereas arm~B uses continuous estimates, inertia bootstrap, and setpoint
+rate scheduling. Arm~A is therefore an operational reference, not a causal estimate of the
+drop-notification bit alone. Three carrying conditions were run as paired A/B flights: W3 (\SI{0.15}{kg},
+$e_y=\SI{0.10}{m}$, \SI{4}{m/s} figure-eight), W4 (\SI{0.30}{kg}, same trajectory), and W5
+(\SI{0.15}{kg}, \SI{2}{m/s}). A pair was pre-registered as \emph{void} --- and re-flown ---
+if either arm crashed \emph{before} the release command or failed the pre-registered payload-
+evidence check ($p_{90}$ of estimated payload mass below threshold). The latter check did not
+log the simulator joint-state acknowledgement and therefore cannot distinguish a physical
+capture failure from estimator non-recognition. Void rates are reported separately in
+Table~\ref{tab:void}, never absorbed into the main result.
+
+\paragraph{Result} Among valid pairs, arm~B completed autonomous release confirmation in
+\textbf{22 of 22} flights with no post-release instability observed
+(Table~\ref{tab:complete}). The point estimate is \SI{100}{\percent}, but with $n=22$ the
+two-sided \SI{95}{\percent} Clopper--Pearson interval is $[\SI{84.6}{\percent},
+\SI{100}{\percent}]$: these data are consistent with a true failure rate up to
+${\sim}\SI{15}{\percent}$ and must not be read as having established a zero failure rate.
+W4 reached its pre-registered attempt cap at $n=6$ valid pairs rather than the intended 8
+(its arm~A crashed before release in 9 of 16 attempts), so that cell carries meaningfully
+less statistical power than W3 and W5.
+
+\begin{table}[t]
+\caption{Autonomous release completion and confirmation delay (arm~B, valid pairs only).
+Delay is measured from the release command to the frame at which the no-payload confidence
+has held above threshold for the full \SI{1.0}{s} hold, so it includes that hold by
+construction. Arm~A completes by definition at zero delay and is not comparable.}
+\label{tab:complete}
+\centering
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+ & $n$ & completed & delay median [IQR] & delay max \\
+\midrule
+W3 (\SI{0.15}{kg}, \SI{4}{m/s}) & 8 & 8/8 & \SI{2.56}{s} [2.53, 2.85] & \SI{3.00}{s} \\
+W4 (\SI{0.30}{kg}, \SI{4}{m/s}) & 6 & 6/6 & \SI{3.00}{s} [2.75, 3.25] & \SI{4.54}{s} \\
+W5 (\SI{0.15}{kg}, \SI{2}{m/s}) & 8 & 8/8 & \SI{2.70}{s} [2.46, 2.95] & \SI{3.06}{s} \\
+\midrule
+pooled & 22 & 22/22 & \SI{2.70}{s} [2.55, 2.99] & \SI{4.54}{s} \\
+\bottomrule
+\end{tabular}
+\\[2pt]
+\footnotesize Pooled completion \SI{100}{\percent}, two-sided \SI{95}{\percent}
+Clopper--Pearson CI $[\SI{84.6}{\percent}, \SI{100}{\percent}]$.
+\end{table}
+
+\paragraph{Mechanism verification} Three internal signals were logged to confirm that the
+completion arises from the intended mechanism rather than from incidental decay. In all 22
+valid arm~B flights the payload-presence state machine made \emph{exactly two} transitions
+(one autonomous \textsc{empty}$\to$\textsc{loaded} at grasp, one \textsc{loaded}$\to$
+\textsc{empty} triggered by the residual drop detector), with zero spurious transitions
+during the carrying phase; the published first mass moment $s_{\text{out}}$ decayed
+monotonically to zero over all 100 logged frames with no step; and the confidence crossed
+threshold in every flight (\numrange{0.997}{0.999} at completion). This matters because the
+\emph{internal} moment estimate $\hat s$ does \emph{not} vanish after release --- it keeps
+oscillating at a level equivalent to a \SIrange{3}{16}{mm} CoM offset --- so a confidence
+threshold alone could not have produced these completions; the published target must be
+switched, not merely re-thresholded.
+
+\paragraph{Post-batch detector audit} The 22/22 result validates the continuous interface and
+the closed-loop recovery once the then-current residual path declares release; it is not, by
+itself, a distributional validation of the detector. Five follow-on runs exposed that the
+release ratio and loaded-flight ratio distributions approach within only about ten percent.
+We therefore reorganized the detector around three independent sources: moment collapse,
+payload quantity, and a directional thrust residual. Mass and $\Delta J$ are explicitly one
+source because $\Delta J$ is algebraically derived from mass; treating them as two votes would
+manufacture confidence. Absolute $\lVert s\rVert$ is only a sanity bound: its loaded minimum
+(\SI{0.0039}{\kilo\gram\metre}) is lower than its post-release maximum
+(\SI{0.0049}{\kilo\gram\metre}), hence it has no standalone separating power.
+
+Table~\ref{tab:release-replay} reports the resulting historical replay of the audited detector
+revision. The ratio threshold
+$\rho<0.30$ was selected by leave-one-run-out cross-validation, not by the final test run, and
+the same pure decision function is used online and offline. This archive produced no false
+release in 2614 logged loaded frames. However, 14 of 72 releases are missed (11
+of 59 after excluding manifest-invalid flights). The adversarial cross-combination of two
+observed boundary values produces $\rho=1.52$, which no useful ratio threshold can accept.
+Those cases require the residual source; at the time of this audit the M0 profile exposed only
+the shared \SI{4.4}{N} schedule-confirmation threshold, while a \SI{0.15}{kg} release changes
+weight by only \SI{1.47}{N}. The subsequent implementation separated a release-only residual
+vote from that threshold. The randomized smoke below shows why the archival zero-false-release
+count was insufficient to validate its fast branch.
+
+\begin{table}[t]
+\caption{Offline audit of the multi-source release decision on 73 historical SITL
+runs. One run had no release command; 72 enter the release-recall denominator.}
+\label{tab:release-replay}
+\centering
+\begin{tabular}{@{}lc@{}}
+\toprule
+check & result \\
+\midrule
+LOOCV threshold selection & 59/59 folds select $\rho=0.30$ \\
+release replay & 58/72 detected; 14/72 missed \\
+valid-flight subset & 48/59 detected; 11/59 missed \\
+loaded-flight false releases & 0/2614 frames \\
+adversarial observed-bound combination & $\rho=1.52$ (miss) \\
+median detected-release delay & \SI{2.1}{s} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Randomized fast-path smoke} The release-specific detector was scheduled for 12
+repetitions at \SI{0.15}{kg}, \SI{0.10}{m} eccentricity, and a \SI{4}{m/s} figure-eight. We
+stopped at 9 because fastA had already produced a flight-level false-release rate of 3/9
+(Table~\ref{tab:fasta-smoke}). In a representative premature frame,
+$\rho=0.694$ and the moment channel correctly remained false, but payload quantity and the
+ordinary residual were simultaneously false-positive
+($\hat m_p=\SI{-0.0624}{kg}$), satisfying fastA. Across the loaded segments,
+$\hat m_p$ had fifth percentile \SI{-0.1032}{kg}; its longest continuous interval below the
+\SI{0.03}{kg} empty threshold had median \SI{14}{s} and maximum \SI{48}{s}. Persistence and
+exclusion of exact lower-bound contact therefore do not make quantity reliable during this
+manoeuvre. Before the first false declaration in each flight, the moment ratio never fell below
+0.789, a factor 2.6 above its 0.30 threshold.
+
+Run~9 also exposes a stateful cascade. Its first fastA error switched the published $s$ target
+to zero; because the physical payload remained attached, the presence state later re-armed,
+after which the corrupted lifecycle admitted further slow/fastA declarations. These repeated
+events are not independent failures: the safety statistic is 3/9 affected flights, with five
+premature declarations inside them. The slow declaration at $-24.9$~s followed five consecutive
+MHE solve failures: re-anchoring intentionally initialized $\hat s$ to zero, and the detector
+counted this unhealthy initialization before a fresh successful solution. Thus it identifies a
+missing health/freshness gate, not evidence for a physical ``near-zero'' ratio class.
+
+\begin{table}[t]
+\caption{Randomized smoke of the residual-plus-quantity fastA branch. Times are estimator
+release declarations relative to the planned physical drop command.}
+\label{tab:fasta-smoke}
+\centering
+\begin{tabular}{@{}lcc@{}}
+\toprule
+runs & declarations per run & timing relative to command \\
+\midrule
+1--5, 7 & 1 & $+0.8$ to $+1.1$ s \\
+6 & 2 & $-18.1$, $+1.1$ s \\
+8 & 2 & $-39.9$, $+1.0$ s \\
+9 & 4 & $-51.1$, $-24.9$, $-4.8$, $+1.2$ s \\
+\midrule
+flight-level safety failure & \multicolumn{2}{c}{3/9} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The evidence therefore supports only moment-gated decisions: slow
+(quantity plus moment collapse) and fastB (strong residual plus moment collapse). We reject
+fastA. The historical $\rho=1.52$ value is a synthetic cross-combination of observed boundary
+values rather than evidence strong enough to justify retaining a branch with demonstrated
+premature release. If a moment-gated detector times out, the safe outcome is an unresolved
+state and a hover/land abort; timeout must not be promoted to empty-payload evidence. A replay
+after deleting fastA reported the run-9 slow declaration again, but the source log was generated
+under the old branch and is therefore intervention-contaminated rather than a clean
+counterfactual. The actionable defect is still real: moment evidence must be disabled, and its
+persistence reset, whenever the MHE solution is unhealthy, stale, failed, or freshly re-anchored.
+
+\paragraph{Corrected fastA-free smoke} We removed fastA, added the estimator-health gate, and
+repeated 12 online flights under the same acceptance rule: no declaration while loaded, followed
+by either a valid release or a safe unresolved outcome. All 12 met that rule. Eleven produced one
+post-command declaration each (nine fastB and two slow), with median detector delay
+\SI{1.9}{s}; no flight declared release before the command. Three crossed the \SI{12}{s}
+unresolved timeout. Two later received valid moment evidence and resolved at \SI{14.8}{s} and
+\SI{14.2}{s}; one remained unresolved and, as designed, did not switch the $s$ target, clear the
+model, reset adaptive state, or mark the gripper dropped.
+
+The terminal unresolved run also separates safety from coverage. An internal residual attachment
+event transitioned the presence state to \textsc{loaded}, but $\hat m_p$ never exceeded
+\SI{0.09}{kg} for the 20 frames required by a legacy mass-arm latch. Because the unified detector
+is still nested under that latch, it emitted no moment diagnostics at all. This is an arming-gate
+coupling defect, not a release false positive: the unified detector should use the autonomous
+load latch and health gate, while the legacy mass-only path retains its own mass arm. In the same
+flight, mass returned close to the empty value after drop whereas raw $\hat s$ remained near
+\SI{0.018}{kg.m}; forcing it to zero from the controller's drop command would violate the eventless
+premise. It therefore remains an unresolved observability miss.
+
+We corrected that arm-gate coupling and began a new acceptance batch, but stopped after four
+flights when the expanded observation window exposed contamination of the running maximum
+$\lVert s\rVert_{\mathrm{peak}}$. The excursions were not attachment transients: in both cohorts
+they began \SIrange{26}{28}{s} after autonomous attachment, during the figure-eight ramp. Values
+above the known simulation envelope of \SI{0.039}{kg.m} occurred in 49/644 logged frames (7.6\%)
+of the preceding 11-flight set and 49/268 (18.3\%) of the four post-gate flights. The gate fix
+therefore increased exposure to a pre-existing dynamic-estimation defect rather than causing it.
+Because an inflated denominator can make an ordinary loaded moment appear collapsed, these four
+flights are diagnostic, not an acceptance result. The next detector must replace the running
+maximum with a robust reference formed during a healthy, low-dynamic, physically feasible window
+and frozen before dynamic flight. Out-of-envelope moments are estimator-quality events, not
+reference candidates.
+
+\paragraph{Performance} Conditioned on a successful grasp and on surviving to the release
+command, the paired differences are small (Table~\ref{tab:autoperf}). Steady-state tracking
+RMS differs by ${\le}\SI{0.8}{mm}$ in every cell, and peak attitude, angular rate and yaw-torque
+saturation are mixed in sign. We did not pre-register an equivalence test, so we claim only
+that \emph{no performance degradation of engineering significance was observed}, not that the
+two arms are statistically indistinguishable. The one systematic difference is the
+confirmation delay of Table~\ref{tab:complete}: \SIrange{2.6}{3.0}{s} of median latency is the
+price of refusing the event shortcut.
+
+\begin{table}[t]
+\caption{Tracking and attitude metrics on valid pairs, median [IQR]. All quantities are
+conditioned on successful attachment and on pre-release survival; see Table~\ref{tab:void}.}
+\label{tab:autoperf}
+\centering
+\footnotesize
+\begin{tabular}{@{}llcc@{}}
+\toprule
+ & metric & arm~A & arm~B \\
+\midrule
+\multirow{3}{*}{W3 ($n{=}8$)}
+ & steady RMS (\si{m})      & 0.116 [0.115, 0.118] & 0.117 [0.116, 0.119] \\
+ & post-release peak (\si{m}) & 0.221 [0.206, 0.237] & 0.226 [0.221, 0.238] \\
+ & peak tilt (\si{\degree})  & 12.6 [12.4, 12.7] & 12.5 [12.4, 12.5] \\
+\midrule
+\multirow{3}{*}{W4 ($n{=}6$)}
+ & steady RMS (\si{m})      & 0.120 [0.118, 0.124] & 0.120 [0.119, 0.121] \\
+ & post-release peak (\si{m}) & 0.223 [0.214, 0.238] & 0.249 [0.244, 0.255] \\
+ & peak tilt (\si{\degree})  & 12.9 [12.7, 12.9] & 12.9 [12.4, 13.3] \\
+\midrule
+\multirow{3}{*}{W5 ($n{=}8$)}
+ & steady RMS (\si{m})      & 0.044 [0.043, 0.045] & 0.044 [0.042, 0.046] \\
+ & post-release peak (\si{m}) & 0.120 [0.113, 0.128] & 0.148 [0.131, 0.164] \\
+ & peak tilt (\si{\degree})  & 5.37 [5.26, 5.53] & 5.25 [5.14, 5.33] \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Void flights and survivorship} Of 76 flights, 18 (\SI{24}{\percent}) were voided
+and re-flown (Table~\ref{tab:void}). The two arms void for different reasons and at different
+rates, so the performance comparison above is explicitly \emph{conditional} and carries a
+survivorship bias that the pooled numbers cannot remove. Arm~A crashed before release more
+often (11/38 vs.\ 4/38; Fisher two-sided $p=\num{0.082}$, not significant, though the
+direction reproduces an earlier independent batch at 7/48 vs.\ 3/48), concentrated in W4.
+Arm~B instead failed the MHE payload-evidence check in 3 flights where arm~A never did; a
+companion hover batch showed the same asymmetry more strongly (0/24 vs.\ 6/24, Fisher
+$p=\num{0.022}$). These historical runs saved the proximity node's attach request but not the
+magnetic-joint plugin's \texttt{/gripper/state} acknowledgement. We therefore cannot identify
+them as physical attachment failures: they combine capture failure and estimator
+non-recognition. This unresolved attachment/observability endpoint is treated separately in
+Sec.~\ref{sec:limits}; it is not included in the conditional release result.
+
+\begin{table}[t]
+\caption{Void causes by arm (76 flights, 38 attempted pairs). Void flights are excluded from
+Tables~\ref{tab:complete} and~\ref{tab:autoperf} and re-flown per the pre-registered rule.}
+\label{tab:void}
+\centering
+\begin{tabular}{@{}lccc@{}}
+\toprule
+ & arm~A & arm~B & total \\
+\midrule
+flights                       & 38 & 38 & 76 \\
+crash before release          & 11 &  4 & 15 \\
+payload not evidenced by MHE  &  0 &  3 &  3 \\
+\midrule
+valid                         & 27 & 31 & 58 \\
+valid \emph{pairs}            & \multicolumn{2}{c}{22} & \\
+\bottomrule
+\end{tabular}
+\\[2pt]
+\footnotesize Crash-before-release: A 11/38 vs.\ B 4/38, Fisher two-sided $p=\num{0.082}$.
+Nine of arm~A's 11 crashes are in W4, which is why that cell hit its attempt cap at 6 valid
+pairs.
+\end{table}
+
+\paragraph{Takeaway} Removing the controller's consumption of its own drop event did not
+produce observable post-release control degradation, at the cost of a
+\SIrange{2.6}{3.0}{s} autonomous confirmation delay in the paired batch. This establishes
+closed-loop feasibility of the eventless interface, conditional on reaching the release and on
+the detector firing. It does not validate fastA: that later branch caused premature model
+clearing in 3/9 smoke flights and is rejected. Attachment observability, pre-release divergence
+under aggressive manoeuvres, dynamic contamination of the moment reference, and moment-gated
+detector misses remain open limitations. The corrected 12-flight smoke establishes the intended
+fail-safe semantics, but neither it nor the stopped four-flight post-gate batch is a
+distribution-wide robustness claim.
