@@ -63,6 +63,14 @@ def test_yaw_magnitude_matches_calibration():
 
 def test_phys_full_has_no_nmpc_content():
     """'phys_full' 档:u_known 四维全部被电机反算值覆盖,NMPC 意图值一个不剩。"""
+    class _Now:
+        nanoseconds = 1_230_000_000
+
+    class _Clock:
+        @staticmethod
+        def now():
+            return _Now()
+
     class _S:
         tau_source = 'phys_full'
         thrust_phys = 20.5
@@ -74,11 +82,15 @@ def test_phys_full_has_no_nmpc_content():
 
         def get_logger(self):
             return type('L', (), {'info': staticmethod(lambda m: None)})()
+
+        def get_clock(self):
+            return _Clock()
     s = _S()
     nmpc_intent = np.array([99.0, 9.9, -9.9, 9.9])   # 全是"假"意图值
     mn.MHENode.u_opt_cb(s, type('M', (), {'data': nmpc_intent})())
     assert np.allclose(s.u_known, [20.5, 0.11, -0.22, 0.033]), s.u_known
     assert not np.any(np.isclose(s.u_known, nmpc_intent)), 'NMPC 意图值有残留'
+    assert np.isclose(s._last_u_rx_sec, 1.23), '已知输入接收时刻未更新'
     print('[4] phys_full 四维零 NMPC 残留 OK')
 
     # 对照:'phys' 档 yaw 必须仍是 NMPC 意图值(既有实验可复现)

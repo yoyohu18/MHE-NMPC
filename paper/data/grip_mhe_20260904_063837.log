@@ -1,0 +1,387 @@
+[INFO] [1788475149.571593301] [mhe_node]: MHE node starting, building/loading solver... (geom_coupled=True, N=20, m_min=1.961, m_B=2.0643)
+Code reuse possible, skipping code generation.
+acados was compiled without OpenMP.
+[INFO] [1788475149.578553359] [mhe_node]: [prior] geom_coupled=True → 载荷质量信息**完全不生效**(grip_payload_envelope=0.3 是死代码:coupled 档下 _payload_geometry 根本不被调用);模型只吃可测杆臂 r_p + 被估质量,m 的先验仅有 Q0 质量维=0.1 (σ=3.16kg,实质无先验)
+[WARN] [1788475149.579031168] [mhe_node]: geom_release_mode='self':估计器不被告知 drop。⚠️ 2026-08-24 实测,**NMPC 侧也设成 'self' 会必然坠机**——drop 后控制器继续按幽灵偏心载荷配平,指令 0.424N·m(tau_max 的 85%)作用在空机 J_xx=0.0142 上 = 29.8 rad/s²,而 MHE 10Hz/2s 窗口要 1~2s 才纠得过来,飞机先翻。**正确组合 = MHE 'self' + NMPC 'event'**(控制器是发释放指令的一方,它知道不构成认知作弊)。
+[INFO] [1788475149.580434462] [mhe_node]: [c_xy_est] 质量域卸载判据已开:先武装(m_p>0.090kg),再判 m_p<0.03kg 持续 20 帧 -> 释放偏心估计
+[INFO] [1788475149.580964845] [mhe_node]: [c_xy] 来源 = 一阶质量矩 s/m_T(窗口内估计,**无稳态门控**),替代窗外 EMA —— 机动中也会更新
+[INFO] [1788475149.581953605] [mhe_node]: weight schedule theta = [-4.00, 0.00, 0.00, 0.00], signal mode = residual (residual self-trigger: thresh=1.5N persist=2 baseline_tau=3.0s)
+[INFO] [1788475149.586127236] [mhe_node]: MHE node initialized! tau_source=command (roll/pitch NMPC意图值, yaw NMPC意图值), motor_window_avg=False, geom_release_mode=self. Waiting for odometry + control data...
+[INFO] [1788475171.785851858] [mhe_node]: [no-signal] baseline settled at 19.97N (quiet 20 frames); detector armed
+[INFO] [1788475171.786138123] [mhe_node]: arrival prior seeded: m=2.064 kg (m_nominal prior)
+[INFO] [1788475171.786514722] [mhe_node]: [geom] model_geom_on=True (release_mode=self, truth_attached=False) mode=coupled(r_p) -> geom=[ 0.    0.   -0.47] dJ=0.0000 c_xy=[+0.0000,+0.0000] (dJ/c 为按当前 m_est 折算的诊断当量,模型内部随 m 实时生成)
+[INFO] [1788475173.696996326] [mhe_node]: MHE mass estimate: 2.056 kg (T_phys=19.99N) | solve=4.1ms (max10.2)
+[INFO] [1788475173.697544383] [mhe_node]: [truth] m_hat=2.0562 m_true=2.0643 err=-0.39% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[+0.0008,+0.0000] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475173.698054078] [mhe_node]: [tau_phys] roll=+0.004 pitch=-0.030 Nm
+[INFO] [1788475173.698629914] [mhe_node]: [mass-diag] m_est=2.0562 T=19.993N tilt=6.88deg cos=0.99281 | T/g=2.0381 T*cos/g=2.0234 | m_est-T*cos/g=+0.0328kg (+1.62%) vz=+0.087
+[INFO] [1788475173.699257525] [mhe_node]: [c_xy_est] cx=+0.0003 cy=-0.0000 m
+[INFO] [1788475175.692160458] [mhe_node]: MHE mass estimate: 2.060 kg (T_phys=20.08N) | solve=7.2ms (max11.1)
+[INFO] [1788475175.692706119] [mhe_node]: [truth] m_hat=2.0605 m_true=2.0643 err=-0.18% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0009,+0.0001] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475175.693224115] [mhe_node]: [tau_phys] roll=-0.000 pitch=+0.009 Nm
+[INFO] [1788475175.693817090] [mhe_node]: [mass-diag] m_est=2.0605 T=20.084N tilt=1.82deg cos=0.99950 | T/g=2.0473 T*cos/g=2.0462 | m_est-T*cos/g=+0.0142kg (+0.70%) vz=+0.033
+[INFO] [1788475175.694395375] [mhe_node]: [c_xy_est] cx=-0.0005 cy=+0.0000 m
+[INFO] [1788475177.692116332] [mhe_node]: MHE mass estimate: 2.063 kg (T_phys=20.16N) | solve=5.0ms (max7.7)
+[INFO] [1788475177.692664313] [mhe_node]: [truth] m_hat=2.0626 m_true=2.0643 err=-0.08% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[+0.0003,-0.0000] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475177.693184535] [mhe_node]: [tau_phys] roll=-0.002 pitch=-0.004 Nm
+[INFO] [1788475177.693774957] [mhe_node]: [mass-diag] m_est=2.0626 T=20.163N tilt=0.15deg cos=1.00000 | T/g=2.0553 T*cos/g=2.0553 | m_est-T*cos/g=+0.0072kg (+0.35%) vz=+0.028
+[INFO] [1788475177.694363181] [mhe_node]: [c_xy_est] cx=+0.0001 cy=-0.0000 m
+[INFO] [1788475179.285925748] [mhe_node]: [no-signal] mass mutation self-detected at frame 94: T_phys=18.13N vs baseline 20.07N (dev 1.95N > 1.5N over 2 frames, direction=DROP); de-weighting pre-event stages
+[INFO] [1788475179.287044926] [mhe_node]: event transition started: pre-event stages de-weighted
+[INFO] [1788475179.690964393] [mhe_node]: MHE mass estimate: 2.005 kg (T_phys=18.17N) | solve=3.9ms (max5.7)
+[INFO] [1788475179.691511939] [mhe_node]: [truth] m_hat=2.0049 m_true=2.0643 err=-2.88% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[+0.0000,-0.0001] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475179.692035338] [mhe_node]: [tau_phys] roll=+0.000 pitch=-0.002 Nm
+[INFO] [1788475179.692624491] [mhe_node]: [mass-diag] m_est=2.0049 T=18.171N tilt=0.34deg cos=0.99998 | T/g=1.8523 T*cos/g=1.8523 | m_est-T*cos/g=+0.1526kg (+8.24%) vz=-0.540
+[INFO] [1788475179.693203712] [mhe_node]: [c_xy_est] cx=+0.0000 cy=-0.0000 m
+[INFO] [1788475181.186693061] [mhe_node]: event transition ended: nominal weights restored
+[INFO] [1788475181.689727886] [mhe_node]: MHE mass estimate: 2.055 kg (T_phys=20.37N) | solve=3.7ms (max4.0)
+[INFO] [1788475181.690114228] [mhe_node]: [truth] m_hat=2.0549 m_true=2.0643 err=-0.46% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0001,+0.0000] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475181.690473479] [mhe_node]: [tau_phys] roll=+0.003 pitch=+0.003 Nm
+[INFO] [1788475181.690891346] [mhe_node]: [mass-diag] m_est=2.0549 T=20.367N tilt=0.20deg cos=0.99999 | T/g=2.0762 T*cos/g=2.0762 | m_est-T*cos/g=-0.0213kg (-1.03%) vz=-0.043
+[INFO] [1788475181.691293178] [mhe_node]: [c_xy_est] cx=-0.0001 cy=+0.0000 m
+[INFO] [1788475183.285848452] [mhe_node]: [no-signal] baseline settled at 20.12N (quiet 20 frames); detector armed
+[INFO] [1788475183.716517745] [mhe_node]: MHE mass estimate: 1.961 kg (T_phys=19.88N) | solve=20.7ms (max38.7)
+[INFO] [1788475183.717064152] [mhe_node]: [truth] m_hat=1.9611 m_true=2.0643 err=-5.00% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0094,+0.0122] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475183.717582498] [mhe_node]: [tau_phys] roll=-0.259 pitch=+0.011 Nm
+[INFO] [1788475183.718169268] [mhe_node]: [mass-diag] m_est=1.9611 T=19.882N tilt=1.59deg cos=0.99962 | T/g=2.0267 T*cos/g=2.0260 | m_est-T*cos/g=-0.0649kg (-3.20%) vz=+0.010
+[INFO] [1788475183.718749963] [mhe_node]: [c_xy_est] cx=-0.0049 cy=+0.0067 m
+[INFO] [1788475184.385940999] [mhe_node]: [no-signal] mass mutation self-detected at frame 145: T_phys=22.27N vs baseline 20.16N (dev 2.12N > 1.5N over 2 frames, direction=ATTACH); de-weighting pre-event stages
+[INFO] [1788475184.386102866] [mhe_node]: [payload-state] EMPTY->LOADED (attach, m_p=-0.103kg)
+[INFO] [1788475184.386806906] [mhe_node]: event transition started: pre-event stages de-weighted
+[WARN] [1788475184.547811831] [mhe_node]: MHE solve failed [status=2], skipping this window (streak 1)
+[INFO] [1788475185.805203486] [mhe_node]: MHE mass estimate: 2.206 kg (T_phys=21.71N) | solve=22.0ms (max61.3)
+[INFO] [1788475185.805773830] [mhe_node]: [truth] m_hat=2.2061 m_true=2.0643 err=+6.87% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0020,-0.0152] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475185.806291781] [mhe_node]: [tau_phys] roll=-0.144 pitch=+1.352 Nm
+[INFO] [1788475185.806877094] [mhe_node]: [mass-diag] m_est=2.2061 T=21.708N tilt=1.63deg cos=0.99959 | T/g=2.2129 T*cos/g=2.2120 | m_est-T*cos/g=-0.0059kg (-0.27%) vz=+0.745
+[INFO] [1788475185.807456612] [mhe_node]: [c_xy_est] cx=-0.0018 cy=-0.0070 m
+[INFO] [1788475186.286697132] [mhe_node]: event transition ended: nominal weights restored
+[INFO] [1788475186.585815926] [mhe_node]: [c_xy_est] 质量域判据已武装(m_p=0.098kg 连续20帧高于水位)
+[INFO] [1788475187.808880218] [mhe_node]: MHE mass estimate: 2.221 kg (T_phys=22.58N) | solve=17.0ms (max28.6)
+[INFO] [1788475187.809443740] [mhe_node]: [truth] m_hat=2.2206 m_true=2.0643 err=+7.57% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0049,-0.0141] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475187.809967782] [mhe_node]: [tau_phys] roll=-0.170 pitch=+0.066 Nm
+[INFO] [1788475187.810568321] [mhe_node]: [mass-diag] m_est=2.2206 T=22.578N tilt=0.21deg cos=0.99999 | T/g=2.3016 T*cos/g=2.3015 | m_est-T*cos/g=-0.0809kg (-3.52%) vz=+1.171
+[INFO] [1788475187.811159598] [mhe_node]: [c_xy_est] cx=-0.0029 cy=-0.0062 m
+[INFO] [1788475188.385767134] [mhe_node]: [no-signal] baseline settled at 22.23N (quiet 20 frames); detector armed
+[INFO] [1788475189.790389280] [mhe_node]: MHE mass estimate: 2.247 kg (T_phys=21.09N) | solve=6.2ms (max14.4)
+[INFO] [1788475189.791078995] [mhe_node]: [truth] m_hat=2.2466 m_true=2.0643 err=+8.83% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0027,-0.0164] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475189.791601134] [mhe_node]: [tau_phys] roll=-0.161 pitch=+0.030 Nm
+[INFO] [1788475189.792191872] [mhe_node]: [mass-diag] m_est=2.2466 T=21.092N tilt=0.37deg cos=0.99998 | T/g=2.1501 T*cos/g=2.1500 | m_est-T*cos/g=+0.0965kg (+4.49%) vz=+0.824
+[INFO] [1788475189.792763720] [mhe_node]: [c_xy_est] cx=-0.0012 cy=-0.0073 m
+[INFO] [1788475191.788951783] [mhe_node]: MHE mass estimate: 2.220 kg (T_phys=21.36N) | solve=3.1ms (max4.3)
+[INFO] [1788475191.789359585] [mhe_node]: [truth] m_hat=2.2201 m_true=2.0643 err=+7.55% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0024,-0.0166] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475191.789723145] [mhe_node]: [tau_phys] roll=-0.158 pitch=+0.026 Nm
+[INFO] [1788475191.790152789] [mhe_node]: [mass-diag] m_est=2.2201 T=21.360N tilt=0.16deg cos=1.00000 | T/g=2.1774 T*cos/g=2.1774 | m_est-T*cos/g=+0.0428kg (+1.96%) vz=+0.083
+[INFO] [1788475191.790569410] [mhe_node]: [c_xy_est] cx=-0.0011 cy=-0.0075 m
+[INFO] [1788475193.791944650] [mhe_node]: MHE mass estimate: 2.209 kg (T_phys=21.61N) | solve=4.2ms (max6.4)
+[INFO] [1788475193.792507675] [mhe_node]: [truth] m_hat=2.2092 m_true=2.0643 err=+7.02% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0026,-0.0164] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475193.793026768] [mhe_node]: [tau_phys] roll=-0.158 pitch=+0.025 Nm
+[INFO] [1788475193.793606054] [mhe_node]: [mass-diag] m_est=2.2092 T=21.611N tilt=0.31deg cos=0.99999 | T/g=2.2030 T*cos/g=2.2029 | m_est-T*cos/g=+0.0062kg (+0.28%) vz=-0.016
+[INFO] [1788475193.794186276] [mhe_node]: [c_xy_est] cx=-0.0012 cy=-0.0075 m
+[INFO] [1788475195.790359505] [mhe_node]: MHE mass estimate: 2.210 kg (T_phys=21.69N) | solve=3.9ms (max6.4)
+[INFO] [1788475195.790927150] [mhe_node]: [truth] m_hat=2.2100 m_true=2.0643 err=+7.06% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0028,-0.0164] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475195.791443386] [mhe_node]: [tau_phys] roll=-0.168 pitch=+0.024 Nm
+[INFO] [1788475195.792032273] [mhe_node]: [mass-diag] m_est=2.2100 T=21.689N tilt=0.24deg cos=0.99999 | T/g=2.2109 T*cos/g=2.2109 | m_est-T*cos/g=-0.0008kg (-0.04%) vz=-0.009
+[INFO] [1788475195.792610753] [mhe_node]: [c_xy_est] cx=-0.0013 cy=-0.0074 m
+[INFO] [1788475197.790768307] [mhe_node]: MHE mass estimate: 2.201 kg (T_phys=21.71N) | solve=6.8ms (max16.0)
+[INFO] [1788475197.791176821] [mhe_node]: [truth] m_hat=2.2014 m_true=2.0643 err=+6.64% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0045,-0.0160] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475197.791553699] [mhe_node]: [tau_phys] roll=-0.151 pitch=+0.083 Nm
+[INFO] [1788475197.791966073] [mhe_node]: [mass-diag] m_est=2.2014 T=21.712N tilt=1.63deg cos=0.99959 | T/g=2.2132 T*cos/g=2.2123 | m_est-T*cos/g=-0.0109kg (-0.49%) vz=+0.006
+[INFO] [1788475197.792376306] [mhe_node]: [c_xy_est] cx=-0.0020 cy=-0.0073 m
+[INFO] [1788475199.793948766] [mhe_node]: MHE mass estimate: 2.198 kg (T_phys=21.63N) | solve=10.1ms (max20.0)
+[INFO] [1788475199.794507404] [mhe_node]: [truth] m_hat=2.1975 m_true=2.0643 err=+6.45% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0121,-0.0154] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475199.795026574] [mhe_node]: [tau_phys] roll=-0.148 pitch=+0.300 Nm
+[INFO] [1788475199.795604012] [mhe_node]: [mass-diag] m_est=2.1975 T=21.627N tilt=5.05deg cos=0.99612 | T/g=2.2046 T*cos/g=2.1960 | m_est-T*cos/g=+0.0015kg (+0.07%) vz=+0.086
+[INFO] [1788475199.796183639] [mhe_node]: [c_xy_est] cx=-0.0051 cy=-0.0071 m
+[INFO] [1788475201.793057599] [mhe_node]: MHE mass estimate: 2.192 kg (T_phys=21.61N) | solve=7.6ms (max10.6)
+[INFO] [1788475201.793618089] [mhe_node]: [truth] m_hat=2.1915 m_true=2.0643 err=+6.16% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0254,-0.0150] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475201.794134702] [mhe_node]: [tau_phys] roll=-0.155 pitch=+0.308 Nm
+[INFO] [1788475201.794708512] [mhe_node]: [mass-diag] m_est=2.1915 T=21.614N tilt=2.58deg cos=0.99898 | T/g=2.2033 T*cos/g=2.2010 | m_est-T*cos/g=-0.0095kg (-0.43%) vz=+0.136
+[INFO] [1788475201.795284453] [mhe_node]: [c_xy_est] cx=-0.0115 cy=-0.0069 m
+[INFO] [1788475203.793266354] [mhe_node]: MHE mass estimate: 2.197 kg (T_phys=21.69N) | solve=6.6ms (max12.1)
+[INFO] [1788475203.793829745] [mhe_node]: [truth] m_hat=2.1966 m_true=2.0643 err=+6.41% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0225,-0.0156] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475203.794345806] [mhe_node]: [tau_phys] roll=-0.128 pitch=+0.208 Nm
+[INFO] [1788475203.794930608] [mhe_node]: [mass-diag] m_est=2.1966 T=21.687N tilt=4.60deg cos=0.99677 | T/g=2.2108 T*cos/g=2.2036 | m_est-T*cos/g=-0.0070kg (-0.32%) vz=+0.123
+[INFO] [1788475203.795510770] [mhe_node]: [c_xy_est] cx=-0.0104 cy=-0.0071 m
+[INFO] [1788475205.793103921] [mhe_node]: MHE mass estimate: 2.200 kg (T_phys=21.50N) | solve=8.4ms (max12.5)
+[INFO] [1788475205.793659579] [mhe_node]: [truth] m_hat=2.1999 m_true=2.0643 err=+6.57% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0158,-0.0152] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475205.794182061] [mhe_node]: [tau_phys] roll=-0.141 pitch=+0.199 Nm
+[INFO] [1788475205.794767644] [mhe_node]: [mass-diag] m_est=2.1999 T=21.504N tilt=2.89deg cos=0.99873 | T/g=2.1921 T*cos/g=2.1893 | m_est-T*cos/g=+0.0105kg (+0.48%) vz=+0.039
+[INFO] [1788475205.795348217] [mhe_node]: [c_xy_est] cx=-0.0072 cy=-0.0070 m
+[INFO] [1788475207.791224229] [mhe_node]: MHE mass estimate: 2.198 kg (T_phys=21.51N) | solve=6.4ms (max12.0)
+[INFO] [1788475207.791905191] [mhe_node]: [truth] m_hat=2.1976 m_true=2.0643 err=+6.46% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0192,-0.0149] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475207.792425094] [mhe_node]: [tau_phys] roll=-0.143 pitch=+0.222 Nm
+[INFO] [1788475207.793009921] [mhe_node]: [mass-diag] m_est=2.1976 T=21.506N tilt=1.56deg cos=0.99963 | T/g=2.1923 T*cos/g=2.1915 | m_est-T*cos/g=+0.0061kg (+0.28%) vz=-0.007
+[INFO] [1788475207.793588467] [mhe_node]: [c_xy_est] cx=-0.0087 cy=-0.0068 m
+[INFO] [1788475209.795482983] [mhe_node]: MHE mass estimate: 2.198 kg (T_phys=21.53N) | solve=4.6ms (max8.6)
+[INFO] [1788475209.796049001] [mhe_node]: [truth] m_hat=2.1984 m_true=2.0643 err=+6.50% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0183,-0.0154] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475209.796560112] [mhe_node]: [tau_phys] roll=-0.151 pitch=+0.221 Nm
+[INFO] [1788475209.797135219] [mhe_node]: [mass-diag] m_est=2.1984 T=21.532N tilt=1.18deg cos=0.99979 | T/g=2.1949 T*cos/g=2.1944 | m_est-T*cos/g=+0.0040kg (+0.18%) vz=-0.038
+[INFO] [1788475209.797706665] [mhe_node]: [c_xy_est] cx=-0.0084 cy=-0.0070 m
+[INFO] [1788475211.792138667] [mhe_node]: MHE mass estimate: 2.203 kg (T_phys=21.65N) | solve=6.4ms (max9.7)
+[INFO] [1788475211.792696097] [mhe_node]: [truth] m_hat=2.2030 m_true=2.0643 err=+6.72% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0139,-0.0158] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475211.793216488] [mhe_node]: [tau_phys] roll=-0.154 pitch=+0.152 Nm
+[INFO] [1788475211.793803712] [mhe_node]: [mass-diag] m_est=2.2030 T=21.654N tilt=2.36deg cos=0.99915 | T/g=2.2073 T*cos/g=2.2054 | m_est-T*cos/g=-0.0024kg (-0.11%) vz=-0.053
+[INFO] [1788475211.794384160] [mhe_node]: [c_xy_est] cx=-0.0064 cy=-0.0072 m
+[INFO] [1788475213.793058575] [mhe_node]: MHE mass estimate: 2.201 kg (T_phys=21.57N) | solve=6.9ms (max12.8)
+[INFO] [1788475213.793605425] [mhe_node]: [truth] m_hat=2.2007 m_true=2.0643 err=+6.61% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0142,-0.0153] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475213.794128535] [mhe_node]: [tau_phys] roll=-0.143 pitch=+0.180 Nm
+[INFO] [1788475213.794713223] [mhe_node]: [mass-diag] m_est=2.2007 T=21.575N tilt=3.08deg cos=0.99856 | T/g=2.1992 T*cos/g=2.1961 | m_est-T*cos/g=+0.0046kg (+0.21%) vz=-0.072
+[INFO] [1788475213.795289071] [mhe_node]: [c_xy_est] cx=-0.0064 cy=-0.0070 m
+[INFO] [1788475215.792121033] [mhe_node]: MHE mass estimate: 2.198 kg (T_phys=21.37N) | solve=6.3ms (max9.7)
+[INFO] [1788475215.792685688] [mhe_node]: [truth] m_hat=2.1976 m_true=2.0643 err=+6.46% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0196,-0.0152] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475215.793210555] [mhe_node]: [tau_phys] roll=-0.144 pitch=+0.258 Nm
+[INFO] [1788475215.793797505] [mhe_node]: [mass-diag] m_est=2.1976 T=21.371N tilt=2.66deg cos=0.99892 | T/g=2.1785 T*cos/g=2.1762 | m_est-T*cos/g=+0.0214kg (+0.98%) vz=-0.078
+[INFO] [1788475215.794373708] [mhe_node]: [c_xy_est] cx=-0.0088 cy=-0.0069 m
+[INFO] [1788475217.791237115] [mhe_node]: MHE mass estimate: 2.195 kg (T_phys=21.52N) | solve=6.3ms (max10.5)
+[INFO] [1788475217.791968278] [mhe_node]: [truth] m_hat=2.1945 m_true=2.0643 err=+6.31% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0250,-0.0156] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475217.792528452] [mhe_node]: [tau_phys] roll=-0.153 pitch=+0.301 Nm
+[INFO] [1788475217.793118861] [mhe_node]: [mass-diag] m_est=2.1945 T=21.521N tilt=2.01deg cos=0.99938 | T/g=2.1937 T*cos/g=2.1924 | m_est-T*cos/g=+0.0022kg (+0.10%) vz=-0.100
+[INFO] [1788475217.793696014] [mhe_node]: [c_xy_est] cx=-0.0114 cy=-0.0071 m
+[INFO] [1788475219.792417471] [mhe_node]: MHE mass estimate: 2.193 kg (T_phys=21.52N) | solve=5.3ms (max7.7)
+[INFO] [1788475219.792978008] [mhe_node]: [truth] m_hat=2.1931 m_true=2.0643 err=+6.24% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0266,-0.0155] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475219.793491769] [mhe_node]: [tau_phys] roll=-0.154 pitch=+0.257 Nm
+[INFO] [1788475219.794072879] [mhe_node]: [mass-diag] m_est=2.1931 T=21.515N tilt=1.14deg cos=0.99980 | T/g=2.1932 T*cos/g=2.1927 | m_est-T*cos/g=+0.0003kg (+0.02%) vz=-0.112
+[INFO] [1788475219.794640517] [mhe_node]: [c_xy_est] cx=-0.0121 cy=-0.0071 m
+[INFO] [1788475221.794169659] [mhe_node]: MHE mass estimate: 2.196 kg (T_phys=21.58N) | solve=7.1ms (max13.9)
+[INFO] [1788475221.794737328] [mhe_node]: [truth] m_hat=2.1959 m_true=2.0643 err=+6.38% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0245,-0.0160] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475221.795256801] [mhe_node]: [tau_phys] roll=-0.156 pitch=+0.207 Nm
+[INFO] [1788475221.795851077] [mhe_node]: [mass-diag] m_est=2.1959 T=21.578N tilt=1.36deg cos=0.99972 | T/g=2.1996 T*cos/g=2.1990 | m_est-T*cos/g=-0.0031kg (-0.14%) vz=-0.101
+[INFO] [1788475221.796427383] [mhe_node]: [c_xy_est] cx=-0.0113 cy=-0.0073 m
+[INFO] [1788475223.790851739] [mhe_node]: MHE mass estimate: 2.198 kg (T_phys=21.63N) | solve=6.6ms (max12.9)
+[INFO] [1788475223.791263777] [mhe_node]: [truth] m_hat=2.1982 m_true=2.0643 err=+6.49% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0182,-0.0165] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475223.791622880] [mhe_node]: [tau_phys] roll=-0.180 pitch=+0.212 Nm
+[INFO] [1788475223.792037217] [mhe_node]: [mass-diag] m_est=2.1982 T=21.628N tilt=2.18deg cos=0.99927 | T/g=2.2047 T*cos/g=2.2031 | m_est-T*cos/g=-0.0048kg (-0.22%) vz=-0.097
+[INFO] [1788475223.792446017] [mhe_node]: [c_xy_est] cx=-0.0085 cy=-0.0075 m
+[INFO] [1788475225.790228832] [mhe_node]: MHE mass estimate: 2.206 kg (T_phys=21.65N) | solve=5.1ms (max6.6)
+[INFO] [1788475225.790726454] [mhe_node]: [truth] m_hat=2.2057 m_true=2.0643 err=+6.85% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0157,-0.0168] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475225.791089986] [mhe_node]: [tau_phys] roll=-0.167 pitch=+0.246 Nm
+[INFO] [1788475225.791508517] [mhe_node]: [mass-diag] m_est=2.2057 T=21.645N tilt=2.30deg cos=0.99920 | T/g=2.2065 T*cos/g=2.2047 | m_est-T*cos/g=+0.0010kg (+0.05%) vz=-0.044
+[INFO] [1788475225.791921155] [mhe_node]: [c_xy_est] cx=-0.0071 cy=-0.0076 m
+[INFO] [1788475227.793370961] [mhe_node]: MHE mass estimate: 2.201 kg (T_phys=21.73N) | solve=5.2ms (max8.9)
+[INFO] [1788475227.793938270] [mhe_node]: [truth] m_hat=2.2009 m_true=2.0643 err=+6.62% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0178,-0.0166] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475227.794456068] [mhe_node]: [tau_phys] roll=-0.169 pitch=+0.287 Nm
+[INFO] [1788475227.795042756] [mhe_node]: [mass-diag] m_est=2.2009 T=21.731N tilt=2.00deg cos=0.99939 | T/g=2.2152 T*cos/g=2.2139 | m_est-T*cos/g=-0.0130kg (-0.59%) vz=-0.030
+[INFO] [1788475227.795619839] [mhe_node]: [c_xy_est] cx=-0.0081 cy=-0.0076 m
+[INFO] [1788475229.791207058] [mhe_node]: MHE mass estimate: 2.194 kg (T_phys=21.62N) | solve=5.2ms (max7.8)
+[INFO] [1788475229.791789674] [mhe_node]: [truth] m_hat=2.1944 m_true=2.0643 err=+6.30% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0212,-0.0162] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475229.792315871] [mhe_node]: [tau_phys] roll=-0.153 pitch=+0.290 Nm
+[INFO] [1788475229.792902233] [mhe_node]: [mass-diag] m_est=2.1944 T=21.616N tilt=1.64deg cos=0.99959 | T/g=2.2034 T*cos/g=2.2025 | m_est-T*cos/g=-0.0081kg (-0.37%) vz=-0.026
+[INFO] [1788475229.793484341] [mhe_node]: [c_xy_est] cx=-0.0097 cy=-0.0074 m
+[INFO] [1788475230.285940054] [mhe_node]: [no-signal] mass mutation self-detected at frame 604: T_phys=19.48N vs baseline 21.56N (dev 2.08N > 1.5N over 2 frames, direction=DROP); de-weighting pre-event stages
+[INFO] [1788475230.286153170] [mhe_node]: [payload-state] LOADED->EMPTY (drop, m_p=+0.126kg)
+[INFO] [1788475230.286338160] [mhe_node]: [c_xy_est] 载荷释放(no-signal residual) → 在线偏心估计归零(重新播种)
+[INFO] [1788475230.286606030] [mhe_node]: [no-signal] → 自主释放载荷几何(无外部 drop 信号)
+[INFO] [1788475230.287993205] [mhe_node]: event transition started: pre-event stages de-weighted
+[INFO] [1788475230.293997499] [mhe_node]: [s-decay] n=1 |s_est|=0.02349 |s_target|=0.00000 |s_out|=0.01775 d_s_out=-0.00873 conf=0.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475230.399571921] [mhe_node]: [s-decay] n=2 |s_est|=0.02595 |s_target|=0.00000 |s_out|=0.01190 d_s_out=-0.00585 conf=0.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475230.517774618] [mhe_node]: [s-decay] n=3 |s_est|=0.01279 |s_target|=0.00000 |s_out|=0.00798 d_s_out=-0.00392 conf=0.000 present=0 armed=0 latched=1 health=1
+[WARN] [1788475230.663065985] [mhe_node]: MHE solve failed [status=2], skipping this window (streak 1)
+[INFO] [1788475230.663383272] [mhe_node]: [s-decay] n=4 |s_est|=0.01279 |s_target|=0.00000 |s_out|=0.00798 d_s_out=+0.00000 conf=0.000 present=0 armed=0 latched=1 health=0
+[INFO] [1788475230.706629999] [mhe_node]: [s-decay] n=5 |s_est|=0.01035 |s_target|=0.00000 |s_out|=0.00535 d_s_out=-0.00263 conf=0.002 present=0 armed=0 latched=1 health=1
+[INFO] [1788475230.803978720] [mhe_node]: [s-decay] n=6 |s_est|=0.00641 |s_target|=0.00000 |s_out|=0.00358 d_s_out=-0.00176 conf=0.108 present=0 armed=0 latched=1 health=1
+[INFO] [1788475230.908613549] [mhe_node]: [s-decay] n=7 |s_est|=0.00374 |s_target|=0.00000 |s_out|=0.00240 d_s_out=-0.00118 conf=0.340 present=0 armed=0 latched=1 health=1
+[INFO] [1788475231.010800836] [mhe_node]: [s-decay] n=8 |s_est|=0.00242 |s_target|=0.00000 |s_out|=0.00161 d_s_out=-0.00079 conf=0.555 present=0 armed=0 latched=1 health=1
+[INFO] [1788475231.108251910] [mhe_node]: [s-decay] n=9 |s_est|=0.00114 |s_target|=0.00000 |s_out|=0.00108 d_s_out=-0.00053 conf=0.702 present=0 armed=0 latched=1 health=1
+[INFO] [1788475231.205147566] [mhe_node]: [s-decay] n=10 |s_est|=0.00058 |s_target|=0.00000 |s_out|=0.00072 d_s_out=-0.00036 conf=0.800 present=0 armed=0 latched=1 health=1
+[INFO] [1788475231.304942764] [mhe_node]: [s-decay] n=11 |s_est|=0.00208 |s_target|=0.00000 |s_out|=0.00049 d_s_out=-0.00024 conf=0.866 present=0 armed=0 latched=1 health=1
+[INFO] [1788475231.405584623] [mhe_node]: [s-decay] n=12 |s_est|=0.00098 |s_target|=0.00000 |s_out|=0.00033 d_s_out=-0.00016 conf=0.910 present=0 armed=0 latched=1 health=1
+[INFO] [1788475231.499616481] [mhe_node]: [s-decay] n=13 |s_est|=0.00098 |s_target|=0.00000 |s_out|=0.00022 d_s_out=-0.00011 conf=0.940 present=0 armed=0 latched=1 health=1
+[INFO] [1788475231.609534247] [mhe_node]: [s-decay] n=14 |s_est|=0.00101 |s_target|=0.00000 |s_out|=0.00015 d_s_out=-0.00007 conf=0.960 present=0 armed=0 latched=1 health=1
+[INFO] [1788475231.711890257] [mhe_node]: [s-decay] n=15 |s_est|=0.00152 |s_target|=0.00000 |s_out|=0.00010 d_s_out=-0.00005 conf=0.973 present=0 armed=0 latched=1 health=1
+[INFO] [1788475231.806906698] [mhe_node]: [s-decay] n=16 |s_est|=0.00225 |s_target|=0.00000 |s_out|=0.00007 d_s_out=-0.00003 conf=0.982 present=0 armed=0 latched=1 health=1
+[INFO] [1788475231.903286923] [mhe_node]: MHE mass estimate: 1.961 kg (T_phys=20.52N) | solve=20.0ms (max76.5)
+[INFO] [1788475231.903832346] [mhe_node]: [truth] m_hat=1.9611 m_true=2.0643 err=-5.00% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0029,-0.0006] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475231.904351583] [mhe_node]: [tau_phys] roll=+0.002 pitch=+0.103 Nm
+[INFO] [1788475231.904944221] [mhe_node]: [mass-diag] m_est=1.9611 T=20.523N tilt=1.54deg cos=0.99964 | T/g=2.0920 T*cos/g=2.0913 | m_est-T*cos/g=-0.1302kg (-6.22%) vz=-0.059
+[INFO] [1788475231.905522885] [mhe_node]: [c_xy_est] cx=-0.0011 cy=-0.0003 m
+[INFO] [1788475231.905904925] [mhe_node]: [s-decay] n=17 |s_est|=0.00296 |s_target|=0.00000 |s_out|=0.00004 d_s_out=-0.00002 conf=0.988 present=0 armed=0 latched=1 health=1
+[INFO] [1788475232.012513489] [mhe_node]: [s-decay] n=18 |s_est|=0.00358 |s_target|=0.00000 |s_out|=0.00003 d_s_out=-0.00001 conf=0.992 present=0 armed=0 latched=1 health=1
+[INFO] [1788475232.110144102] [mhe_node]: [s-decay] n=19 |s_est|=0.00415 |s_target|=0.00000 |s_out|=0.00002 d_s_out=-0.00001 conf=0.995 present=0 armed=0 latched=1 health=1
+[INFO] [1788475232.186679159] [mhe_node]: event transition ended: nominal weights restored
+[INFO] [1788475232.206395137] [mhe_node]: [s-decay] n=20 |s_est|=0.00464 |s_target|=0.00000 |s_out|=0.00001 d_s_out=-0.00001 conf=0.996 present=0 armed=0 latched=1 health=1
+[INFO] [1788475232.311959226] [mhe_node]: [s-decay] n=21 |s_est|=0.00502 |s_target|=0.00000 |s_out|=0.00001 d_s_out=-0.00000 conf=0.998 present=0 armed=0 latched=1 health=1
+[INFO] [1788475232.403421308] [mhe_node]: [s-decay] n=22 |s_est|=0.00570 |s_target|=0.00000 |s_out|=0.00001 d_s_out=-0.00000 conf=0.998 present=0 armed=0 latched=1 health=1
+[INFO] [1788475232.507231825] [mhe_node]: [s-decay] n=23 |s_est|=0.00638 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=0.999 present=0 armed=0 latched=1 health=1
+[INFO] [1788475232.607731436] [mhe_node]: [s-decay] n=24 |s_est|=0.00755 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=0.999 present=0 armed=0 latched=1 health=1
+[INFO] [1788475232.707093500] [mhe_node]: [s-decay] n=25 |s_est|=0.00851 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475232.801232436] [mhe_node]: [s-decay] n=26 |s_est|=0.00928 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475232.905294920] [mhe_node]: [s-decay] n=27 |s_est|=0.00979 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475233.005977081] [mhe_node]: [s-decay] n=28 |s_est|=0.01029 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475233.094543953] [mhe_node]: [s-decay] n=29 |s_est|=0.01025 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475233.200839773] [mhe_node]: [s-decay] n=30 |s_est|=0.01015 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475233.295382972] [mhe_node]: [s-decay] n=31 |s_est|=0.00942 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475233.400768005] [mhe_node]: [s-decay] n=32 |s_est|=0.00952 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475233.493292915] [mhe_node]: [s-decay] n=33 |s_est|=0.00884 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475233.594384797] [mhe_node]: [s-decay] n=34 |s_est|=0.00880 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475233.693321004] [mhe_node]: [s-decay] n=35 |s_est|=0.00850 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475233.792284657] [mhe_node]: [s-decay] n=36 |s_est|=0.00831 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475233.892571847] [mhe_node]: MHE mass estimate: 2.054 kg (T_phys=20.26N) | solve=15.1ms (max25.5)
+[INFO] [1788475233.893113979] [mhe_node]: [truth] m_hat=2.0539 m_true=2.0643 err=-0.50% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0082,+0.0000] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475233.893629451] [mhe_node]: [tau_phys] roll=-0.002 pitch=+0.071 Nm
+[INFO] [1788475233.894223690] [mhe_node]: [mass-diag] m_est=2.0539 T=20.256N tilt=2.02deg cos=0.99938 | T/g=2.0648 T*cos/g=2.0636 | m_est-T*cos/g=-0.0097kg (-0.47%) vz=+0.050
+[INFO] [1788475233.894805930] [mhe_node]: [c_xy_est] cx=-0.0040 cy=+0.0000 m
+[INFO] [1788475233.895200251] [mhe_node]: [s-decay] n=37 |s_est|=0.00817 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475233.994694240] [mhe_node]: [s-decay] n=38 |s_est|=0.00803 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475234.092317422] [mhe_node]: [s-decay] n=39 |s_est|=0.00792 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475234.194470215] [mhe_node]: [s-decay] n=40 |s_est|=0.00783 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475234.285834603] [mhe_node]: [no-signal] baseline settled at 20.29N (quiet 20 frames); detector armed
+[INFO] [1788475234.292575856] [mhe_node]: [s-decay] n=41 |s_est|=0.00777 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475234.394462965] [mhe_node]: [s-decay] n=42 |s_est|=0.00772 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475234.495757447] [mhe_node]: [s-decay] n=43 |s_est|=0.00769 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475234.593522378] [mhe_node]: [s-decay] n=44 |s_est|=0.00766 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475234.694631126] [mhe_node]: [s-decay] n=45 |s_est|=0.00762 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475234.792535657] [mhe_node]: [s-decay] n=46 |s_est|=0.00759 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475234.896314737] [mhe_node]: [s-decay] n=47 |s_est|=0.00757 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475234.990091184] [mhe_node]: [s-decay] n=48 |s_est|=0.00756 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475235.092014865] [mhe_node]: [s-decay] n=49 |s_est|=0.00757 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475235.193148026] [mhe_node]: [s-decay] n=50 |s_est|=0.00760 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475235.292298353] [mhe_node]: [s-decay] n=51 |s_est|=0.00763 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475235.392001529] [mhe_node]: [s-decay] n=52 |s_est|=0.00766 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475235.495182362] [mhe_node]: [s-decay] n=53 |s_est|=0.00772 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475235.594661880] [mhe_node]: [s-decay] n=54 |s_est|=0.00778 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475235.692497935] [mhe_node]: [s-decay] n=55 |s_est|=0.00786 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475235.794687877] [mhe_node]: [s-decay] n=56 |s_est|=0.00793 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475235.892372052] [mhe_node]: MHE mass estimate: 2.057 kg (T_phys=20.19N) | solve=6.9ms (max9.7)
+[INFO] [1788475235.892911387] [mhe_node]: [truth] m_hat=2.0574 m_true=2.0643 err=-0.33% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0080,-0.0002] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475235.893424261] [mhe_node]: [tau_phys] roll=+0.000 pitch=+0.090 Nm
+[INFO] [1788475235.894008807] [mhe_node]: [mass-diag] m_est=2.0574 T=20.195N tilt=2.74deg cos=0.99886 | T/g=2.0586 T*cos/g=2.0562 | m_est-T*cos/g=+0.0012kg (+0.06%) vz=+0.093
+[INFO] [1788475235.894584946] [mhe_node]: [c_xy_est] cx=-0.0039 cy=-0.0001 m
+[INFO] [1788475235.894961186] [mhe_node]: [s-decay] n=57 |s_est|=0.00803 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475235.992265319] [mhe_node]: [s-decay] n=58 |s_est|=0.00813 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475236.097914724] [mhe_node]: [s-decay] n=59 |s_est|=0.00825 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475236.194724948] [mhe_node]: [s-decay] n=60 |s_est|=0.00838 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475236.296673032] [mhe_node]: [s-decay] n=61 |s_est|=0.00851 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475236.395504244] [mhe_node]: [s-decay] n=62 |s_est|=0.00865 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475236.492371280] [mhe_node]: [s-decay] n=63 |s_est|=0.00880 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475236.595647698] [mhe_node]: [s-decay] n=64 |s_est|=0.00893 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475236.692307120] [mhe_node]: [s-decay] n=65 |s_est|=0.00913 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475236.796722209] [mhe_node]: [s-decay] n=66 |s_est|=0.00930 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475236.891107269] [mhe_node]: [s-decay] n=67 |s_est|=0.00949 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475236.993365269] [mhe_node]: [s-decay] n=68 |s_est|=0.00967 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475237.093340235] [mhe_node]: [s-decay] n=69 |s_est|=0.00987 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475237.202540240] [mhe_node]: [s-decay] n=70 |s_est|=0.01007 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475237.293232943] [mhe_node]: [s-decay] n=71 |s_est|=0.01028 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475237.393308393] [mhe_node]: [s-decay] n=72 |s_est|=0.01048 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475237.495825287] [mhe_node]: [s-decay] n=73 |s_est|=0.01064 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475237.594442727] [mhe_node]: [s-decay] n=74 |s_est|=0.01081 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475237.695525863] [mhe_node]: [s-decay] n=75 |s_est|=0.01099 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475237.795477892] [mhe_node]: [s-decay] n=76 |s_est|=0.01114 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475237.896947861] [mhe_node]: MHE mass estimate: 2.056 kg (T_phys=20.12N) | solve=8.4ms (max16.0)
+[INFO] [1788475237.897487559] [mhe_node]: [truth] m_hat=2.0560 m_true=2.0643 err=-0.40% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0113,+0.0002] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475237.898004505] [mhe_node]: [tau_phys] roll=-0.000 pitch=+0.124 Nm
+[INFO] [1788475237.898590508] [mhe_node]: [mass-diag] m_est=2.0560 T=20.118N tilt=2.98deg cos=0.99865 | T/g=2.0507 T*cos/g=2.0480 | m_est-T*cos/g=+0.0080kg (+0.39%) vz=+0.107
+[INFO] [1788475237.899168389] [mhe_node]: [c_xy_est] cx=-0.0054 cy=+0.0001 m
+[INFO] [1788475237.899548430] [mhe_node]: [s-decay] n=77 |s_est|=0.01132 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475237.990381657] [mhe_node]: [s-decay] n=78 |s_est|=0.01149 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475238.090914535] [mhe_node]: [s-decay] n=79 |s_est|=0.01165 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475238.192290653] [mhe_node]: [s-decay] n=80 |s_est|=0.01182 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475238.293446534] [mhe_node]: [s-decay] n=81 |s_est|=0.01200 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475238.398027585] [mhe_node]: [s-decay] n=82 |s_est|=0.01218 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475238.493405286] [mhe_node]: [s-decay] n=83 |s_est|=0.01236 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475238.593377474] [mhe_node]: [s-decay] n=84 |s_est|=0.01252 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475238.702419754] [mhe_node]: [s-decay] n=85 |s_est|=0.01274 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475238.801405454] [mhe_node]: [s-decay] n=86 |s_est|=0.01295 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475238.895543206] [mhe_node]: [s-decay] n=87 |s_est|=0.01317 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475239.004710599] [mhe_node]: [s-decay] n=88 |s_est|=0.01336 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475239.096790498] [mhe_node]: [s-decay] n=89 |s_est|=0.01358 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475239.195492631] [mhe_node]: [s-decay] n=90 |s_est|=0.01378 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475239.293366876] [mhe_node]: [s-decay] n=91 |s_est|=0.01405 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475239.393268686] [mhe_node]: [s-decay] n=92 |s_est|=0.01430 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475239.495727534] [mhe_node]: [s-decay] n=93 |s_est|=0.01450 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475239.592304197] [mhe_node]: [s-decay] n=94 |s_est|=0.01469 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475239.693538130] [mhe_node]: [s-decay] n=95 |s_est|=0.01488 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475239.790892641] [mhe_node]: [s-decay] n=96 |s_est|=0.01503 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475239.891004834] [mhe_node]: MHE mass estimate: 2.054 kg (T_phys=20.16N) | solve=8.4ms (max18.1)
+[INFO] [1788475239.891395578] [mhe_node]: [truth] m_hat=2.0536 m_true=2.0643 err=-0.52% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0152,+0.0005] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475239.891758429] [mhe_node]: [tau_phys] roll=+0.005 pitch=+0.138 Nm
+[INFO] [1788475239.892173519] [mhe_node]: [mass-diag] m_est=2.0536 T=20.162N tilt=2.08deg cos=0.99934 | T/g=2.0553 T*cos/g=2.0539 | m_est-T*cos/g=-0.0003kg (-0.01%) vz=+0.112
+[INFO] [1788475239.892583058] [mhe_node]: [c_xy_est] cx=-0.0073 cy=+0.0002 m
+[INFO] [1788475239.892861789] [mhe_node]: [s-decay] n=97 |s_est|=0.01517 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475239.995743351] [mhe_node]: [s-decay] n=98 |s_est|=0.01527 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475240.092378617] [mhe_node]: [s-decay] n=99 |s_est|=0.01535 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475240.194638887] [mhe_node]: [s-decay] n=100 |s_est|=0.01541 |s_target|=0.00000 |s_out|=0.00000 d_s_out=-0.00000 conf=1.000 present=0 armed=0 latched=1 health=1
+[INFO] [1788475241.895698705] [mhe_node]: MHE mass estimate: 2.054 kg (T_phys=20.22N) | solve=6.2ms (max10.2)
+[INFO] [1788475241.896264027] [mhe_node]: [truth] m_hat=2.0537 m_true=2.0643 err=-0.51% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0160,+0.0006] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475241.896856485] [mhe_node]: [tau_phys] roll=+0.008 pitch=+0.153 Nm
+[INFO] [1788475241.897455788] [mhe_node]: [mass-diag] m_est=2.0537 T=20.219N tilt=0.94deg cos=0.99987 | T/g=2.0611 T*cos/g=2.0608 | m_est-T*cos/g=-0.0071kg (-0.34%) vz=+0.130
+[INFO] [1788475241.898038656] [mhe_node]: [c_xy_est] cx=-0.0078 cy=+0.0003 m
+[INFO] [1788475243.891040066] [mhe_node]: MHE mass estimate: 2.055 kg (T_phys=20.18N) | solve=7.8ms (max16.0)
+[INFO] [1788475243.891428707] [mhe_node]: [truth] m_hat=2.0547 m_true=2.0643 err=-0.47% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0137,+0.0008] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475243.891793364] [mhe_node]: [tau_phys] roll=+0.010 pitch=+0.121 Nm
+[INFO] [1788475243.892209706] [mhe_node]: [mass-diag] m_est=2.0547 T=20.181N tilt=1.27deg cos=0.99975 | T/g=2.0572 T*cos/g=2.0567 | m_est-T*cos/g=-0.0020kg (-0.10%) vz=+0.106
+[INFO] [1788475243.892610523] [mhe_node]: [c_xy_est] cx=-0.0067 cy=+0.0004 m
+[INFO] [1788475245.898157134] [mhe_node]: MHE mass estimate: 2.056 kg (T_phys=20.23N) | solve=8.5ms (max14.6)
+[INFO] [1788475245.898702551] [mhe_node]: [truth] m_hat=2.0559 m_true=2.0643 err=-0.41% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0094,+0.0009] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475245.899225260] [mhe_node]: [tau_phys] roll=+0.012 pitch=+0.078 Nm
+[INFO] [1788475245.899818743] [mhe_node]: [mass-diag] m_est=2.0559 T=20.232N tilt=2.09deg cos=0.99933 | T/g=2.0624 T*cos/g=2.0610 | m_est-T*cos/g=-0.0052kg (-0.25%) vz=+0.091
+[INFO] [1788475245.900396634] [mhe_node]: [c_xy_est] cx=-0.0046 cy=+0.0004 m
+[INFO] [1788475247.893472713] [mhe_node]: MHE mass estimate: 2.057 kg (T_phys=20.19N) | solve=7.2ms (max11.4)
+[INFO] [1788475247.894012301] [mhe_node]: [truth] m_hat=2.0573 m_true=2.0643 err=-0.34% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0071,+0.0009] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475247.894526759] [mhe_node]: [tau_phys] roll=+0.006 pitch=+0.075 Nm
+[INFO] [1788475247.895118249] [mhe_node]: [mass-diag] m_est=2.0573 T=20.190N tilt=2.36deg cos=0.99915 | T/g=2.0581 T*cos/g=2.0563 | m_est-T*cos/g=+0.0009kg (+0.05%) vz=+0.065
+[INFO] [1788475247.895698055] [mhe_node]: [c_xy_est] cx=-0.0035 cy=+0.0004 m
+[INFO] [1788475249.900241774] [mhe_node]: MHE mass estimate: 2.055 kg (T_phys=20.14N) | solve=6.8ms (max13.5)
+[INFO] [1788475249.900790722] [mhe_node]: [truth] m_hat=2.0546 m_true=2.0643 err=-0.47% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0086,+0.0007] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475249.901309428] [mhe_node]: [tau_phys] roll=+0.007 pitch=+0.106 Nm
+[INFO] [1788475249.901906462] [mhe_node]: [mass-diag] m_est=2.0546 T=20.140N tilt=2.23deg cos=0.99924 | T/g=2.0530 T*cos/g=2.0514 | m_est-T*cos/g=+0.0031kg (+0.15%) vz=+0.023
+[INFO] [1788475249.902483006] [mhe_node]: [c_xy_est] cx=-0.0041 cy=+0.0004 m
+[INFO] [1788475251.891445250] [mhe_node]: MHE mass estimate: 2.056 kg (T_phys=20.15N) | solve=5.7ms (max12.3)
+[INFO] [1788475251.892120434] [mhe_node]: [truth] m_hat=2.0563 m_true=2.0643 err=-0.39% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0104,+0.0007] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475251.892636133] [mhe_node]: [tau_phys] roll=+0.008 pitch=+0.113 Nm
+[INFO] [1788475251.893224157] [mhe_node]: [mass-diag] m_est=2.0563 T=20.152N tilt=1.71deg cos=0.99955 | T/g=2.0542 T*cos/g=2.0533 | m_est-T*cos/g=+0.0030kg (+0.15%) vz=+0.003
+[INFO] [1788475251.893802690] [mhe_node]: [c_xy_est] cx=-0.0051 cy=+0.0004 m
+[INFO] [1788475253.892485948] [mhe_node]: MHE mass estimate: 2.052 kg (T_phys=20.14N) | solve=4.7ms (max7.1)
+[INFO] [1788475253.893025233] [mhe_node]: [truth] m_hat=2.0515 m_true=2.0643 err=-0.62% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0105,+0.0007] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475253.893552346] [mhe_node]: [tau_phys] roll=+0.005 pitch=+0.088 Nm
+[INFO] [1788475253.894144312] [mhe_node]: [mass-diag] m_est=2.0515 T=20.144N tilt=1.66deg cos=0.99958 | T/g=2.0534 T*cos/g=2.0525 | m_est-T*cos/g=-0.0010kg (-0.05%) vz=-0.050
+[INFO] [1788475253.894725962] [mhe_node]: [c_xy_est] cx=-0.0052 cy=+0.0003 m
+[INFO] [1788475255.892718133] [mhe_node]: MHE mass estimate: 2.055 kg (T_phys=20.14N) | solve=7.7ms (max18.6)
+[INFO] [1788475255.893260727] [mhe_node]: [truth] m_hat=2.0552 m_true=2.0643 err=-0.44% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0081,+0.0008] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475255.893782013] [mhe_node]: [tau_phys] roll=+0.012 pitch=+0.073 Nm
+[INFO] [1788475255.894367125] [mhe_node]: [mass-diag] m_est=2.0552 T=20.136N tilt=1.93deg cos=0.99943 | T/g=2.0526 T*cos/g=2.0515 | m_est-T*cos/g=+0.0038kg (+0.18%) vz=-0.057
+[INFO] [1788475255.894947193] [mhe_node]: [c_xy_est] cx=-0.0039 cy=+0.0004 m
+[INFO] [1788475257.892425059] [mhe_node]: MHE mass estimate: 2.056 kg (T_phys=20.19N) | solve=6.4ms (max9.2)
+[INFO] [1788475257.892962585] [mhe_node]: [truth] m_hat=2.0562 m_true=2.0643 err=-0.39% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0075,+0.0009] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475257.893481257] [mhe_node]: [tau_phys] roll=+0.013 pitch=+0.094 Nm
+[INFO] [1788475257.894075263] [mhe_node]: [mass-diag] m_est=2.0562 T=20.188N tilt=2.99deg cos=0.99863 | T/g=2.0579 T*cos/g=2.0551 | m_est-T*cos/g=+0.0011kg (+0.05%) vz=-0.073
+[INFO] [1788475257.894654034] [mhe_node]: [c_xy_est] cx=-0.0036 cy=+0.0004 m
+[INFO] [1788475259.893446737] [mhe_node]: MHE mass estimate: 2.053 kg (T_phys=20.17N) | solve=7.4ms (max16.9)
+[INFO] [1788475259.893989508] [mhe_node]: [truth] m_hat=2.0532 m_true=2.0643 err=-0.54% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0114,+0.0008] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475259.894505825] [mhe_node]: [tau_phys] roll=+0.007 pitch=+0.129 Nm
+[INFO] [1788475259.895097160] [mhe_node]: [mass-diag] m_est=2.0532 T=20.166N tilt=2.75deg cos=0.99885 | T/g=2.0556 T*cos/g=2.0533 | m_est-T*cos/g=-0.0001kg (-0.00%) vz=-0.085
+[INFO] [1788475259.895675871] [mhe_node]: [c_xy_est] cx=-0.0054 cy=+0.0004 m
+[INFO] [1788475261.895980673] [mhe_node]: MHE mass estimate: 2.052 kg (T_phys=20.12N) | solve=8.5ms (max17.3)
+[INFO] [1788475261.896521954] [mhe_node]: [truth] m_hat=2.0521 m_true=2.0643 err=-0.59% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0148,+0.0007] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475261.897046593] [mhe_node]: [tau_phys] roll=+0.005 pitch=+0.151 Nm
+[INFO] [1788475261.897632853] [mhe_node]: [mass-diag] m_est=2.0521 T=20.119N tilt=2.19deg cos=0.99927 | T/g=2.0508 T*cos/g=2.0494 | m_est-T*cos/g=+0.0027kg (+0.13%) vz=-0.104
+[INFO] [1788475261.898216510] [mhe_node]: [c_xy_est] cx=-0.0072 cy=+0.0003 m
+[INFO] [1788475263.891443343] [mhe_node]: MHE mass estimate: 2.047 kg (T_phys=20.13N) | solve=5.4ms (max11.5)
+[INFO] [1788475263.891987615] [mhe_node]: [truth] m_hat=2.0471 m_true=2.0643 err=-0.83% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0157,+0.0005] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475263.892503833] [mhe_node]: [tau_phys] roll=+0.002 pitch=+0.145 Nm
+[INFO] [1788475263.893120623] [mhe_node]: [mass-diag] m_est=2.0471 T=20.130N tilt=1.25deg cos=0.99976 | T/g=2.0520 T*cos/g=2.0515 | m_est-T*cos/g=-0.0044kg (-0.21%) vz=-0.134
+[INFO] [1788475263.893697608] [mhe_node]: [c_xy_est] cx=-0.0076 cy=+0.0003 m
+[INFO] [1788475265.894656208] [mhe_node]: MHE mass estimate: 2.050 kg (T_phys=20.15N) | solve=7.3ms (max17.0)
+[INFO] [1788475265.895209196] [mhe_node]: [truth] m_hat=2.0501 m_true=2.0643 err=-0.69% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0147,+0.0002] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475265.895728768] [mhe_node]: [tau_phys] roll=+0.004 pitch=+0.118 Nm
+[INFO] [1788475265.896319628] [mhe_node]: [mass-diag] m_est=2.0501 T=20.151N tilt=1.04deg cos=0.99983 | T/g=2.0541 T*cos/g=2.0538 | m_est-T*cos/g=-0.0037kg (-0.18%) vz=-0.105
+[INFO] [1788475265.896900567] [mhe_node]: [c_xy_est] cx=-0.0073 cy=+0.0001 m
+[INFO] [1788475267.896852616] [mhe_node]: MHE mass estimate: 2.051 kg (T_phys=20.24N) | solve=8.0ms (max12.3)
+[INFO] [1788475267.897401744] [mhe_node]: [truth] m_hat=2.0509 m_true=2.0643 err=-0.65% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0107,+0.0000] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475267.897922417] [mhe_node]: [tau_phys] roll=-0.001 pitch=+0.080 Nm
+[INFO] [1788475267.898515501] [mhe_node]: [mass-diag] m_est=2.0509 T=20.239N tilt=2.00deg cos=0.99939 | T/g=2.0631 T*cos/g=2.0618 | m_est-T*cos/g=-0.0109kg (-0.53%) vz=-0.092
+[INFO] [1788475267.899102617] [mhe_node]: [c_xy_est] cx=-0.0053 cy=+0.0000 m
+[INFO] [1788475269.893543338] [mhe_node]: MHE mass estimate: 2.056 kg (T_phys=20.18N) | solve=7.0ms (max10.4)
+[INFO] [1788475269.894211750] [mhe_node]: [truth] m_hat=2.0556 m_true=2.0643 err=-0.42% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0075,-0.0003] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475269.894729661] [mhe_node]: [tau_phys] roll=-0.009 pitch=+0.069 Nm
+[INFO] [1788475269.895312635] [mhe_node]: [mass-diag] m_est=2.0556 T=20.181N tilt=2.33deg cos=0.99917 | T/g=2.0572 T*cos/g=2.0555 | m_est-T*cos/g=+0.0001kg (+0.00%) vz=-0.060
+[INFO] [1788475269.895893690] [mhe_node]: [c_xy_est] cx=-0.0037 cy=-0.0001 m
+[INFO] [1788475271.892652865] [mhe_node]: MHE mass estimate: 2.057 kg (T_phys=20.19N) | solve=5.9ms (max9.3)
+[INFO] [1788475271.893199627] [mhe_node]: [truth] m_hat=2.0572 m_true=2.0643 err=-0.34% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0084,-0.0001] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475271.893718400] [mhe_node]: [tau_phys] roll=+0.001 pitch=+0.096 Nm
+[INFO] [1788475271.894306619] [mhe_node]: [mass-diag] m_est=2.0572 T=20.189N tilt=2.65deg cos=0.99893 | T/g=2.0580 T*cos/g=2.0558 | m_est-T*cos/g=+0.0014kg (+0.07%) vz=-0.025
+[INFO] [1788475271.894889181] [mhe_node]: [c_xy_est] cx=-0.0040 cy=-0.0001 m
+[INFO] [1788475273.891473245] [mhe_node]: MHE mass estimate: 2.055 kg (T_phys=20.14N) | solve=6.9ms (max11.2)
+[INFO] [1788475273.892028684] [mhe_node]: [truth] m_hat=2.0546 m_true=2.0643 err=-0.47% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0110,+0.0001] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788475273.892552410] [mhe_node]: [tau_phys] roll=+0.001 pitch=+0.103 Nm
+[INFO] [1788475273.893148747] [mhe_node]: [mass-diag] m_est=2.0546 T=20.135N tilt=1.78deg cos=0.99952 | T/g=2.0525 T*cos/g=2.0516 | m_est-T*cos/g=+0.0030kg (+0.15%) vz=-0.009
+[INFO] [1788475273.893732457] [mhe_node]: [c_xy_est] cx=-0.0054 cy=+0.0001 m
+[ros2run]: Killed

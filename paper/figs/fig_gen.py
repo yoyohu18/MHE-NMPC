@@ -15,7 +15,12 @@ import numpy as np
 from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-RUN = os.path.abspath(os.path.join(HERE, '..', '..', '..', 'nmpc_test_results'))
+BUNDLED_RUN = os.path.abspath(os.path.join(HERE, '..', 'data'))
+LEGACY_RUN = os.path.abspath(os.path.join(HERE, '..', '..', '..', 'nmpc_test_results'))
+RUN = os.environ.get('NMPC_RESULTS_DIR')
+if not RUN:
+    RUN = BUNDLED_RUN if os.path.isfile(
+        os.path.join(BUNDLED_RUN, 'mainline_ab2_manifest.csv')) else LEGACY_RUN
 
 # ---- dataviz 参考调色板(light,已验证) ----
 BLUE, ORANGE, AQUA = '#2a78d6', '#eb6834', '#1baf7a'

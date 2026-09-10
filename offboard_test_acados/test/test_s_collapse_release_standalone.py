@@ -109,6 +109,7 @@ class _Stub:
         self._s_peak = 0.0
         self._s_low = 0
         self._s_ratio_log_n = 0
+        self.frames = 0
         self._payload_conf_args = {
             'mass_full': 0.015, 'mass_zero': 0.060,
             'moment_full': 0.0015, 'moment_zero': 0.0060,
@@ -131,6 +132,9 @@ class _Stub:
         self.payload_exit_steady_vel = 0.20
         # c_xy 发布路径
         self.c_xy_from_moment = True
+        self.c_xy_clamp_enable = True
+        self._c_xy_reject = 0
+        self._c_xy_total = 0
         self.c_xy_est = np.zeros(2)
         self._c_xy_inited = False
         self.c_xy_est_pub = _Pub()
@@ -187,6 +191,7 @@ class _Stub:
         self.m_est = mhe_p.m_B + m_p
         for _ in range(n):
             self._t += 0.1
+            self.frames += 1
             self._update_c_xy_est()
 
 

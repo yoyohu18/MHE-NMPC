@@ -1,0 +1,59 @@
+[INFO] [1788465407.053364646] [mhe_node]: MHE node starting, building/loading solver... (geom_coupled=True, N=20, m_min=1.961, m_B=2.0643)
+Code reuse possible, skipping code generation.
+acados was compiled without OpenMP.
+[INFO] [1788465407.060240240] [mhe_node]: [prior] geom_coupled=True → 载荷质量信息**完全不生效**(grip_payload_envelope=0.3 是死代码:coupled 档下 _payload_geometry 根本不被调用);模型只吃可测杆臂 r_p + 被估质量,m 的先验仅有 Q0 质量维=0.1 (σ=3.16kg,实质无先验)
+[WARN] [1788465407.060730798] [mhe_node]: geom_release_mode='self':估计器不被告知 drop。⚠️ 2026-08-24 实测,**NMPC 侧也设成 'self' 会必然坠机**——drop 后控制器继续按幽灵偏心载荷配平,指令 0.424N·m(tau_max 的 85%)作用在空机 J_xx=0.0142 上 = 29.8 rad/s²,而 MHE 10Hz/2s 窗口要 1~2s 才纠得过来,飞机先翻。**正确组合 = MHE 'self' + NMPC 'event'**(控制器是发释放指令的一方,它知道不构成认知作弊)。
+[INFO] [1788465407.062126866] [mhe_node]: [c_xy_est] 质量域卸载判据已开:先武装(m_p>0.090kg),再判 m_p<0.03kg 持续 20 帧 -> 释放偏心估计
+[INFO] [1788465407.062660516] [mhe_node]: [c_xy] 来源 = 一阶质量矩 s/m_T(窗口内估计,**无稳态门控**),替代窗外 EMA —— 机动中也会更新
+[INFO] [1788465407.063657357] [mhe_node]: weight schedule theta = [-4.00, 0.00, 0.00, 0.00], signal mode = residual (residual self-trigger: thresh=1.5N persist=2 baseline_tau=3.0s)
+[INFO] [1788465407.067831293] [mhe_node]: MHE node initialized! tau_source=command (roll/pitch NMPC意图值, yaw NMPC意图值), motor_window_avg=False, geom_release_mode=self. Waiting for odometry + control data...
+[INFO] [1788465429.267451730] [mhe_node]: [no-signal] baseline settled at 19.94N (quiet 20 frames); detector armed
+[INFO] [1788465429.267695601] [mhe_node]: arrival prior seeded: m=2.064 kg (m_nominal prior)
+[INFO] [1788465429.267993128] [mhe_node]: [geom] model_geom_on=True (release_mode=self, truth_attached=False) mode=coupled(r_p) -> geom=[ 0.    0.   -0.47] dJ=0.0000 c_xy=[+0.0000,+0.0000] (dJ/c 为按当前 m_est 折算的诊断当量,模型内部随 m 实时生成)
+[INFO] [1788465431.175677871] [mhe_node]: MHE mass estimate: 2.059 kg (T_phys=20.28N) | solve=3.5ms (max7.5)
+[INFO] [1788465431.176079118] [mhe_node]: [truth] m_hat=2.0594 m_true=2.0643 err=-0.24% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0009,-0.0000] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788465431.176443406] [mhe_node]: [tau_phys] roll=+0.002 pitch=-0.035 Nm
+[INFO] [1788465431.176872171] [mhe_node]: [mass-diag] m_est=2.0594 T=20.280N tilt=1.88deg cos=0.99946 | T/g=2.0672 T*cos/g=2.0661 | m_est-T*cos/g=-0.0067kg (-0.33%) vz=+0.120
+[INFO] [1788465431.177280173] [mhe_node]: [c_xy_est] cx=-0.0000 cy=+0.0000 m
+[INFO] [1788465433.176338307] [mhe_node]: MHE mass estimate: 2.059 kg (T_phys=20.21N) | solve=13.0ms (max20.1)
+[INFO] [1788465433.176891561] [mhe_node]: [truth] m_hat=2.0587 m_true=2.0643 err=-0.27% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0009,+0.0001] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788465433.177410150] [mhe_node]: [tau_phys] roll=+0.001 pitch=+0.004 Nm
+[INFO] [1788465433.178000980] [mhe_node]: [mass-diag] m_est=2.0587 T=20.207N tilt=2.45deg cos=0.99908 | T/g=2.0598 T*cos/g=2.0579 | m_est-T*cos/g=+0.0007kg (+0.03%) vz=+0.036
+[INFO] [1788465433.178578834] [mhe_node]: [c_xy_est] cx=-0.0003 cy=+0.0000 m
+[INFO] [1788465435.172908032] [mhe_node]: MHE mass estimate: 2.060 kg (T_phys=20.20N) | solve=5.9ms (max10.7)
+[INFO] [1788465435.173448570] [mhe_node]: [truth] m_hat=2.0599 m_true=2.0643 err=-0.21% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[+0.0002,-0.0001] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788465435.173965262] [mhe_node]: [tau_phys] roll=+0.003 pitch=-0.001 Nm
+[INFO] [1788465435.174552335] [mhe_node]: [mass-diag] m_est=2.0599 T=20.199N tilt=0.78deg cos=0.99991 | T/g=2.0590 T*cos/g=2.0588 | m_est-T*cos/g=+0.0011kg (+0.05%) vz=-0.001
+[INFO] [1788465435.175136175] [mhe_node]: [c_xy_est] cx=+0.0001 cy=-0.0001 m
+[INFO] [1788465437.067477810] [mhe_node]: [no-signal] mass mutation self-detected at frame 97: T_phys=18.16N vs baseline 20.09N (dev 1.93N > 1.5N over 2 frames, direction=DROP); de-weighting pre-event stages
+[INFO] [1788465437.068245127] [mhe_node]: event transition started: pre-event stages de-weighted
+[INFO] [1788465437.171701164] [mhe_node]: MHE mass estimate: 2.015 kg (T_phys=18.52N) | solve=4.7ms (max9.6)
+[INFO] [1788465437.172085753] [mhe_node]: [truth] m_hat=2.0154 m_true=2.0643 err=-2.37% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[+0.0000,-0.0002] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788465437.172448130] [mhe_node]: [tau_phys] roll=-0.001 pitch=-0.001 Nm
+[INFO] [1788465437.172865617] [mhe_node]: [mass-diag] m_est=2.0154 T=18.522N tilt=0.07deg cos=1.00000 | T/g=1.8881 T*cos/g=1.8880 | m_est-T*cos/g=+0.1274kg (+6.75%) vz=-0.268
+[INFO] [1788465437.173266531] [mhe_node]: [c_xy_est] cx=+0.0001 cy=-0.0000 m
+[INFO] [1788465438.968381679] [mhe_node]: event transition ended: nominal weights restored
+[INFO] [1788465439.172788321] [mhe_node]: MHE mass estimate: 2.066 kg (T_phys=20.36N) | solve=4.5ms (max20.4)
+[INFO] [1788465439.173348060] [mhe_node]: [truth] m_hat=2.0657 m_true=2.0643 err=+0.07% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[+0.0000,-0.0000] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788465439.173875509] [mhe_node]: [tau_phys] roll=-0.000 pitch=+0.002 Nm
+[INFO] [1788465439.174509897] [mhe_node]: [mass-diag] m_est=2.0657 T=20.363N tilt=0.30deg cos=0.99999 | T/g=2.0757 T*cos/g=2.0757 | m_est-T*cos/g=-0.0100kg (-0.48%) vz=-0.067
+[INFO] [1788465439.175095406] [mhe_node]: [c_xy_est] cx=+0.0000 cy=-0.0000 m
+[INFO] [1788465441.184438383] [mhe_node]: MHE mass estimate: 1.961 kg (T_phys=18.29N) | solve=10.1ms (max19.8)
+[INFO] [1788465441.184982869] [mhe_node]: [truth] m_hat=1.9611 m_true=2.0643 err=-5.00% | c_hat=[+0.0000,+0.0000] c_true=[+0.0000,+0.0000] | Jxx_hat=0.01420 Jxx_true=0.01420 Jyz_hat=+0.00000 Jyz_true=+0.00000 | s_hat=[-0.0022,-0.0024] s_true=[+0.0000,+0.0000] kg·m
+[INFO] [1788465441.185500193] [mhe_node]: [tau_phys] roll=+0.330 pitch=-0.122 Nm
+[INFO] [1788465441.186084827] [mhe_node]: [mass-diag] m_est=1.9611 T=18.288N tilt=1.18deg cos=0.99979 | T/g=1.8643 T*cos/g=1.8639 | m_est-T*cos/g=+0.0972kg (+5.22%) vz=+0.008
+[INFO] [1788465441.186663681] [mhe_node]: [c_xy_est] cx=-0.0012 cy=-0.0016 m
+[WARN] [1788465441.844703276] [mhe_node]: MHE solve failed [status=2], skipping this window (streak 1)
+[WARN] [1788465441.941261254] [mhe_node]: MHE solve failed [status=2], skipping this window (streak 2)
+[WARN] [1788465442.044691634] [mhe_node]: MHE solve failed [status=2], skipping this window (streak 3)
+[WARN] [1788465442.142977756] [mhe_node]: MHE solve failed [status=2], skipping this window (streak 4)
+[WARN] [1788465442.259529056] [mhe_node]: MHE solve failed [status=2], skipping this window (streak 5)
+[WARN] [1788465442.259865989] [mhe_node]: re-anchored arrival prior to current window after 5 consecutive failures (m seeded from thrust_phys: 1.961 -> 1.961 kg)
+[WARN] [1788465442.964055625] [mhe_node]: MHE solve failed [status=2], skipping this window (streak 1)
+[WARN] [1788465443.035131324] [mhe_node]: MHE solve failed [status=2], skipping this window (streak 2)
+[WARN] [1788465443.138189389] [mhe_node]: MHE solve failed [status=2], skipping this window (streak 3)
+[WARN] [1788465443.238918333] [mhe_node]: MHE solve failed [status=2], skipping this window (streak 4)
+[WARN] [1788465443.339571782] [mhe_node]: MHE solve failed [status=2], skipping this window (streak 5)
+[WARN] [1788465443.339908195] [mhe_node]: re-anchored arrival prior to current window after 5 consecutive failures (m seeded from thrust_phys: 1.961 -> 1.961 kg)
+[WARN] [1788465443.567472287] [mhe_node]: [payload-health] input stream stale; MHE window cleared, publishing held estimate as unhealthy
+[ros2run]: Killed

@@ -54,9 +54,15 @@ def _run_mhe(Y, U, m_init_guess, scheduler=None, event_frame=None, lam=1.0):
     n_total = Y.shape[0]
     m_est_seq = np.full(n_total, np.nan)
 
-    x0_bar = np.concatenate([Y[0], [m_init_guess]])
-    x_guess = [np.concatenate([Y[min(i, n_total-1)], [m_init_guess]])
-               for i in range(N+1)]
+    # 当前 MHE 可选增广一阶质量矩 s=[s_x,s_y]。到达代价和
+    # state warm-start 都必须使用 nx_aug，不能再把状态长度写死为
+    # legacy 的 nx+1。本测试是居中质量阶跃，s 的合理初值为 0。
+    estimated_params_0 = np.concatenate([
+        [m_init_guess], np.zeros(mhe_p.ns)])
+    x0_bar = np.concatenate([Y[0], estimated_params_0])
+    x_guess = [np.concatenate([
+        Y[min(i, n_total-1)], estimated_params_0]) for i in range(N+1)]
+    assert x0_bar.shape == (mhe_p.nx_aug,)
 
     for k in range(N, n_total):
         y_win = Y[k-N:k+1]

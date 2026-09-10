@@ -35,7 +35,14 @@ from offboard_test_acados.payload_estimate import (  # noqa: E402
     release_evidence,
 )
 
-RES = '/home/clear/ros2_ws_HJH/nmpc_test_results'
+_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+_BUNDLED_RES = os.path.join(_REPO, 'paper', 'data')
+_LEGACY_RES = os.path.join(os.path.dirname(_REPO), 'nmpc_test_results')
+RES = os.environ.get('NMPC_RESULTS_DIR')
+if not RES:
+    RES = (_BUNDLED_RES if os.path.isfile(
+           os.path.join(_BUNDLED_RES, 'mainline_ab2_manifest.csv'))
+           else _LEGACY_RES)
 M_B = 2.0643
 
 RE_T = re.compile(r'\[(\d+\.\d+)\]')

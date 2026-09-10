@@ -883,6 +883,20 @@ class MHENode(Node):
         self._s_fast = 0
         self._s_strong = 0
         self._s_ratio_log_n = 0
+        # 释放检测器自检：一阶矩统一判决应在载荷武装后每拍
+        # 执行。既往批次三次出现“UNRESOLVED 兜底接住了检测器根本
+        # 没运行”，因此这里不仅打启动配置，还看实际执行心跳。
+        self.declare_parameter('release_detector_watchdog_sec', 3.0)
+        self.declare_parameter('release_detector_warn_repeat_sec', 10.0)
+        self.release_detector_watchdog_sec = max(
+            mhe_p.dt, float(self.get_parameter(
+                'release_detector_watchdog_sec').value))
+        self.release_detector_warn_repeat_sec = max(
+            self.release_detector_watchdog_sec, float(self.get_parameter(
+                'release_detector_warn_repeat_sec').value))
+        self._release_detector_eval_frame = None
+        self._release_detector_armed_frame = None
+        self._release_detector_last_warn_frame = None
         if self.c_xy_mass_release_mp > 0.0 and self.geom_release_mode != 'self':
             self.get_logger().error(
                 "c_xy_mass_release_mp 只在 geom_release_mode='self' 下可用"
@@ -1122,6 +1136,7 @@ class MHENode(Node):
             self.get_logger().info(f'[resid] 诊断采集已开启 -> {_rl_dir}'
                                    ' (含 IMU 流)')
 
+        self._report_release_detector_startup()
         self.timer = self.create_timer(mhe_p.dt, self.timer_cb)
         self.get_logger().info(
             f'MHE node initialized! tau_source={self.tau_source} '
@@ -1130,6 +1145,70 @@ class MHENode(Node):
             f', motor_window_avg={self.motor_window_avg}'
             f', geom_release_mode={self.geom_release_mode}. '
             'Waiting for odometry + control data...')
+
+    def _release_detector_config(self):
+        """返回统一 moment 判决与 legacy 质量判决的实际可用性。"""
+        moment = bool(
+            self.c_xy_est_enable and self.s_release_ratio > 0.0 and mhe_p.ns)
+        mass = bool(
+            self.c_xy_est_enable and self.c_xy_mass_release_mp > 0.0
+            and self.geom_release_mode == 'self')
+        return moment, mass
+
+    def _report_release_detector_startup(self):
+        """启动时明示检测器是 READY 还是被哪个总开关关住。"""
+        moment, mass = self._release_detector_config()
+        if moment:
+            self.get_logger().info(
+                f'[release-selfcheck] READY: c_xy_est_enable=1, '
+                f'moment-state ns={mhe_p.ns}, ratio={self.s_release_ratio:.2f}; '
+                f'legacy_mass={int(mass)}, watchdog='
+                f'{self.release_detector_watchdog_sec:.1f}s')
+            return
+
+        blockers = []
+        if not self.c_xy_est_enable:
+            blockers.append('c_xy_est_enable=false(master gate)')
+        if not mhe_p.ns:
+            blockers.append('MHE_ESTIMATE_MOMENT=0(ns=0)')
+        if self.s_release_ratio <= 0.0:
+            blockers.append('s_release_ratio<=0')
+        self.get_logger().warn(
+            '[release-selfcheck] UNIFIED DETECTOR OFF: '
+            + ', '.join(blockers)
+            + f'; legacy_mass={int(mass)}. 带载后若无其他可靠释放路径，'
+              '系统将保持载荷模型并进入 UNRESOLVED。')
+
+    def _check_release_detector_watchdog(self):
+        """已武装后长时间无统一判决心跳时节流报警。"""
+        if not self._load_armed:
+            self._release_detector_armed_frame = None
+            self._release_detector_last_warn_frame = None
+            return
+        if self._release_detector_armed_frame is None:
+            self._release_detector_armed_frame = self.frames
+
+        last_eval = self._release_detector_eval_frame
+        baseline = (self._release_detector_armed_frame
+                    if last_eval is None else last_eval)
+        silent_sec = max(0.0, (self.frames - baseline) * mhe_p.dt)
+        if silent_sec < self.release_detector_watchdog_sec:
+            return
+
+        last_warn = self._release_detector_last_warn_frame
+        if (last_warn is not None and
+                (self.frames - last_warn) * mhe_p.dt
+                < self.release_detector_warn_repeat_sec):
+            return
+        moment, mass = self._release_detector_config()
+        self.get_logger().warn(
+            f'[release-selfcheck] ARMED BUT NO UNIFIED DETECTOR EVALUATION '
+            f'for {silent_sec:.1f}s: c_xy_est_enable='
+            f'{int(self.c_xy_est_enable)}, ns={mhe_p.ns}, '
+            f's_release_ratio={self.s_release_ratio:.2f}, '
+            f'unified_ready={int(moment)}, legacy_mass={int(mass)}. '
+            f'UNRESOLVED may be masking a disabled/misconfigured detector.')
+        self._release_detector_last_warn_frame = self.frames
 
     def odom_cb(self, msg):
         self.resid_log.log_odom(msg)   # 记原始 body 值,在任何变换之前
@@ -2156,6 +2235,7 @@ class MHENode(Node):
 
         if self.c_xy_est_enable:
             self._update_c_xy_est()
+        self._check_release_detector_watchdog()
 
         if len(self.y_buf) < mhe_p.N + 1:
             if self._mass_publish_allowed():
@@ -2220,6 +2300,10 @@ class MHENode(Node):
         # 见该模块注释。
         if (self.s_release_ratio > 0.0 and mhe_p.ns
                 and self._load_armed):
+            # 心跳记的是“统一判决代码确实进入”，不是最终是否放行。
+            # 不健康/基准未就绪/越界都是正常的“运行中但拒绝判决”，
+            # 不应被 watchdog 误报成 detector 没运行。
+            self._release_detector_eval_frame = self.frames
             # ★★ health/freshness 门控(2026-09-05):估计不可信时**不判决**。
             # 根因链(20260905_152924):连续 5 次 solve failure -> re-anchor
             # 把 s_est 清成 0 -> 释放判据在下一次成功解之前照常运行 ->

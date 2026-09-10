@@ -1,8 +1,8 @@
 #!/bin/bash
 # 论文全部图表的一键复现 —— 从冻结的实验日志重建 paper/figs/*.pdf 与 main.pdf。
 #
-# 设计前提:论文数据**不重跑仿真**。每个数字都来自 nmpc_test_results/ 下带时间戳的
-# 原始日志,本脚本只做"日志 → 图 → PDF"这一段,因此结果逐字节可复现。数据源清单
+# 设计前提:论文数据**不重跑仿真**。每个数字都来自 paper/data/ 下带时间戳的
+# 冻结原始日志,本脚本只做"日志 → 图 → PDF"这一段,因此结果逐字节可复现。数据源清单
 # 与"论文数字 ← 哪个文件"的逐条映射见 REPRODUCE.md。
 #
 # 用法:  bash paper/reproduce.sh          # 校验数据源 + 出图 + 编译
@@ -11,7 +11,25 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKSPACE="$(cd "$REPO/.." && pwd)"
-RUN="$WORKSPACE/nmpc_test_results"
+BUNDLED_RUN="$REPO/paper/data"
+LEGACY_RUN="$WORKSPACE/nmpc_test_results"
+if [ -f "$BUNDLED_RUN/mainline_ab2_manifest.csv" ]; then
+  RUN="$BUNDLED_RUN"
+  echo "数据源: $RUN (仓库内冻结数据)"
+elif [ -d "$LEGACY_RUN" ]; then
+  RUN="$LEGACY_RUN"
+  echo "数据源: $RUN (兼容旧外部目录)"
+else
+  RUN="$BUNDLED_RUN"
+  echo "数据源: $RUN (仓库内冻结数据)"
+fi
+# replay_release_detector.py 也使用同一数据根目录。
+export NMPC_RESULTS_DIR="$RUN"
+# 固定 PDF 内部的 CreationDate/ModDate，否则内容相同的重建仍会产生不同字节。
+# 时间锚定为 2026-09-10 数据—代码审计日 00:00:00 UTC。
+export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1788998400}"
+export FORCE_SOURCE_DATE=1
+export TZ=UTC
 FIGS="$REPO/paper/figs"
 CHECK_ONLY="${1:-}"
 
@@ -33,6 +51,17 @@ SOURCES=(
 
 echo "=== 1/3 校验冻结数据源 ==="
 missing=0
+if [ -f "$RUN/SHA256SUMS" ]; then
+  if (cd "$RUN" && sha256sum --quiet -c SHA256SUMS); then
+    echo "  OK    SHA256SUMS (711 files)                  冻结数据字节级完整性"
+  else
+    echo "!! 冻结数据 SHA-256 校验失败"
+    missing=$((missing + 1))
+  fi
+elif [ "$RUN" = "$BUNDLED_RUN" ]; then
+  echo "  MISS  SHA256SUMS                              仓库内冻结数据缺少完整性清单"
+  missing=$((missing + 1))
+fi
 for entry in "${SOURCES[@]}"; do
   f="${entry%%|*}"; desc="${entry##*|}"
   if [ -e "$RUN/$f" ]; then
