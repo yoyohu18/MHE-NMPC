@@ -15,7 +15,9 @@ set -u
 
 WS=/home/clear/ros2_ws_HJH
 RES=$WS/nmpc_test_results
-MAN=$RES/mainline_ab2_manifest.csv
+# ⚠️ 2026-09-10:manifest 原为固定文件名 + **追加**模式,直接重跑会把新数据混进
+# 09-04 那份已冻结的表(论文 §VI-F 的数据源)。改为可配置,重跑必须传 MAN_FILE。
+MAN=${MAN_FILE:-$RES/mainline_ab2_manifest.csv}
 LOCK=/tmp/mainline_ab.lock          # 与第一轮同一把锁:同时只允许一个 SITL 批次
 VALID_PAIRS=${VALID_PAIRS:-8}
 MAX_TRIES=${MAX_TRIES:-16}          # 每格尝试上限;够不到 8 对就如实少报,不硬凑
@@ -46,6 +48,21 @@ cleanup() {
 trap 'echo "[批次] 收到中断,清栈退出"; cleanup; exit 130' INT TERM
 
 [ -f "$MAN" ] || echo "idx,wid,pair,arm,stamp,started,finished,status,validity" > "$MAN"
+# ★ 2026-09-10(欠账 #10):运行时记录代码身份,使批次达到 E 级溯源。
+# 历史批次因为缺这一步,只能标 R 级("还原到首个含该设施的提交")。
+PROV="${MAN%.csv}.provenance.txt"
+{
+  echo "batch_started=$(date +%FT%T%z)"
+  echo "git_head=$(cd "$WS/src" && git rev-parse HEAD 2>/dev/null)"
+  echo "git_head_short=$(cd "$WS/src" && git rev-parse --short HEAD 2>/dev/null)"
+  echo "git_describe=$(cd "$WS/src" && git log -1 --format='%h %s' 2>/dev/null)"
+  echo "dirty_files=$(cd "$WS/src" && git status --porcelain 2>/dev/null | wc -l)"
+  echo "dirty_list<<EOF"; (cd "$WS/src" && git status --porcelain 2>/dev/null); echo "EOF"
+  echo "sha256_mhe_node=$(sha256sum "$WS/src/offboard_test_acados/offboard_test_acados/mhe_node.py" | cut -c1-16)"
+  echo "sha256_nmpc_node=$(sha256sum "$WS/src/offboard_test_acados/offboard_test_acados/acados_nmpc_node.py" | cut -c1-16)"
+  echo "sha256_payload_estimate=$(sha256sum "$WS/src/offboard_test_acados/offboard_test_acados/payload_estimate.py" | cut -c1-16)"
+} > "$PROV"
+echo "[批次] 溯源已记录 -> $PROV"
 
 w_env() {
   case "$1" in
