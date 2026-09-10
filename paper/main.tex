@@ -109,11 +109,18 @@ identified online is a weak vertical-arm prior $r_z$, which is structurally unob
 the thrust-moment channel.
 
 \section{Related Work}
+\textbf{Agile quadrotor flight.} Modern quadrotor control builds on geometric tracking on
+$\mathrm{SE}(3)$ \cite{lee2010}, and pushing to the actuator limits is by now standard in
+time-optimal flight \cite{foehn2021}. Both assume the inertial parameters are known and fixed;
+a payload event invalidates that assumption mid-flight, which is the gap this work addresses.
+
 \textbf{Aerial manipulation and transport.} Aerial robots that physically interact with their
 environment---grasping, carrying, and releasing objects---are surveyed in \cite{ollero2022};
 dynamic aerial grasping, where the gripper dynamics must be explicitly modeled and controlled,
 was demonstrated in \cite{thomas2014}.
-Our setting is the transport-and-release subproblem, where the payload is rigidly attached and
+Load transportation specifically---by grasping or by cable suspension---is surveyed in
+\cite{villa2020}. Our setting is the transport-and-release subproblem, where the payload is
+rigidly attached and
 the resulting change in mass, inertia, and center of mass must be handled by the controller.
 
 \textbf{Control under changing payload.} Adaptive and robust designs---L1-adaptive NMPC
@@ -125,8 +132,10 @@ with Gaussian processes inside the MPC, which improves tracking without yielding
 physical parameter either. Slung-load control
 addresses the swinging-payload case explicitly \cite{sreenath2013}, exploiting differential
 flatness of the cable-suspended system; a rigidly attached payload instead changes the
-vehicle's own inertial parameters. These methods do not produce a physical
-parameter and cannot, e.g., update a thrust-margin constraint from the estimate.
+vehicle's own inertial parameters. A related proprioceptive line estimates the external wrench directly with momentum-based
+observers, enabling collision detection and interaction control \cite{tomic2017}. All of these
+recover a \emph{force/torque}, not a physical parameter: they cannot, e.g., update a
+thrust-margin constraint or an inner-loop gain schedule from the estimate.
 
 \textbf{MHE and online parameter estimation.} Filter- and optimization-based estimators
 recover mass, inertia, and geometric parameters \cite{svacha2020,wuest2019,bohm2021}.
@@ -135,9 +144,15 @@ neural MHE (NeuroMHE) \cite{neuromhe} learns to output these weights online, res
 bias--variance trade-off but estimating a lumped disturbance force rather than explicit named
 parameters.
 
-\textbf{Event-triggered and change detection.} Residual-based fault/change detection (CUSUM
-and related \cite{basseville1993}) underlies our self-trigger. Our positioning: we do not learn dynamics and add no
-sensing; every deployed signal derives from motor speeds and odometry. We separately test,
+\textbf{Event-triggered and change detection.} Event- and self-triggered control schedule
+computation by state-dependent conditions rather than by a fixed clock \cite{heemels2012};
+our trigger is of the self-triggered kind in that the condition is evaluated from signals the
+estimator already has. Residual-based fault/change detection (CUSUM and related
+\cite{basseville1993}) underlies it. Our positioning: we do not learn dynamics and add no
+sensing; every deployed signal derives from motor speeds and odometry. This is a deliberate
+departure from learning-based MPC \cite{hewing} and the broader safe-learning agenda
+\cite{brunke}, where a learned component absorbs the model mismatch; here the mismatch is
+resolved into named parameters that downstream constraints can consume. We separately test,
 as a supporting ablation, whether numerical tuning improves the handcrafted transient-period
 schedule.
 
