@@ -26,8 +26,9 @@
 
 \title{Eventless Payload-Adaptive NMPC for Quadrotors}
 
-\author{\IEEEauthorblockN{Anonymous Author(s)}
-\IEEEauthorblockA{Affiliation \\ \todo{authors, affiliation, email}}}
+\author{\IEEEauthorblockN{Hu Jinghan}
+\IEEEauthorblockA{Nanyang Technological University\\
+\texttt{jinghan002@e.ntu.edu.sg}}}
 
 \maketitle
 
@@ -723,6 +724,32 @@ Although every reported release batch explicitly enabled it, the bare default is
 \texttt{false} and therefore falls through to \textsc{unresolved}. Before deployment, release
 decision execution must receive its own explicit enable parameter (or be unconditional in the
 eventless profile), with startup validation that rejects inconsistent configurations.
+
+\emph{Excitation-induced drift of the first moment.} The dominant limitation of the release
+detector is not threshold placement but an observability boundary. Under sustained figure-eight
+excitation the estimated first moment $\hat s$ drifts upward: in affected flights the loaded
+$\lVert\hat s\rVert$ grows from \SI{0.012}{\kilo\gram\metre} to \SI{0.031}{\kilo\gram\metre}
+(\num{2.5}$\times$), and the frames that exceed the physical envelope recur with a
+\SI{12.0}{s} period, matching the figure-eight half period $\pi/w=\SI{11.1}{s}$, i.e.\ the
+spacing of the lateral-acceleration extrema. While drifted, the moment vote is correctly
+\emph{withheld} rather than mis-cast, so the failure mode is a delayed confirmation, not a
+false release. The drift is reversible: deceleration alone restores $\hat s$, which collapses
+below the release threshold within \SIrange{3.3}{3.4}{s} of leaving the maneuver. Consequently
+\SI{62}{\percent} of flights ($n=29$) confirm only after the \SI{12}{s} timeout and the
+\SI{3}{s} brake-to-hover, giving a confirmation delay of \SI{16.5}{s} instead of a few seconds.
+
+We can detect the condition but cannot yet predict it. The count of envelope-exceeding frames
+(\texttt{ovr}), already computed online, separates the two populations sharply: flights with
+\texttt{ovr}${=}0$ confirmed in maneuver in 9/9 cases versus 1/7 for \texttt{ovr}${>}0$
+(Fisher $p=\num{8.7e-4}$). What remains unexplained is \emph{which} flights drift. We
+pre-registered the hypothesis that drift is driven by maneuver intensity and tested it against
+the \SI{2}{m/s} condition, where the affected share should have dropped sharply; it did not
+(\SI{55}{\percent} at \SI{2}{m/s} versus \SI{71}{\percent} and \SI{64}{\percent} at
+\SI{4}{m/s}). We therefore report the intensity explanation as \emph{not supported} and leave
+the trigger open. A gate on \texttt{ovr} would let the vehicle leave the maneuver as soon as
+the moment channel is known to be unusable, cutting the delay from \SI{16.5}{s} to
+approximately \SI{3.5}{s}; this is implemented in neither the estimator nor the controller and
+is not claimed here.
 
 \emph{Selection and pre-release failures.} The main performance tables condition on successful
 attachment and survival to the release command. Eighteen of 76 flights were voided; arm~A had

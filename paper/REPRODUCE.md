@@ -10,8 +10,9 @@ bash paper/reproduce.sh            # 校验数据源 → 重建 figs/*.pdf → �
 bash paper/reproduce.sh --check    # 只校验数据源齐全性
 ```
 
-`paper/` 自 2026-09-10 起位于 `src/.git` 的工作树内；原始实验日志仍位于仓库外层
-`../nmpc_test_results/`，由本文档与 `reproduce.sh` 的冻结清单引用。
+`paper/` 位于 `src/.git` 的工作树内；论文实际依赖的冻结实验日志收录在
+`paper/data/`，由 `SHA256SUMS` 校验字节级完整性。`reproduce.sh` 优先读取该仓库内目录，
+仅为兼容旧工作区才回落到 `../nmpc_test_results/`。
 
 **一条重要前提**:论文数据**不靠重跑仿真复现**。PX4 SITL 没有可注入的随机种子,重跑
 得到的是**另一次实现**,不是同一组数字(这一点本身是论文 §IV-C 负结果的成因之一)。
@@ -90,7 +91,7 @@ timing/event/learned/L1/wind 与 Figs.3--5 的证据，因此应保留并诚实�
 | Fig.3 mass timeline | `mhe_node_20260703_162003.log` (fixed) + `mhe_node_20260703_031851.log` (event) | R; 当日最近已提交快照 `71810ab`，日志无 HEAD；同日 metadata 记 `git_rev=71810ab dirty=17`，仅为间接旁证（见上文例外小节） | wrench；mass-only；外部事件触发 | **已修正** Simulation Setup 曾误将它列入 DetachableJoint |
 | Table learned schedule | `alpha_only_20260730_214611.txt` 及其 64 轮日志；10 Hz 补充用 `alpha_only_10hz_20260731_150621.txt` | R; 首个包含设施 `a7b87f1` | mass-only；外部 event；`geom_source=online`，但 `geom_prior_mode=truth`；M0/alpha/rhythm/$\theta^*$ 四臂如 manifest | 正文已标注 geometry prior at truth；不代表最终 estimate-only 主线 |
 | Fig.4 $c_{xy}$ sweep | `cxy_ecc_sweep_20260714_143710.txt` | R; estimator=`8fa0fd8`，批次脚本首收口=`7afb97b` | mass-only MHE + **窗外慢滤波的 motor-torque inversion precursor**；非 moment-state MHE；0.08 m 格为旧 `grip_geom_mp_floor=.15` 重跑 | 正文已称 precursor；绘图脚本已改为从该文件解析，不再硬编四个点 |
-| autonomous completion/performance/void tables | `mainline_ab2_manifest.csv` 及其所列 76 对 MHE/NMPC 日志 | R; 09-04 02:58--07:27 运行的未提交快照，于当日 16:43 首收口为 `6419cbe` | moment=1/frozen；external=false；B 臂 geom=estimate，A 臂 continuous=false+geom=online+event release；ratchet=false；floor=.05；tau=command；motor avg=false | 与正文 A/B 口径一致；**commit 不是 E 级** |
+| autonomous completion/performance/void tables | **已于 2026-09-11 在最终代码上重跑**:`mainline_ab3_manifest.csv`(W3)+ `mainline_ab3b_manifest.csv`(W4/W5),77 架次 / 29 个有效 B 臂轮次。旧数据 `mainline_ab2_manifest.csv`(09-04, 76 架次)保留备查但**不再是表 II 的来源** | **E**;`git_head=483db88`,运行时写入 `mainline_ab3{,b}_manifest.provenance.txt`(含三个源文件 sha256 与 dirty 清单) | 最终默认档(`ESTIMATE_MOMENT=1`/`frozen`、`external_event=false`、`geom=estimate`、brake-to-hover 已实现) | **表 II 已按双峰改写**:in-maneuver 3.84 s vs via brake-to-hover 16.48 s,完成 29/29。⚠️ 旧表的单峰"中位 2.70 s / max 4.54 s"描述的是**没有 UNRESOLVED→brake-to-hover 路径的旧代码**,已作废 |
 | Table release replay | **已冻结**：`paper/manifests/release_replay_20260905.csv`（73 行有序清单 + 每文件 SHA-256，覆盖 `20260904_032225`–`20260905_000352`） | E（判决代码）=`078b054`；被回放日志的生成代码异质且多数为 R | detector 是 078 口径；输入队列混合历史配置 | **09-10 已恢复并核验**（七项指纹逐位一致，见 `manifests/release_replay_20260905.md`）；顺带修掉表内 48/59→53/59 的串阈值错误 |
 | Table fastA smoke | `20260905_{150124,...,152924}` 九轮 MHE/NMPC 日志 | R; 运行时 HEAD 候选 `d73fe4a`，日志未写 HEAD | moment=1/frozen；external=false；geom=estimate；ratchet=false；floor=.05；tau=command；motor avg=false | 与表述一致；fastA 已否决，不是当前 detector |
 | corrected 12-flight smoke (text) | `20260905_{160013,...,164135}` 十二轮 MHE/NMPC 日志 | R; 最近代码提交 `c43781d` | 同上；fastA 删除 + health gate；尚未加 frozen moment reference | 正文已限定为 fail-safe semantics，不冒充最终 detector 鲁棒验收 |
@@ -149,23 +150,23 @@ cd /home/clear/ros2_ws_HJH/src
 audit_e5=$(mktemp -d /tmp/paper-e5.XXXXXX)
 git archive e5c0c32 | tar -x -C "$audit_e5"
 python3 "$audit_e5/scripts/masschanger/aggregate_nosignal.py" \
-  ../nmpc_test_results/nosignal_ablation_20260713_182612.txt
+  paper/data/nosignal_ablation_20260713_182612.txt
 
 audit_a7=$(mktemp -d /tmp/paper-a7.XXXXXX)
 git archive a7b87f1 | tar -x -C "$audit_a7"
 PYTHONPATH="$audit_a7/scripts/masschanger:$audit_a7/scripts/gripper" \
   python3 "$audit_a7/scripts/gripper/aggregate_alpha_only.py" \
-  ../nmpc_test_results/alpha_only_20260730_214611.txt
+  paper/data/alpha_only_20260730_214611.txt
 PYTHONPATH="$audit_a7/scripts/masschanger:$audit_a7/scripts/gripper" \
   python3 "$audit_a7/scripts/gripper/aggregate_alpha_only.py" \
-  ../nmpc_test_results/alpha_only_10hz_20260731_150621.txt
+  paper/data/alpha_only_10hz_20260731_150621.txt
 PYTHONPATH="$audit_a7/scripts/masschanger:$audit_a7/scripts/gripper" \
   python3 "$audit_a7/scripts/gripper/aggregate_geom_grid.py" \
-  ../nmpc_test_results/geom_grid_20260723_171711.txt
+  paper/data/geom_grid_20260723_171711.txt
 
-cd /home/clear/ros2_ws_HJH
-python3 src/scripts/gripper/aggregate_mainline_ab.py nmpc_test_results/mainline_ab2_manifest.csv
-python3 src/scripts/gripper/verify_mainline_ab2.py
+cd /home/clear/ros2_ws_HJH/src
+python3 scripts/gripper/aggregate_mainline_ab.py paper/data/mainline_ab2_manifest.csv
+python3 scripts/gripper/verify_mainline_ab2.py
 ```
 
 上述 `git archive` 会把 parser 和其 helper 从**同一提交**一起恢复；不得与当前
@@ -323,6 +324,11 @@ grep -oP "solve=\K[0-9.]+" ../nmpc_test_results/grip_mhe_<stamp>.log    # MHE
    而两臂的作废原因和作废率不同(A 臂 drop 前坠机 11/38、B 臂 4/38;
    attach 未兑现 A 0/38、B 3/38)。因此表 III 不能单独解读,必须与表 IV 同看,
    论文正文也已就此显式声明幸存者偏差。
+
+> ⚠️ **2026-09-11 更新**:以下 09-04 的数字**已被最终代码上的重跑取代**(见审计矩阵该行)。
+> 新结果:**29/29 完成**,CP 双侧 95% 区间 **[88.1%, 100%]**;延迟**双峰**——
+> in-maneuver **3.84 s** [2.86, 6.96](38%)、via brake-to-hover **16.48 s** [16.36, 16.60](62%),max 16.70 s。
+> **不得把两支合并成单一中位数**。以下保留为历史记录。
 
 **统计**:22/22 的 Clopper--Pearson 双侧 95% 区间 = [84.6%, 100%],论文按此表述,
 **不**写成"已证明失败率为零"。未做预注册等效性检验,故性能结论写

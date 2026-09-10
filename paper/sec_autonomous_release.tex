@@ -32,41 +32,57 @@ capture failure from estimator non-recognition. Void rates are reported separate
 Table~\ref{tab:void}, never absorbed into the main result.
 
 \paragraph{Result} Among valid pairs, arm~B completed autonomous release confirmation in
-\textbf{22 of 22} flights with no post-release instability observed
-(Table~\ref{tab:complete}). The point estimate is \SI{100}{\percent}, but with $n=22$ the
-two-sided \SI{95}{\percent} Clopper--Pearson interval is $[\SI{84.6}{\percent},
+\textbf{29 of 29} flights with no post-release instability observed
+(Table~\ref{tab:complete}). The point estimate is \SI{100}{\percent}, but with $n=29$ the
+two-sided \SI{95}{\percent} Clopper--Pearson interval is $[\SI{88.1}{\percent},
 \SI{100}{\percent}]$: these data are consistent with a true failure rate up to
-${\sim}\SI{15}{\percent}$ and must not be read as having established a zero failure rate.
-W4 reached its pre-registered attempt cap at $n=6$ valid pairs rather than the intended 8
-(its arm~A crashed before release in 9 of 16 attempts), so that cell carries meaningfully
-less statistical power than W3 and W5.
+${\sim}\SI{12}{\percent}$ and must not be read as having established a zero failure rate.
+W4 reached its pre-registered attempt cap at $n=7$ valid pairs rather than the intended 8,
+so that cell carries somewhat less statistical power than W3 and W5.
+
+The confirmation delay is \emph{bimodal}, and the two modes correspond to two distinct
+control paths rather than to a spread within one path. In \SI{38}{\percent} of flights the
+no-payload confidence crosses threshold while the vehicle is still flying the figure-eight,
+and confirmation completes in a few seconds. In the remaining \SI{62}{\percent} the first
+mass moment $\hat s$ has drifted under sustained excitation (Sec.~\ref{sec:limits}),
+the moment vote is therefore withheld, and the system reaches its \SI{12}{s} timeout,
+declares the payload state \textsc{unresolved}, and executes a \SI{3}{s} smooth brake to
+hover. Deceleration alone restores observability: $\hat s$ collapses below the release
+threshold within \SIrange{3.3}{3.4}{s} of leaving the maneuver, and confirmation then
+completes. Reporting a single median across both paths would be misleading, so
+Table~\ref{tab:complete} separates them.
 
 \begin{table}[t]
 \caption{Autonomous release completion and confirmation delay (arm~B, valid pairs only).
 Delay is measured from the release command to the frame at which the no-payload confidence
 has held above threshold for the full \SI{1.0}{s} hold, so it includes that hold by
-construction. Arm~A completes by definition at zero delay and is not comparable.}
+construction. The two delay columns are the two control paths described in the text and are
+\emph{not} to be pooled into one median. Arm~A completes by definition at zero delay and is
+not comparable.}
 \label{tab:complete}
 \centering
-\begin{tabular}{@{}lcccc@{}}
+\begin{tabular}{@{}lccccc@{}}
 \toprule
- & $n$ & completed & delay median [IQR] & delay max \\
+ & $n$ & completed & \multicolumn{2}{c}{delay median [IQR]} & via \\
+\cmidrule(lr){4-5}
+ & & & in-maneuver & via brake-to-hover & (\%) \\
 \midrule
-W3 (\SI{0.15}{kg}, \SI{4}{m/s}) & 8 & 8/8 & \SI{2.56}{s} [2.53, 2.85] & \SI{3.00}{s} \\
-W4 (\SI{0.30}{kg}, \SI{4}{m/s}) & 6 & 6/6 & \SI{3.00}{s} [2.75, 3.25] & \SI{4.54}{s} \\
-W5 (\SI{0.15}{kg}, \SI{2}{m/s}) & 8 & 8/8 & \SI{2.70}{s} [2.46, 2.95] & \SI{3.06}{s} \\
+W3 (\SI{0.15}{kg}, \SI{4}{m/s}) & 7 & 7/7 & \SI{2.78}{s} [2.76, 2.80] & \SI{16.56}{s} [16.46, 16.60] & 71 \\
+W4 (\SI{0.30}{kg}, \SI{4}{m/s}) & 11 & 11/11 & \SI{7.08}{s} [6.96, 7.50] & \SI{16.40}{s} [14.45, 16.60] & 64 \\
+W5 (\SI{0.15}{kg}, \SI{2}{m/s}) & 11 & 11/11 & \SI{3.46}{s} [3.16, 4.36] & \SI{16.48}{s} [16.40, 16.50] & 55 \\
 \midrule
-pooled & 22 & 22/22 & \SI{2.70}{s} [2.55, 2.99] & \SI{4.54}{s} \\
+pooled & 29 & 29/29 & \SI{3.84}{s} [2.86, 6.96] & \SI{16.48}{s} [16.36, 16.60] & 62 \\
 \bottomrule
 \end{tabular}
 \\[2pt]
 \footnotesize Pooled completion \SI{100}{\percent}, two-sided \SI{95}{\percent}
-Clopper--Pearson CI $[\SI{84.6}{\percent}, \SI{100}{\percent}]$.
+Clopper--Pearson CI $[\SI{88.1}{\percent}, \SI{100}{\percent}]$. Overall delay max
+\SI{16.70}{s}. ``via'' is the share of flights that reached the \textsc{unresolved} timeout
+and confirmed only after the brake-to-hover maneuver.
 \end{table}
 
 \paragraph{Mechanism verification} Three internal signals were logged to confirm that the
-completion arises from the intended mechanism rather than from incidental decay. In all 22
-valid arm~B flights the payload-presence state machine made \emph{exactly two} transitions
+completion arises from the intended mechanism rather than from incidental decay. In all valid arm~B flights the payload-presence state machine made \emph{exactly two} transitions
 (one autonomous \textsc{empty}$\to$\textsc{loaded} at grasp, one \textsc{loaded}$\to$
 \textsc{empty} triggered by the residual drop detector), with zero spurious transitions
 during the carrying phase; the published first mass moment $s_{\text{out}}$ decayed
@@ -77,7 +93,7 @@ oscillating at a level equivalent to a \SIrange{3}{16}{mm} CoM offset --- so a c
 threshold alone could not have produced these completions; the published target must be
 switched, not merely re-thresholded.
 
-\paragraph{Post-batch detector audit} The 22/22 result validates the continuous interface and
+\paragraph{Post-batch detector audit} The completion result validates the continuous interface and
 the closed-loop recovery once the then-current residual path declares release; it is not, by
 itself, a distributional validation of the detector. Five follow-on runs exposed that the
 release ratio and loaded-flight ratio distributions approach within only about ten percent.
