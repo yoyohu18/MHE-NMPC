@@ -21,8 +21,10 @@ bash paper/reproduce.sh --check    # 只校验数据源齐全性
 ## 2026-09-10 数据—代码一致性审计（投稿前必读）
 
 **结论：目前只能完整复算“冻结日志→图表”，不能对所有历史批次做
-`代码 commit→重跑仿真`的字节级复现。** 07--08 月的批次日志没有记录
-`git HEAD`/dirty 状态，而多个批次发生在实验设施首次提交之前。下表的“首个包含提交”
+`代码 commit→重跑仿真`的字节级复现。** 07--08 月的批次日志绝大多数没有记录
+`git HEAD`/dirty 状态，而多个批次发生在实验设施首次提交之前；少数写了 `git_rev`
+的 metadata 也**全部同时为 dirty 且未保存 diff 或源码快照**（见下文例外小节），
+同样不足以支撑 exact-commit 声明。下表的“首个包含提交”
 是根据时间、历史 diff、批次 manifest 和启动日志还原的**最近可审计快照**，
 不冒充当时已记录的 HEAD。这一限制不影响冻结数字的重算，但必须在对外的
 artifact 说明中保留，不得把“首个包含提交”简写成“运行 commit”。
@@ -30,17 +32,66 @@ artifact 说明中保留，不得把“首个包含提交”简写成“运行 c
 溯源等级：`E` = 冻结记录明确写入 commit；`R` = 运行时未记录 HEAD，仅能指向首个
 包含该设施的提交；`S` = 示意图，没有仿真数据。
 
+`E/R/S` 是本文档定义的**代码溯源等级**，只描述“能否把一次运行钉到一个可审计的源码
+快照”。它与代码注释里的 `D1`（`l1_adaptive.py`/`acados_model.py` 中 L1 补偿注入方式的
+**控制方案决策点**）无关；`D1` 不是 Git 证据等级，正式表述中不得混用。
+
+### 例外：确实记录了 `git_rev` 的批次，以及它们为什么仍是 `R`
+
+07--08 月并非每份记录都完全没有版本信息。`nmpc_test_results/` 中有 19 份 metadata
+写了 `git_rev`，但**全部同时为 dirty，且没有一份保存 diff 或源码快照**：
+
+| metadata 批次 | 份数 | 记录值 |
+|---|---|---|
+| `gacados_meta_20260702_204636` -- `20260703_020755` | 6 | `git_rev=67fb11c dirty=7` |
+| `gacados_meta_20260703_182707` | 1 | `git_rev=71810ab dirty=17` |
+| `gacados_meta_2026070{6_160516,7_002533}` | 2 | `git_rev=71810ab dirty=21` |
+| `ecc_sweep_meta_*_20260707_16:22--17:10` | 4 | `git_rev=71810ab dirty=22` |
+| `ecc_sweep_meta_*_20260707_17:27--17:48` | 6 | `git_rev=71810ab dirty=25` |
+
+三点必须同时说清：
+
+1. **dirty 计数是 7--25，不是单一的 22**；未提交改动的内容从未被冻结，因此
+   “运行代码 = `67fb11c`/`71810ab`”这一等式在任何一份记录上都不成立。
+2. **这 19 份 metadata 没有一份是论文表格的冻结数据源**。它们属于 07-02--07-07 的
+   `gacados` / `ecc_sweep` 批次；论文的 Fig.4 用的是 `cxy_ecc_sweep_20260714_143710`，
+   与 07-07 的 `ecc_sweep` 批次不是同一批。
+3. 它们唯一的论文用途是**对 Fig.3 的锚点提供间接旁证**：`71810ab` 提交于 07-03 02:14，
+   Fig.3 的两份日志为 07-03 03:18 与 16:20，而同日 18:27 的 metadata 记录仍是
+   `71810ab`（更早的 07-02 20:36--07-03 02:07 批次记录的是前一个提交 `67fb11c`）。
+   这把 Fig.3 在时间上**夹**在 `71810ab` 内，提高了锚点的可信度，但因 dirty=17 且无
+   diff，等级仍为 `R`。
+
+### 对外（artifact / 审稿回复）的标准表述
+
+允许：
+
+> Most July--August experiment records did not capture a complete executable source
+> snapshot, including both Git HEAD and the corresponding dirty-tree contents. Their
+> code provenance is therefore classified as reconstructed (R). Referenced commits
+> denote the nearest auditable or first-containing snapshots and must not be
+> interpreted as the exact commits from which the experiments were run.
+
+禁止：
+
+> The July--August experiments were run from commit `a7b87f1`.
+
+**即使日志记录了 `HEAD`，只要同时为 dirty 且未保存 diff/源码快照，也仍不得作
+exact-commit 声明。** 这不否定数据有效性：冻结日志可重新统计，受限的只是
+“运行代码对应某个精确 commit”这一主张。删除 07--08 月日志会使论文失去 Table
+timing/event/learned/L1/wind 与 Figs.3--5 的证据，因此应保留并诚实标注版本限制。
+
 | 论文项 | 冻结数据/生成源 | 代码溯源 | 实际配置与当前正文口径 | 处置 |
 |---|---|---|---|---|
 | Fig.1 architecture | `paper/figs/fig_gen.py` | S; 09-10 审计时 `src`=`a38ceed` | 当前 deployed 架构，非数据图 | 一致 |
 | Fig.2 window deweight | `paper/figs/fig_gen.py` | S; 机制最早见 `e5c0c32` | 示意图，柱高 0.18 不是实验权重 | 一致；不得把示意值当数据 |
 | Table timing | `grip_nmpc_2026073*.log` 冻结集（141 文件/1009 solve 样本）；`grip_mhe_20260803_144036.log` | R; NMPC 设施首收口 `a7b87f1`，MHE timing 首收口 `196cd9a` | **legacy mass-only MHE**，不是正文的 16-state moment MHE；NMPC 13/4、20 Hz 一致，MHE 当时为 14-state mass-only | **已修正**表注、state dim 和正文 headroom 声明；当前 MHE 仍待重测 |
 | Table event trigger | `nosignal_ablation_20260713_182612.txt` + manifest 所列 36 对 MHE/NMPC 日志 | R; 执行设施首收口 `e5c0c32`，控制指标聚合为 `10efa34` | wrench；mass-only；M0 1.5 N；fixed=不降权，signal=外部事件武装，nosignal=残差自触发 | 一致；与最终 eventless interface 无关 |
-| Fig.3 mass timeline | `mhe_node_20260703_162003.log` (fixed) + `mhe_node_20260703_031851.log` (event) | R; 当日最近已提交快照 `71810ab`，日志无 HEAD | wrench；mass-only；外部事件触发 | **已修正** Simulation Setup 曾误将它列入 DetachableJoint |
+| Fig.3 mass timeline | `mhe_node_20260703_162003.log` (fixed) + `mhe_node_20260703_031851.log` (event) | R; 当日最近已提交快照 `71810ab`，日志无 HEAD；同日 metadata 记 `git_rev=71810ab dirty=17`，仅为间接旁证（见上文例外小节） | wrench；mass-only；外部事件触发 | **已修正** Simulation Setup 曾误将它列入 DetachableJoint |
 | Table learned schedule | `alpha_only_20260730_214611.txt` 及其 64 轮日志；10 Hz 补充用 `alpha_only_10hz_20260731_150621.txt` | R; 首个包含设施 `a7b87f1` | mass-only；外部 event；`geom_source=online`，但 `geom_prior_mode=truth`；M0/alpha/rhythm/$\theta^*$ 四臂如 manifest | 正文已标注 geometry prior at truth；不代表最终 estimate-only 主线 |
 | Fig.4 $c_{xy}$ sweep | `cxy_ecc_sweep_20260714_143710.txt` | R; estimator=`8fa0fd8`，批次脚本首收口=`7afb97b` | mass-only MHE + **窗外慢滤波的 motor-torque inversion precursor**；非 moment-state MHE；0.08 m 格为旧 `grip_geom_mp_floor=.15` 重跑 | 正文已称 precursor；绘图脚本已改为从该文件解析，不再硬编四个点 |
 | autonomous completion/performance/void tables | `mainline_ab2_manifest.csv` 及其所列 76 对 MHE/NMPC 日志 | R; 09-04 02:58--07:27 运行的未提交快照，于当日 16:43 首收口为 `6419cbe` | moment=1/frozen；external=false；B 臂 geom=estimate，A 臂 continuous=false+geom=online+event release；ratchet=false；floor=.05；tau=command；motor avg=false | 与正文 A/B 口径一致；**commit 不是 E 级** |
-| Table release replay | 09-05 当时无界 glob 得到的 73 轮历史快照（未冻结清单） | E（判决代码）=`078b054`；被回放日志的生成代码异质且多数为 R | detector 是 078 口径；输入队列混合历史配置 | **不可按现有命令复现 73 轮；投稿阻断** |
+| Table release replay | **已冻结**：`paper/manifests/release_replay_20260905.csv`（73 行有序清单 + 每文件 SHA-256，覆盖 `20260904_032225`–`20260905_000352`） | E（判决代码）=`078b054`；被回放日志的生成代码异质且多数为 R | detector 是 078 口径；输入队列混合历史配置 | **09-10 已恢复并核验**（七项指纹逐位一致，见 `manifests/release_replay_20260905.md`）；顺带修掉表内 48/59→53/59 的串阈值错误 |
 | Table fastA smoke | `20260905_{150124,...,152924}` 九轮 MHE/NMPC 日志 | R; 运行时 HEAD 候选 `d73fe4a`，日志未写 HEAD | moment=1/frozen；external=false；geom=estimate；ratchet=false；floor=.05；tau=command；motor avg=false | 与表述一致；fastA 已否决，不是当前 detector |
 | corrected 12-flight smoke (text) | `20260905_{160013,...,164135}` 十二轮 MHE/NMPC 日志 | R; 最近代码提交 `c43781d` | 同上；fastA 删除 + health gate；尚未加 frozen moment reference | 正文已限定为 fail-safe semantics，不冒充最终 detector 鲁棒验收 |
 | Fig.5 legacy full flow | `grip_nmpc_20260715_165245.log` | R; 运行后首个包含 B.5 快照 `9567bbd`（drop bug 紧随修复 `983401b`） | mass-only；external event；geom=online；$\theta^*$，阈值约 2.9 N；不是最终 continuous interface | 正文已标 legacy/$\theta^*$ 例外；峰值 **0.19→0.21 m 已统一** |
@@ -72,10 +123,21 @@ motor_avg=false`；B 臂 `geom=estimate`，A 臂是明示的 legacy event/online
 
 ### 投稿阻断项（未解决前不得声称“按图复算全部闭合”）
 
-1. **Table release replay cohort 未冻结**：当时的 73 轮来自无界 glob，现在同一命令
-   会读到更多日志。必须从当时输出/备份恢复 stamp 清单，或从正文删掉该表。
+1. ~~**Table release replay cohort 未冻结**~~ ✅ **09-10 已解**：cohort 已恢复并冻结为
+   `paper/manifests/release_replay_20260905.csv`。**"无界 glob" 是记账错误** —— 同一
+   截止时刻下无界 glob 给出 249 轮，与表里每个数字都不符；真实 cohort 是按 mtime
+   排序、截至审计提交 `078b054`（2026-09-05 14:37:33）的**最后 73 个可回放轮次**，
+   由七项独立指纹唯一确定（73/72/58/14/2614 帧/2.1 s/peak 0.0134×残噪 0.0203→ratio
+   1.520/valid 59/LOOCV 59-59 选 0.30/留出 90 %）。生成器 `scripts/gripper/
+   freeze_release_cohort.py`，溯源与核验表见 `manifests/release_replay_20260905.md`。
 2. **大多数 07--08 月批次无 E 级 commit**：可用首个包含提交审计算法，但不可
-   声称当时工作区 clean。无法追溯时应标 `R`，不得猜成 exact commit。
+   声称当时工作区 clean。无法追溯时应标 `R`，不得猜成 exact commit。少数写了
+   `git_rev` 的批次同样是 `R`（全部 dirty，无 diff 快照），理由见上文例外小节。
+3. **正文 §"post-fix four flights" 尚无审计行**：main.tex 报告 `ddfe9d2`（09-05
+   17:38）之后的头四轮飞行（越包线 49/268 帧, 18.3%），但本表无对应条目。时间上
+   紧邻的候选是 `grip_{mhe,nmpc}_20260905_{175935,180315,180710,181106}`（此后至
+   20:03 有断档）——**候选未核验**，须用帧数 268 与 49 例越包线对上号后才能补行，
+   在此之前不得把这四轮写成已冻结数据源。
 
 ### 从冻结数据重算表格
 
@@ -272,30 +334,63 @@ grep -oP "solve=\K[0-9.]+" ../nmpc_test_results/grip_mhe_<stamp>.log    # MHE
 
 ## §VI-F release detector 分布审计（2026-09-05）
 
+### 09-10 配置总开关审计
+
+`c_xy_est_enable` 不只是其名字所暗示的 CoM 在线估计开关。当前实现中，
+`mhe_node.py::_update_c_xy_est()` 同时包含质量域释放判据、统一 detector，以及
+`payload_estimate.release_decision()` 的唯一在线调用点；而该函数只在
+`c_xy_est_enable=true` 时执行。参数声明和通用脚本
+`run_gripper_headless.sh` 的默认值均为 `false`。
+
+论文使用的 13/13 个 release 批次脚本均显式覆盖为 `MHE_C_XY_EST=true`，因此已报告
+批次的 detector 结果有效；但它们不是裸默认配置的行为。未带该覆盖直接启动时，
+在线 release decision 不运行，drop 后必然由 NMPC 的 unresolved timeout 兜底，不能
+将这种结果记为 detector miss 或 detector 安全验证。复现任何 release 表格时必须把
+以下配置写入 manifest 并在日志启动段核对：
+
+```bash
+MHE_C_XY_EST=true
+```
+
+这是待解耦的软件配置缺陷：后续应给统一 detector 独立开关，或在 eventless profile
+中无条件执行，同时对“eventless + detector disabled”的矛盾启动配置直接报错。
+
 **代码口径**：审计结果对应提交 `078b054`。其中
 `src/offboard_test_acados/offboard_test_acados/payload_estimate.py` 的
 `release_decision()` 是在线节点和离线回放共同调用的唯一判决函数。论文不能把
 `dJ` 当成 mass 之外的独立一票：连续接口里 `dJ=μ(m_p)r_z²`，两者是同源证据。
 
-**离线回放（历史快照，不是当前可直接重放的冻结队列）**：
+**离线回放（冻结 cohort，可一键复现）**：
 
 ```bash
 cd /home/clear/ros2_ws_HJH/src
-python3 scripts/gripper/replay_release_detector.py --loocv
+python3 scripts/gripper/replay_release_detector.py \
+    --manifest paper/manifests/release_replay_20260905.csv --loocv
 ```
 
-提交 `078b054` 当时，未限定范围的 glob 从 `nmpc_test_results/grip_mhe_*.log`
-及对应 `grip_nmpc_*.log` 读到 73 轮，其中 72 轮有 drop；结果为 58/72 检出、
-14/72 漏检、带载段 2614 帧零误释放、
-已检出轮延迟中位 2.1 s。剔除 manifest 标记 invalid 后为 48/59 检出、11/59
-漏检。LOOCV 的 59/59 折都选 `ratio=0.30`；这只说明 0.30 优于候选网格里的旧
-0.20，不等于 detector 已经通过鲁棒验收。
+该命令校验清单里 146 个文件的 SHA-256 后按冻结顺序回放，输出与提交 `078b054`
+当时的审计逐位一致：73 轮（72 有 drop）、**58/72 检出、14/72 漏检**、带载
+**2614 帧零误释放**、已检出轮延迟中位 **2.1 s**、对抗最坏 `ratio=1.520`、
+LOOCV **59/59 折选 `ratio=0.30`**（留出轮成功 53/59 = 90 %）。剔除
+`check_run_valid.py` 判 invalid 的架次后为 **53/59 检出、6/59 漏检**。
 
-⚠️ 上面的命令使用无界 glob；后续日志加入后，它已不再复现“73 轮”这一队列。
-因此这些数字只能作为提交 `078b054` 时的历史审计结果。投稿前必须补一份冻结的
-时间戳清单（或给回放脚本增加 cohort manifest 参数），再把一键复现命令改为读取
-该清单。2614 帧零误释放也已被下述在线 smoke 否证，不能继续作为当前 detector
-的安全证据。
+⚠️ 三条限定仍然成立：
+
+1. **`48/59` 是 `ratio=0.20` 的数字**，不是审计阈值 0.30 的。论文表曾误写成
+   0.30 下的 valid 子集，**09-10 已改为 53/59、6/59**。
+2. LOOCV 只说明 0.30 优于候选网格里的旧 0.20，**不等于 detector 已通过鲁棒验收**。
+3. 2614 帧零误释放已被下述在线 smoke 否证，**不能**继续作为当前 detector 的安全
+   证据。表的作用限于阈值选择依据与漏检结构。
+
+cohort 的定义、"无界 glob" 记账错误的纠正、七项指纹核验表与 validity 列来源，见
+`paper/manifests/release_replay_20260905.md`；清单生成器
+`scripts/gripper/freeze_release_cohort.py`。
+
+📌 **这张表当前不在 `main.pdf` 里**：`main.tex` 只 `\input{sec_autonomous_release_concise}`，
+而 Table release replay 与 Table fastA smoke 都只存在于**从未被引用过的**详版
+`paper/sec_autonomous_release.tex`（`git log -p -- paper/main.tex` 里 `\input` 行只
+出现过 concise 版一次）。所以 #9 的"投稿阻断"级别与 #11 同类，是**记账误判**；
+cohort 仍已冻结，详版素材若要搬回正文可直接复算。
 
 **绝对一阶矩不能作判据**：五轮分布采样来自：
 
@@ -367,7 +462,14 @@ moment-gated 的 slow（quantity+moment）与 fastB（strong residual+moment）�
 - 3/12 曾进入 12 s unresolved；`161743`、`163049` 在 +14.8/+14.2 s 收到迟到
   证据并 RESOLVED，`162459` 保持 unresolved 终态。
 - `162459` 未切 `s_target`、未清模型、未复位 L1/ξ、未置 `grip_dropped`，符合
-  fail-safe 语义。
+  fail-safe 的**估计器/模型状态保持**语义；不代表飞行参考已经切到悬停。
+
+**历史配置更正（09-10 代码审计）**：上述 12 轮所用版本在 unresolved 时只执行
+`grip_dynamic_active=false`，`ref_fn` / `ref_window_fn` 从未切离 `_grip_dyn_ref` /
+`_grip_dyn_ref_window`，所以这些日志不能标注为“退出机动转保守悬停”。后续独立
+`_grip_dyn_latched` 只修掉了 figure-eight 原地重启，也仍未兑现悬停语义。当前工作树
+新增从实测状态连续制动、有限时间后固定停止点的 reference，并同时替换单点与窗口
+函数；该控制动作在完成构造 SITL 回归前只能标为“已实现、未飞行验收”。
 
 **`162459` 的独立覆盖缺陷**：日志有 `[payload-state] EMPTY->LOADED (attach,
 m_p=-0.103kg)`，说明残差 ATTACH 已经令自主 `_load_armed=True`；但之后从未出现
@@ -379,9 +481,9 @@ load latch 与旧质量武装再次串联。修复方向是仅从统一 detector
 
 同轮真实 drop 后 `m_est` 回到约 2.049 kg，但 raw `s_hat` 留在约
 0.018 kg·m，故 moment 永不成立。这是 estimator coverage/observability 的漏检，
-不能用 NMPC drop command 强制清零，否则重新引入被本文排除的事件捷径。保守悬停
-是否帮助 moment 恢复也不能由两轮相反结果判断；在专门 hover vs 低幅辨识激励 A/B
-之前，悬停只按安全动作解释，不按辨识策略解释。
+不能用 NMPC drop command 强制清零，否则重新引入被本文排除的事件捷径。历史两轮
+实际都没有切到悬停，不能用于判断 hover 是否帮助 moment 恢复；在专门 hover vs
+低幅辨识激励 A/B 之前，悬停只按安全动作解释，不按辨识策略解释。
 
 ## 武装解耦后的停止批次与 moment-reference 更正（2026-09-05）
 

@@ -92,6 +92,24 @@ else
   echo "  OK    grip_nmpc_2026073*.log (141 files)       Table timing NMPC 1009 samples"
 fi
 
+# Table release replay 的 cohort 已冻结为有序清单(73 轮 / 146 个文件 + SHA-256)。
+# 这里只校验身份,完整回放命令见 REPRODUCE.md(带 --loocv,约半分钟)。
+cohort_csv="$REPO/paper/manifests/release_replay_20260905.csv"
+if python3 - "$REPO" "$cohort_csv" <<'PYEOF'
+import sys
+sys.path.insert(0, sys.argv[1] + '/scripts/gripper')
+from replay_release_detector import load_manifest
+rows = load_manifest(sys.argv[2])
+if len(rows) != 73:
+    raise SystemExit(f'cohort 行数 {len(rows)} != 73')
+PYEOF
+then
+  echo "  OK    release_replay_20260905.csv (73 轮)      Table release replay cohort + SHA-256"
+else
+  echo "!! Table release replay cohort 校验失败(行数/缺文件/SHA-256 不匹配)"
+  missing=$((missing + 1))
+fi
+
 # paired-release manifest 中每个 stamp 必须同时有 MHE/NMPC 原始日志。
 while IFS=, read -r _ _ _ _ stamp _; do
   [ "$stamp" = "stamp" ] && continue

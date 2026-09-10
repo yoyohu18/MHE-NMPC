@@ -13,10 +13,13 @@
   python3 replay_release_detector.py                 # 全量回放 + 各项检查
   python3 replay_release_detector.py --limit 40      # 只看最近 40 轮
   python3 replay_release_detector.py --loocv         # 留一轮交叉验证阈值
+  python3 replay_release_detector.py --manifest paper/manifests/release_replay_20260905.csv --loocv
 """
 
 import argparse
+import csv
 import glob
+import hashlib
 import os
 import re
 import sys
@@ -39,6 +42,47 @@ RE_T = re.compile(r'\[(\d+\.\d+)\]')
 RE_COLLAPSE = re.compile(r'\|s\|=([\d.]+) peak=([\d.]+) ratio=([\d.]+).*?m_p=([-+\d.]+)')
 RE_TRUTH_S = re.compile(r's_hat=\[\s*([-+0-9.]+),\s*([-+0-9.]+)\]')
 RE_TRUTH_M = re.compile(r'm_hat=([-+0-9.]+)')
+
+
+def _sha256(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for block in iter(lambda: f.read(1024 * 1024), b''):
+            h.update(block)
+    return h.hexdigest()
+
+
+def load_manifest(path, verify_hashes=True):
+    """Load an ordered, frozen replay cohort and verify its file identities."""
+    with open(path, newline='') as f:
+        rows = list(csv.DictReader(f))
+    required = {'order', 'stamp', 'mhe_log', 'nmpc_log', 'validity',
+                'mhe_sha256', 'nmpc_sha256'}
+    if not rows or not required.issubset(rows[0]):
+        raise ValueError(f'{path}: missing manifest columns {sorted(required)}')
+
+    seen_stamps = set()
+    entries = []
+    for expected_order, row in enumerate(rows, 1):
+        if int(row['order']) != expected_order:
+            raise ValueError(f'{path}: order is not contiguous at row {expected_order}')
+        if row['stamp'] in seen_stamps:
+            raise ValueError(f'{path}: duplicate stamp {row["stamp"]}')
+        seen_stamps.add(row['stamp'])
+        if (os.path.basename(row['mhe_log']) != row['mhe_log']
+                or os.path.basename(row['nmpc_log']) != row['nmpc_log']):
+            raise ValueError(f'{path}: log paths must be basenames')
+        mhe_path = os.path.join(RES, row['mhe_log'])
+        nmpc_path = os.path.join(RES, row['nmpc_log'])
+        for label, log_path, digest in (
+                ('MHE', mhe_path, row['mhe_sha256']),
+                ('NMPC', nmpc_path, row['nmpc_sha256'])):
+            if not os.path.isfile(log_path):
+                raise FileNotFoundError(f'{path}: missing {label} log {log_path}')
+            if verify_hashes and _sha256(log_path) != digest:
+                raise ValueError(f'{path}: SHA-256 mismatch for {log_path}')
+        entries.append((row, mhe_path))
+    return entries
 
 
 class Round:
@@ -158,17 +202,43 @@ def replay(rnd, ratio_thr, mass_mp, s_abs, slow_persist, fast_persist,
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--limit', type=int, default=0)
+    ap.add_argument('--manifest', help='ordered frozen-cohort CSV')
+    ap.add_argument('--skip-hash-check', action='store_true',
+                    help='do not verify manifest SHA-256 values')
     ap.add_argument('--loocv', action='store_true')
     ap.add_argument('--ratio', type=float, default=RELEASE_RATIO_THR)
     args = ap.parse_args()
 
-    # 按 mtime 排,不是字典序:字典序会把 2026-07 的 mhe_node_*.log 排到最后,
-    # --limit 于是专挑最老的那批(全是 wrench 场景,没有 s_hat 也没有配对 nmpc)。
-    paths = sorted(glob.glob(os.path.join(RES, '*mhe_*.log')),
-                   key=os.path.getmtime)
-    if args.limit:
-        paths = paths[-args.limit:]
-    rounds = [r for r in (load_round(p) for p in paths) if r is not None]
+    if args.manifest and args.limit:
+        ap.error('--manifest and --limit are mutually exclusive')
+    if args.manifest:
+        entries = load_manifest(args.manifest, not args.skip_hash_check)
+        rounds = []
+        for row, path in entries:
+            derived_nmpc = os.path.basename(path.replace('mhe_', 'nmpc_'))
+            if derived_nmpc != row['nmpc_log']:
+                raise ValueError(
+                    f'{args.manifest}: MHE/NMPC pair mismatch for {row["stamp"]}')
+            r = load_round(path)
+            if r is None:
+                raise ValueError(
+                    f'{args.manifest}: frozen round is no longer parseable: {path}')
+            if r.stamp != row['stamp']:
+                raise ValueError(
+                    f'{args.manifest}: stamp mismatch {row["stamp"]} != {r.stamp}')
+            r.validity = row['validity']
+            rounds.append(r)
+        print(f'冻结清单 {args.manifest}: {len(rounds)} 轮；文件 SHA-256 '
+              f'{"未检查" if args.skip_hash_check else "全部通过"}')
+    else:
+        # 探索模式保留历史行为。论文数字不得使用这个会随目录增长的入口。
+        # 按 mtime 排,不是字典序:字典序会把 2026-07 的 mhe_node_*.log 排到最后,
+        # --limit 于是专挑最老的那批(全是 wrench 场景,没有 s_hat 也没有配对 nmpc)。
+        paths = sorted(glob.glob(os.path.join(RES, '*mhe_*.log')),
+                       key=os.path.getmtime)
+        if args.limit:
+            paths = paths[-args.limit:]
+        rounds = [r for r in (load_round(p) for p in paths) if r is not None]
     with_drop = [r for r in rounds if r.t_drop_cmd is not None]
     no_drop = [r for r in rounds if r.t_drop_cmd is None]
     print(f'可回放轮次 {len(rounds)} (有 drop 指令 {len(with_drop)}, '
@@ -199,6 +269,23 @@ def main():
         print(f'  !! 误释放 {r.stamp} @t={t:.1f} (drop 指令 @{r.t_drop_cmd:.1f})')
     for r in miss[:8]:
         print(f'  -- 漏检 {r.stamp} (src={r.src}, {len(r.frames)} 帧)')
+
+    valid_with_drop = None
+    if args.manifest:
+        valid_rounds = [r for r in rounds if r.validity == 'valid']
+        valid_with_drop = [r for r in valid_rounds if r.t_drop_cmd is not None]
+        valid_ok = valid_miss = valid_fp = 0
+        for r in valid_with_drop:
+            t, false_pos, _ = replay(r, args.ratio, RELEASE_MASS_MP,
+                                     RELEASE_S_ABS_MAX, 5, 2)
+            if t is None:
+                valid_miss += 1
+            elif false_pos:
+                valid_fp += 1
+            else:
+                valid_ok += 1
+        print(f'  manifest-valid 子集 {valid_ok}/{len(valid_with_drop)} 检出; '
+              f'漏检 {valid_miss}; 带载段误释放 {valid_fp}')
 
     # ---- 2. 全部历史带载帧的零误释放 ----
     print('\n=== 2. 无 drop 轮次(全程带载)的误释放 ===')
@@ -243,13 +330,14 @@ def main():
     if args.loocv:
         print('\n=== 4. LOOCV 阈值(在 N-1 轮上选,在留出轮上验) ===')
         grid = [0.15, 0.18, 0.20, 0.22, 0.25, 0.30, 0.35]
+        cv_rounds = valid_with_drop if valid_with_drop is not None else with_drop
         held_ok = 0
         picks = []
-        for i, held in enumerate(with_drop):
-            best, best_score = None, (-1, 1e9)
+        for i, held in enumerate(cv_rounds):
+            best, best_score = None, (float('-inf'), float('-inf'))
             for g in grid:
                 good = bad = 0
-                for j, r in enumerate(with_drop):
+                for j, r in enumerate(cv_rounds):
                     if j == i:
                         continue
                     t, f_pos, _ = replay(r, g, RELEASE_MASS_MP,
@@ -258,7 +346,8 @@ def main():
                         good += 1
                     if f_pos:
                         bad += 1
-                score = (good - 5 * bad, g)
+                # 同分时选更小阈值（更保守），而不是意外偏向网格最大值。
+                score = (good - 5 * bad, -g)
                 if score > best_score:
                     best_score, best = score, g
             picks.append(best)
@@ -267,7 +356,7 @@ def main():
             if t is not None and not f_pos:
                 held_ok += 1
         from collections import Counter
-        print(f'  留出轮成功 {held_ok}/{len(with_drop)}')
+        print(f'  留出轮成功 {held_ok}/{len(cv_rounds)}')
         print(f'  选中的阈值分布: {dict(Counter(picks))}')
 
 
