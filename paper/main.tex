@@ -40,15 +40,15 @@ an atomic, health-gated frame of composite mass, first mass moment $s=m_P r_{xy}
 an outer-loop nonlinear model predictive controller (NMPC). The first-moment representation
 remains well defined as the payload vanishes, while bounded filtering and continuous body-rate
 scheduling prevent discontinuous model updates. A thrust-residual self-trigger deweights stale
-pre-change stages in the MHE window and reduces mass-estimate settling time by up to
+pre-change stages in the MHE window and, in a mass-only wrench-step ablation, reduces mass-estimate settling time by up to
 \SI{4}{\times}. In PX4 \cite{px4} software-in-the-loop experiments with physically attached eccentric
 payloads, the eventless interface completes release confirmation in 21/21 valid paired flights,
 with no observed post-release instability, at a median confirmation delay of \SI{3.76}{s} when
 the moment vote clears in maneuver and \SI{16.46}{s} when a brake to hover is first required.
 A safety ablation shows that payload quantity and thrust residual are individually unreliable
 during aggressive flight: their fast release branch causes premature model clearing in 3/9
-flights. Restricting the estimator's release detector to fresh moment-collapse evidence
-eliminates premature declarations in a 12-flight smoke test, yielding 11 confirmations and one
+flights. With the estimator's release detector restricted to fresh moment-collapse evidence, a
+12-flight smoke test produced no premature declarations, 11 confirmations, and one
 conservative unresolved outcome.
 Against an L1-adaptive \cite{l1theory} NMPC baseline, the proposed method provides comparable transient tracking,
 recovers \SIrange{15}{35}{\percent} faster, and retains interpretable physical parameters. These
@@ -68,15 +68,10 @@ first channel is an outer-loop (position/thrust) problem; the latter two are inn
 (attitude/rate) problems. A controller that models the payload only as a scalar mass will
 mistrack or, for sufficiently heavy eccentric loads, destabilize.
 
-Three families of methods address load changes. \emph{Explicit parameter estimation}
-(EKF/MHE of mass, CoM, inertia) is interpretable, integrates natively with a model-based
-controller, and can update thrust-margin constraints, but classical estimators converge
-slowly across an abrupt change because the estimation window or filter averages across the
-discontinuity. \emph{Lumped-disturbance adaptation} (L1-adaptive NMPC, INDI) compensates the
-aggregate effect without estimating physical parameters, reacting fast but yielding no
-interpretable model. \emph{Learning-based} methods (e.g.\ neural MHE that regresses estimator
-weights) can resolve the estimator's bias--variance trade-off but typically require rich
-sensing or offline ground-truth data.
+\emph{Explicit parameter estimation} (EKF/MHE of mass, CoM, inertia) is interpretable and can
+feed model-based constraints, but converges slowly across an abrupt change;
+\emph{lumped-disturbance adaptation} (L1-adaptive NMPC, INDI) reacts fast but yields no physical
+model; \emph{learning-based} estimators typically need rich sensing or ground-truth data.
 
 The central question of this work is whether the complete grasp--carry--release lifecycle can
 adapt its payload model without trusting a commanded or externally supplied payload event.
@@ -98,7 +93,7 @@ $m/s/J$ frame drives bounded model updates and continuous body-rate scheduling
 (\S\ref{sec:setup}--\ref{sec:method}).
 \item A \textbf{self-triggered MHE} that detects abrupt payload changes from reconstructed
 thrust and deweights stale pre-event window stages, reducing mass-estimate settling time by up
-to ${\sim}4\times$ without an external event signal. The first-moment state
+to ${\sim}4\times$ in a mass-only wrench-step ablation, without an external event signal. The first-moment state
 $s=m_P r_{xy}$ represents eccentricity without measured attachment geometry and remains
 well-defined at release (\S\ref{sec:method}; \S\ref{sec:results}-A).
 \item \textbf{Closed-loop lifecycle and safety validation}: 21/21 valid paired flights complete
@@ -111,10 +106,9 @@ identified online is a weak vertical-arm prior $r_z$, which is structurally unob
 the thrust-moment channel.
 
 \section{Related Work}
-\textbf{Agile quadrotor flight.} Modern quadrotor control builds on geometric tracking on
-$\mathrm{SE}(3)$ \cite{lee2010}, and pushing to the actuator limits is by now standard in
-time-optimal flight \cite{foehn2021}. Both assume the inertial parameters are known and fixed;
-a payload event invalidates that assumption mid-flight, which is the gap this work addresses.
+\textbf{Agile quadrotor flight.} Geometric tracking on $\mathrm{SE}(3)$ \cite{lee2010} and
+time-optimal flight \cite{foehn2021} assume known, fixed inertial parameters, which a payload
+event invalidates mid-flight.
 
 \textbf{Aerial manipulation and transport.} Aerial robots that physically interact with their
 environment---grasping, carrying, and releasing objects---are surveyed in \cite{ollero2022};
@@ -154,9 +148,7 @@ estimator already has. Residual-based fault/change detection (CUSUM and related
 sensing; every deployed signal derives from motor speeds and odometry. This is a deliberate
 departure from learning-based MPC \cite{hewing} and the broader safe-learning agenda
 \cite{brunke}, where a learned component absorbs the model mismatch; here the mismatch is
-resolved into named parameters that downstream constraints can consume. We separately test,
-as a supporting ablation, whether numerical tuning improves the handcrafted transient-period
-schedule.
+resolved into named parameters that downstream constraints can consume.
 
 \section{System Overview and Problem Setup}\label{sec:setup}
 \textbf{Architecture (Fig.~\ref{fig:arch}).} Three layers: Gazebo physics (with a magnetic
@@ -381,6 +373,17 @@ make \emph{no} onboard-headroom claim; that requires measurement on the target c
 Setpoints are published at \SI{50}{Hz} by interpolating the latest prediction.
 
 \section{Results}\label{sec:results}
+\emph{Provenance.} The results come from two software generations. Table~\ref{tab:nosignal},
+Fig.~\ref{fig:mest}, the schedule-tuning ablation, and Tables~\ref{tab:matrix} and~\ref{tab:wind}
+were recorded in July--August with the earlier mass-only 14-state MHE, externally armed or
+\SI{1.5}{N} self-triggered weighting, and (on the gripper) geometry priors that the final
+interface removes; they support the estimation-layer and baseline claims only.
+Sec.~\ref{sec:autorelease} uses the final first-moment interface, whose \SI{4.4}{N} schedule
+threshold exceeds the \SI{1.47}{N} and \SI{2.94}{N} payload steps, so the settling gain of
+Table~\ref{tab:nosignal} is not re-demonstrated there. In Table~\ref{tab:matrix}, \emph{truth}
+gives the NMPC the attachment geometry measured in simulation, \emph{online} replaces the CoM
+offset with a motor-torque-inversion estimate, and \emph{l1} is the L1-adaptive baseline.
+
 \subsection{Event-trigger benefit (estimation and control layers)}
 Table~\ref{tab:nosignal} (wrench-emulated pure mass step, $n = 6$). The event trigger cuts
 settling ${\sim}4\times$ ($\delta m = \SI{-0.3}{kg}$) / ${\sim}2.8\times$
@@ -414,8 +417,7 @@ overshoot below the band before settling---the speed/overshoot trade-off reporte
 \end{figure}
 
 \emph{Red line.} This experiment reports settling and pos\_err peak only; overshoot depth is a
-wrench inertia-mismatch artifact and is not reported here (overshoot conclusions come only from
-the physical-rigid-body slung experiments).
+wrench inertia-mismatch artifact and is not analyzed in this paper.
 
 \subsection{Supporting schedule-tuning ablation}\label{sec:tuning-ablation}
 We additionally tested whether the handcrafted transient schedule required numerical
@@ -589,11 +591,9 @@ Transient peaks are statistically indistinguishable across the three methods
 strong baseline and our method is not worse on the transient. (ii) \textbf{L1 recovers
 \SIrange{15}{35}{\percent} slower}; the mechanism is that its compensation low-pass cutoff
 $\omega_c$ is bounded by closed-loop stability (0.5 stable, 1.0 unstable on this platform), a
-bandwidth wall that explicit estimation does not face. (iii) L1 produces no interpretable
-$m$/$c_{xy}$ (cannot update thrust-margin constraints), has no estimation-layer settling notion,
-and still requires the same class prior for gain scaling. Implementation (footnote): L1 is a
-translational 3-DoF gradient-law augmentation using $T_{\text{phys}}$ as the observed thrust;
-using the commanded thrust self-excites, and a ground low-thrust gate is required.
+bandwidth wall that explicit estimation does not face. (iii) L1 yields no interpretable
+$m$/$c_{xy}$ and still requires the same class prior for gain scaling; it is a translational
+3-DoF augmentation driven by $T_{\text{phys}}$ (the commanded thrust self-excites).
 
 \begin{table}[t]
 \caption{Three-way method $\times$ scenario matrix ($n=5$): pos\_err peak~[m] / recovery~[s].}
@@ -617,10 +617,8 @@ the \SI{1.5}{N} threshold: sub-threshold vertical wind never false-triggers, sup
 always does---a sustained vertical force is \textbf{inherently indistinguishable from a mass
 change on the thrust-residual channel} (an honest limitation). (ii) \textbf{Immune to
 horizontal wind}: even at $2\times$ threshold (\SI{3}{N}) horizontal wind never
-false-triggers, because the detector lives on the collective-thrust channel. (iii)
-Mitigations: the persistence gate rejects gust pulses; real wind is predominantly
-horizontal/gusty rather than sustained-DC vertical; the threshold is tunable to the noise
-floor.
+false-triggers, because the detector lives on the collective-thrust channel; the persistence
+gate additionally rejects gust pulses.
 
 \begin{table}[t]
 \caption{Wind false-positive rate vs.\ magnitude ($n=3$, no mass event).}
@@ -708,7 +706,9 @@ The remaining detector limitation is its moment reference. A running maximum abs
 excursions above the feasible envelope and makes an ordinary loaded moment appear collapsed, so
 the deployed reference is formed only from a healthy, low-dynamic, in-envelope interval and
 frozen before aggressive flight. That interval must follow the \textsc{loaded} declaration; in
-9/21 final-batch flights it never filled, so the ratio test never ran. Until reference
+9/21 final-batch flights it never filled, so the ratio test never ran. Out-of-envelope
+$\hat s$ samples are excluded from moment votes but still reach the controller's $c_{xy}$
+through the output filter and slew limiter. Until reference
 formation is reliable, our claim is an eventless, fail-safe control interface rather than a
 fully robust autonomous release detector.
 
@@ -748,19 +748,14 @@ the moment channel is known to be unusable, cutting the delay from \SI{16.5}{s} 
 approximately \SI{3.5}{s}; this is implemented in neither the estimator nor the controller and
 is not claimed here.
 
-\emph{Selection and pre-release failures.} The main performance tables condition on successful
-attachment and survival to the release command. Twenty of 77 flights were voided; arm~A had
-11/39 pre-release crashes and arm~B had 6/38, while arm~B alone had 3/38 failures of the
-pre-registered MHE payload-evidence check. The historical logging recorded an attach request but
-not the simulator joint-state acknowledgement, so those three cases cannot be separated into
-physical capture failures versus estimator non-recognition.
-Arm~A crashes concentrate in W4 (six of eleven), which exhausted the pre-registered attempt
-cap at seven valid pairs there rather than the intended eight; W3 stopped at six pairs for
-scheduling reasons rather than by the cap. Consequently the paper makes no claim that the
-interface improves grasp, lift, or early figure-eight stability, and W3/W4 carry somewhat less
-power than W5. Attachment observability and the pre-release attitude
-instability require separate experiments rather than reinterpretation of the conditional drop
-result.
+\emph{Selection and pre-release failures.} The performance tables condition on attachment and
+survival to the release command (voids in Sec.~\ref{sec:autorelease}). All 11/39 arm~A crashes
+occurred before the figure-eight, six in W4, which exhausted the pre-registered attempt cap at
+seven valid pairs; W3 stopped at six pairs for scheduling reasons. Of the 6/38 arm~B crashes,
+two occurred before the figure-eight in W5, whereas four were loaded figure-eight divergences in
+W4 (\SI{0.30}{kg}, \SI{4}{m/s}), an operating boundary of that condition. We therefore claim no
+improvement in grasp, lift, or figure-eight stability; attachment observability and pre-release
+instability require separate experiments.
 
 A sustained vertical up/downdraft remains intrinsically confounded with a payload change on a
 collective-thrust-only residual; the existing wind ablation characterizes this limitation but
