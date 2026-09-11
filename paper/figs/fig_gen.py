@@ -90,7 +90,7 @@ def fig1():
     # 可行性时,第一件想知道的就是"谁跑多快",放进架构图省一次来回。
     box(0.5, 4.35, 2.7, 1.1,
         'MHE  @10 Hz\n($m$, $s$, $J$, confidence;\nhealth/freshness)', '#fff', BLUE)
-    box(6.8, 4.35, 2.6, 1.1, 'NMPC  @20 Hz\n(acados SQP-RTI)\nN=20, 1.0 s', '#fff', BLUE)
+    box(6.8, 4.35, 2.6, 1.1, 'NMPC  @20 Hz\n(acados SQP)\nN=20, 1.0 s', '#fff', BLUE)
     box(3.7, 2.45, 2.6, 1.1, 'PX4 rate loop\n(fixed parameters)  @1 kHz', '#fff', ORANGE)
     box(3.7, 0.55, 2.6, 1.1, 'Gazebo x500\n+ gripper (DART)', '#fff', AQUA)
 

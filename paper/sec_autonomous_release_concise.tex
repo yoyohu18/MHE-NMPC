@@ -20,9 +20,9 @@ demonstrates closed-loop feasibility rather than a zero failure rate.
 The confirmation delay is \emph{bimodal}, and the two modes are two distinct control paths
 rather than a spread within one path. In \SI{38}{\percent} of flights the no-payload
 confidence crosses threshold while the vehicle is still flying the figure-eight and
-confirmation completes in \SI{3.76}{s} (median). In the remaining \SI{62}{\percent} the
-first mass moment $\hat s$ has drifted under sustained excitation, the moment vote is
-therefore withheld, and the system reaches its \SI{12}{s} timeout, declares the payload
+confirmation completes in \SI{3.76}{s} (median). In the remaining \SI{62}{\percent} no moment vote is available in maneuver---$\hat s$
+has drifted under sustained excitation or the frozen reference never formed---so the system
+reaches its \SI{12}{s} timeout, declares the payload
 state \textsc{unresolved}, and executes a \SI{3}{s} smooth brake to hover; deceleration
 alone restores observability and confirmation then completes at \SI{16.46}{s} (median).
 Reporting one median across both paths would be misleading, so Table~\ref{tab:complete}
@@ -34,7 +34,8 @@ carrying-phase transition. In the four remaining flights, all of which confirmed
 in maneuver, the estimator's presence machine never declared \textsc{empty} within the logged
 window (over \SI{40}{s} past confirmation); confirmation rested on the published no-payload
 confidence alone, as detailed below. Three of the 21 load declarations were
-raised by the grasp event rather than by sustained mass evidence. The published first
+raised by the estimator's own thrust-residual self-trigger rather than by sustained mass
+evidence; no external grasp signal was consumed. The published first
 moment decayed continuously rather than stepping to zero, confirming that recovery used the
 intended estimator interface rather than the controller's release command.
 
@@ -79,8 +80,9 @@ estimates could remain below the nominal empty threshold for up to \SI{48}{s}, w
 thrust excursion reached \SI{-1.69}{N}, exceeding the \SI{-1.47}{N} weight change of the
 smallest payload. Neither source is therefore reliable on its own in this regime.
 
-We rejected that branch: the estimator's release detector now fires only on fresh, successful
-moment-collapse evidence (the slow and fastB paths). Ambiguous cases enter \textsc{unresolved};
+We rejected that branch: the estimator's unified release detector now fires only on fresh,
+successful moment-collapse evidence (the slow and fastB paths); the legacy mass-domain route
+that remains is quantified below. Ambiguous cases enter \textsc{unresolved};
 a timeout does not clear the model or reset adaptive state. In a subsequent 12-flight smoke
 test, no flight declared release before the command: all 11 confirmed releases passed through
 moment-gated paths (fastB 9, slow 2) with a median detector delay of \SI{1.9}{s}, and one
