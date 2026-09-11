@@ -12,36 +12,65 @@ trajectory conditions. A pre-registered pair was voided and re-flown if either a
 before release or lacked payload evidence; these exclusions are reported below and are not
 absorbed into the completion result.
 
-Among valid pairs, arm~B completed autonomous release confirmation in 22/22 flights with no
-observed post-release instability (Table~\ref{tab:complete}). The pooled median delay was
-\SI{2.70}{s}, including the \SI{1.0}{s} confidence hold. The two-sided \SI{95}{\percent}
-Clopper--Pearson interval is $[\SI{84.6}{\percent},\SI{100}{\percent}]$, so this result
-demonstrates closed-loop feasibility rather than a zero failure rate. In all 22 flights the
-payload-presence machine made exactly two transitions---one autonomous load declaration and
-one autonomous empty declaration---with no carrying-phase transition. The published first
+Among valid pairs, arm~B completed autonomous release confirmation in 21/21 flights with no
+observed post-release instability (Table~\ref{tab:complete}). The two-sided \SI{95}{\percent}
+Clopper--Pearson interval is $[\SI{83.9}{\percent},\SI{100}{\percent}]$, so this result
+demonstrates closed-loop feasibility rather than a zero failure rate.
+
+The confirmation delay is \emph{bimodal}, and the two modes are two distinct control paths
+rather than a spread within one path. In \SI{38}{\percent} of flights the no-payload
+confidence crosses threshold while the vehicle is still flying the figure-eight and
+confirmation completes in \SI{3.76}{s} (median). In the remaining \SI{62}{\percent} the
+first mass moment $\hat s$ has drifted under sustained excitation, the moment vote is
+therefore withheld, and the system reaches its \SI{12}{s} timeout, declares the payload
+state \textsc{unresolved}, and executes a \SI{3}{s} smooth brake to hover; deceleration
+alone restores observability and confirmation then completes at \SI{16.46}{s} (median).
+Reporting one median across both paths would be misleading, so Table~\ref{tab:complete}
+separates them.
+
+In 17 of the 21 flights the payload-presence machine made exactly two transitions---one
+load declaration at grasp and one empty declaration at release---with no spurious
+carrying-phase transition. In the four remaining flights, all of which confirmed
+in-maneuver, the no-payload confidence crossed threshold before the estimator's presence
+machine had declared \textsc{empty}, so only the load transition was logged; the release
+itself was still driven by the estimator interface. Three of the 21 load declarations were
+raised by the grasp event rather than by sustained mass evidence. The published first
 moment decayed continuously rather than stepping to zero, confirming that recovery used the
 intended estimator interface rather than the controller's release command.
 
 \begin{table}[t]
-\caption{Eventless release completion for arm~B (valid paired flights only). Delay includes
-the \SI{1.0}{s} confidence hold.}
+\caption{Eventless release completion and confirmation delay (arm~B, valid pairs only).
+Delay runs from the release command to the frame at which the no-payload confidence has held
+above threshold for the full \SI{1.0}{s} hold, so it includes that hold by construction. The
+two delay columns are the two control paths described in the text and are \emph{not} to be
+pooled into a single median.}
 \label{tab:complete}
 \centering
-\begin{tabular}{@{}lccc@{}}
+\scriptsize
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{@{}lcccc@{}}
 \toprule
-condition & $n$ & completed & delay median [IQR] \\
+ & & & \multicolumn{2}{c}{delay median [IQR]} \\
+\cmidrule(lr){4-5}
+condition & $n$ & compl. & in-maneuver & via brake-to-hover \\
 \midrule
-W3: \SI{0.15}{kg}, \SI{4}{m/s} & 8 & 8/8 & \SI{2.56}{s} [2.53, 2.85] \\
-W4: \SI{0.30}{kg}, \SI{4}{m/s} & 6 & 6/6 & \SI{3.00}{s} [2.75, 3.25] \\
-W5: \SI{0.15}{kg}, \SI{2}{m/s} & 8 & 8/8 & \SI{2.70}{s} [2.46, 2.95] \\
+W3: \SI{0.15}{kg}, \SI{4}{m/s} & 6 & 6/6 & \SI{2.78}{s} [2.76, 2.80] & \SI{16.53}{s} [16.46, 16.60] \\
+W4: \SI{0.30}{kg}, \SI{4}{m/s} & 7 & 7/7 & \SI{7.35}{s} [7.20, 7.50] & \SI{16.40}{s} [15.76, 16.60] \\
+W5: \SI{0.15}{kg}, \SI{2}{m/s} & 8 & 8/8 & \SI{3.76}{s} [3.16, 4.46] & \SI{16.45}{s} [16.40, 16.56] \\
 \midrule
-pooled & 22 & 22/22 & \SI{2.70}{s} [2.55, 2.99] \\
+pooled & 21 & 21/21 & \SI{3.76}{s} [2.86, 7.20] & \SI{16.46}{s} [16.36, 16.60] \\
 \bottomrule
 \end{tabular}
+\\[2pt]
+\footnotesize Pooled completion \SI{100}{\percent}, two-sided \SI{95}{\percent}
+Clopper--Pearson CI $[\SI{83.9}{\percent}, \SI{100}{\percent}]$; overall delay max
+\SI{16.60}{s}. The share of flights confirming only after the brake-to-hover maneuver is
+\SI{67}{\percent} (W3), \SI{71}{\percent} (W4), \SI{50}{\percent} (W5) and
+\SI{62}{\percent} pooled; the complement confirms in maneuver.
 \end{table}
 
 \paragraph{Safety boundary}
-The 22/22 batch validates the interface once its release evidence is accepted; it does not
+The 21/21 batch validates the interface once its release evidence is accepted; it does not
 validate a universally robust detector. We therefore tested three physically distinct evidence
 sources: payload quantity, directional thrust residual, and collapse of the normalized first
 moment. A fast branch combining quantity and residual without moment evidence declared release
@@ -73,9 +102,12 @@ fresh moment-gated paths & 12 & 0 & 11 / 1 \\
 \end{table}
 
 The paired performance comparison is conditional on successful attachment and survival to the
-release command. Of 76 flights, 18 were voided and re-flown: 15 crashed before release and three
+release command. Of 77 flights, 20 were voided and re-flown: 17 crashed before release and three
 lacked MHE payload evidence. The available logs cannot distinguish physical capture failure
-from estimator non-recognition in those three cases. Among valid pairs, steady tracking RMS
-differed by at most \SI{0.8}{mm} between arms; no degradation of engineering significance was
-observed, although no equivalence test was pre-registered. The measurable cost of refusing the
-event shortcut is the \SIrange{2.6}{3.0}{s} median confirmation delay.
+from estimator non-recognition in those three cases. Among valid pairs, the tail-window tracking
+RMS is no longer comparable between the arms under the current code: in the \SI{62}{\percent}
+of arm~B flights that reach \textsc{unresolved}, the final \SI{20}{s} are flown at hover while
+arm~A continues the figure-eight, which accounts for the entire apparent difference. We
+therefore draw no steady-tracking comparison from this batch. The measurable cost of refusing the
+event shortcut is the confirmation delay: a median \SI{3.76}{s} when the moment vote clears
+in maneuver, and \SI{16.46}{s} when it does not and the vehicle must first brake to hover.

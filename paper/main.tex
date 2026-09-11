@@ -42,8 +42,9 @@ remains well defined as the payload vanishes, while bounded filtering and contin
 scheduling prevent discontinuous model updates. A thrust-residual self-trigger deweights stale
 pre-change stages in the MHE window and reduces mass-estimate settling time by up to
 \SI{4}{\times}. In PX4 \cite{px4} software-in-the-loop experiments with physically attached eccentric
-payloads, the eventless interface completes release confirmation in 22/22 valid paired flights,
-with no observed post-release instability and a median confirmation delay of \SI{2.70}{s}.
+payloads, the eventless interface completes release confirmation in 21/21 valid paired flights,
+with no observed post-release instability, at a median confirmation delay of \SI{3.76}{s} when
+the moment vote clears in maneuver and \SI{16.46}{s} when a brake to hover is first required.
 A safety ablation shows that payload quantity and thrust residual are individually unreliable
 during aggressive flight: their fast release branch causes premature model clearing in 3/9
 flights. Requiring fresh moment-collapse evidence eliminates premature declarations in a
@@ -99,7 +100,7 @@ thrust and deweights stale pre-event window stages, reducing mass-estimate settl
 to ${\sim}4\times$ without an external event signal. The first-moment state
 $s=m_P r_{xy}$ represents eccentricity without measured attachment geometry and remains
 well-defined at release (\S\ref{sec:method}; \S\ref{sec:results}-A).
-\item \textbf{Closed-loop lifecycle and safety validation}: 22/22 valid paired flights complete
+\item \textbf{Closed-loop lifecycle and safety validation}: 21/21 valid paired flights complete
 eventless release without observed post-release instability. A targeted ablation rejects an
 unsafe quantity-plus-residual branch and shows that fresh moment-collapse evidence with an
 \textsc{unresolved} fail-safe state is necessary (\S\ref{sec:autorelease}).
@@ -694,10 +695,10 @@ $O(r_{xy}^{2})$ and yaw-inertia terms.
 
 \emph{Release-detector boundary.} First-moment augmentation is now part of the default path.
 \iffalse
-and the 22/22 paired result demonstrates that its output can drive the complete NMPC recovery
+and the 21/21 paired result demonstrates that its output can drive the complete NMPC recovery
 without a drop event. It does not establish detector robustness: historical replay still misses
-14/72 releases, and the 95\% interval from 22 successes permits a true failure rate near
-15\%. The key structural issue in the audited profile was that its shared \SI{4.4}{N} residual
+14/72 releases, and the 95\% interval from 21 successes permits a true failure rate near
+16\%. The key structural issue in the audited profile was that its shared \SI{4.4}{N} residual
 threshold was chosen to suppress the residual path for a \SI{0.30}{kg} envelope study, but the smallest supported
 \SI{0.15}{kg} payload produces only a \SI{1.47}{N} weight step. Lowering that shared threshold
 would also change MHE weight scheduling and would confound earlier ablations. The subsequent
@@ -739,7 +740,7 @@ evidence and an estimator-quality diagnostic. Raw $\hat s$ may also fail to retu
 real drop; this remains a safe miss handled by \textsc{unresolved}, not permission to clear $s$
 from the controller's command.
 \fi
-The 22/22 paired result shows that the first-moment output can drive complete NMPC recovery
+The 21/21 paired result shows that the first-moment output can drive complete NMPC recovery
 without a drop event, but it does not establish distribution-wide detector robustness. The
 targeted safety ablation identifies the operative boundary: payload quantity and thrust
 residual can become simultaneously false-empty during dynamic flight, causing premature model
@@ -772,7 +773,7 @@ spacing of the lateral-acceleration extrema. While drifted, the moment vote is c
 \emph{withheld} rather than mis-cast, so the failure mode is a delayed confirmation, not a
 false release. The drift is reversible: deceleration alone restores $\hat s$, which collapses
 below the release threshold within \SIrange{3.3}{3.4}{s} of leaving the maneuver. Consequently
-\SI{62}{\percent} of flights ($n=29$) confirm only after the \SI{12}{s} timeout and the
+\SI{62}{\percent} of flights ($n=21$) confirm only after the \SI{12}{s} timeout and the
 \SI{3}{s} brake-to-hover, giving a confirmation delay of \SI{16.5}{s} instead of a few seconds.
 
 We can detect the condition but cannot yet predict it. The count of envelope-exceeding frames
@@ -781,7 +782,7 @@ We can detect the condition but cannot yet predict it. The count of envelope-exc
 (Fisher $p=\num{8.7e-4}$). What remains unexplained is \emph{which} flights drift. We
 pre-registered the hypothesis that drift is driven by maneuver intensity and tested it against
 the \SI{2}{m/s} condition, where the affected share should have dropped sharply; it did not
-(\SI{55}{\percent} at \SI{2}{m/s} versus \SI{71}{\percent} and \SI{64}{\percent} at
+(\SI{50}{\percent} at \SI{2}{m/s} versus \SI{67}{\percent} and \SI{71}{\percent} at
 \SI{4}{m/s}). We therefore report the intensity explanation as \emph{not supported} and leave
 the trigger open. A gate on \texttt{ovr} would let the vehicle leave the maneuver as soon as
 the moment channel is known to be unusable, cutting the delay from \SI{16.5}{s} to
@@ -789,14 +790,16 @@ approximately \SI{3.5}{s}; this is implemented in neither the estimator nor the 
 is not claimed here.
 
 \emph{Selection and pre-release failures.} The main performance tables condition on successful
-attachment and survival to the release command. Eighteen of 76 flights were voided; arm~A had
-11/38 pre-release crashes and arm~B had 4/38, while arm~B alone had 3/38 failures of the
+attachment and survival to the release command. Twenty of 77 flights were voided; arm~A had
+11/39 pre-release crashes and arm~B had 6/38, while arm~B alone had 3/38 failures of the
 pre-registered MHE payload-evidence check. The historical logging recorded an attach request but
 not the simulator joint-state acknowledgement, so those three cases cannot be separated into
 physical capture failures versus estimator non-recognition.
-Nine arm~A crashes concentrate in W4, leaving only six valid pairs there. Consequently the
-paper makes no claim that the interface improves grasp, lift, or early figure-eight stability,
-and the W4 evidence is weaker than W3/W5. Attachment observability and the pre-release attitude
+Arm~A crashes concentrate in W4 (six of eleven), which exhausted the pre-registered attempt
+cap at seven valid pairs there rather than the intended eight; W3 stopped at six pairs for
+scheduling reasons rather than by the cap. Consequently the paper makes no claim that the
+interface improves grasp, lift, or early figure-eight stability, and W3/W4 carry somewhat less
+power than W5. Attachment observability and the pre-release attitude
 instability require separate experiments rather than reinterpretation of the conditional drop
 result.
 
@@ -833,7 +836,7 @@ to update mass, first mass moment, and inertia without consuming attach/drop not
 treating a release command as proof of physical detachment. Self-triggered MHE window
 deweighting accelerates abrupt-change recovery, while the atomic, health-gated $m/s/J$ interface
 and continuous body-rate scheduling connect the estimate safely to the controller. Conditional
-on successful attachment and pre-release survival, the interface completed release in 22/22
+on successful attachment and pre-release survival, the interface completed release in 21/21
 paired SITL flights with no observed post-release instability. It also matched the transient
 tracking of an L1-NMPC baseline while recovering \SIrange{15}{35}{\percent} faster and retaining
 interpretable physical parameters.
