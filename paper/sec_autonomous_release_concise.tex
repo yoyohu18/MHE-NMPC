@@ -31,9 +31,9 @@ separates them.
 In 17 of the 21 flights the payload-presence machine made exactly two transitions---one
 load declaration at grasp and one empty declaration at release---with no spurious
 carrying-phase transition. In the four remaining flights, all of which confirmed
-in-maneuver, the no-payload confidence crossed threshold before the estimator's presence
-machine had declared \textsc{empty}, so only the load transition was logged; the release
-itself was still driven by the estimator interface. Three of the 21 load declarations were
+in maneuver, the estimator's presence machine never declared \textsc{empty} within the logged
+window (over \SI{40}{s} past confirmation); confirmation rested on the published no-payload
+confidence alone, as detailed below. Three of the 21 load declarations were
 raised by the grasp event rather than by sustained mass evidence. The published first
 moment decayed continuously rather than stepping to zero, confirming that recovery used the
 intended estimator interface rather than the controller's release command.
@@ -79,12 +79,32 @@ estimates could remain below the nominal empty threshold for up to \SI{48}{s}, w
 thrust excursion reached \SI{-1.69}{N}, exceeding the \SI{-1.47}{N} weight change of the
 smallest payload. Neither source is therefore reliable on its own in this regime.
 
-We rejected that branch and require every release decision to include fresh, successful
-moment-collapse evidence. Ambiguous cases enter \textsc{unresolved}; a timeout does not clear
-the model or reset adaptive state. In a subsequent 12-flight smoke test, no flight declared
-release before the command: 11 releases were confirmed with a median detector delay of
-\SI{1.9}{s}, and one remained safely unresolved (Table~\ref{tab:release-safety}). This is the
-supported safety conclusion; broader detector robustness remains outside the present claim.
+We rejected that branch: the estimator's release detector now fires only on fresh, successful
+moment-collapse evidence (the slow and fastB paths). Ambiguous cases enter \textsc{unresolved};
+a timeout does not clear the model or reset adaptive state. In a subsequent 12-flight smoke
+test, no flight declared release before the command: all 11 confirmed releases passed through
+moment-gated paths (fastB 9, slow 2) with a median detector delay of \SI{1.9}{s}, and one
+remained safely unresolved (Table~\ref{tab:release-safety}). That smoke preceded the frozen
+moment reference.
+
+\paragraph{Release paths in the final batch}
+The moment-gated detector is not the only route to confirmation in the final code, and the
+21-flight batch of Table~\ref{tab:complete} exercised three. The controller confirms release
+when the published no-payload confidence---the product of mass, first-moment and inertia
+``empty'' scores, where the moment score uses an absolute bound on $\lVert s\rVert$ rather than
+the frozen-reference ratio---holds above 0.90 for \SI{1.0}{s} on healthy, fresh frames.
+(i)~In 12/21 flights (W3 6/6, W5 6/8) the moment-gated detector declared release first and the
+confidence followed. (ii)~In 5/21 flights, the five W4 flights that reached
+\textsc{unresolved}, the frozen moment reference was never established because its
+low-dynamic, in-envelope sampling window never filled, so the ratio test never ran; the
+confidence crossed threshold during or shortly after the brake to hover, and the estimator's
+mass-domain path ($m_P<\SI{0.030}{kg}$ for 20 frames, counted only in low-dynamic flight)
+declared release 0.9--\SI{3.1}{s} later. (iii)~In 4/21 flights (two in W4, two in W5), all
+confirmed in maneuver, the reference was likewise never established and the estimator never
+declared release; confirmation rested on the confidence alone. No flight in any path declared
+release before the command. The supported safety conclusion is therefore bounded: the smoke
+validates the moment-gated detector, while the final batch shows that 9/21 confirmations did
+not pass through it. Broader detector robustness remains outside the present claim.
 
 \begin{table}[t]
 \caption{Targeted release-safety ablation.}

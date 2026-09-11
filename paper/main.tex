@@ -47,8 +47,9 @@ with no observed post-release instability, at a median confirmation delay of \SI
 the moment vote clears in maneuver and \SI{16.46}{s} when a brake to hover is first required.
 A safety ablation shows that payload quantity and thrust residual are individually unreliable
 during aggressive flight: their fast release branch causes premature model clearing in 3/9
-flights. Requiring fresh moment-collapse evidence eliminates premature declarations in a
-12-flight smoke test, yielding 11 confirmations and one conservative unresolved outcome.
+flights. Restricting the estimator's release detector to fresh moment-collapse evidence
+eliminates premature declarations in a 12-flight smoke test, yielding 11 confirmations and one
+conservative unresolved outcome.
 Against an L1-adaptive \cite{l1theory} NMPC baseline, the proposed method provides comparable transient tracking,
 recovers \SIrange{15}{35}{\percent} faster, and retains interpretable physical parameters. These
 results demonstrate the eventless control interface and its fail-safe semantics, while not
@@ -102,8 +103,8 @@ $s=m_P r_{xy}$ represents eccentricity without measured attachment geometry and 
 well-defined at release (\S\ref{sec:method}; \S\ref{sec:results}-A).
 \item \textbf{Closed-loop lifecycle and safety validation}: 21/21 valid paired flights complete
 eventless release without observed post-release instability. A targeted ablation rejects an
-unsafe quantity-plus-residual branch and shows that fresh moment-collapse evidence with an
-\textsc{unresolved} fail-safe state is necessary (\S\ref{sec:autorelease}).
+unsafe quantity-plus-residual branch that lacks moment evidence and adds an
+\textsc{unresolved} fail-safe state (\S\ref{sec:autorelease}).
 \end{enumerate}
 The runtime estimator consumes only motor speeds and odometry; the sole geometric quantity not
 identified online is a weak vertical-arm prior $r_z$, which is structurally unobservable from
@@ -334,9 +335,12 @@ difference, $\Delta T=\overline{T}_{\mathrm{post}}-\overline{T}_{\mathrm{pre}}$,
 residual with moment collapse. A recorded figure-eight transient reached \SI{-1.69}{N}, larger
 in magnitude than the \SI{-1.47}{N} step of the minimum supported payload, so amplitude alone
 cannot separate the cases. Online and offline evaluation call the same pure decision function.
-The randomized smoke of Sec.~\ref{sec:autorelease} rejects fastA; the safety-accepted logic
-therefore requires moment-collapse evidence (slow or fastB) and treats an unresolved timeout as
-unknown, never as proof of an empty vehicle. Moment evidence must also originate from a fresh,
+The randomized smoke of Sec.~\ref{sec:autorelease} rejects fastA; the detector therefore
+fires only on moment-collapse evidence (slow or fastB) and treats an unresolved timeout as
+unknown, never as proof of an empty vehicle. Two further routes remain in the final interface
+and are reported with their frequencies in Sec.~\ref{sec:autorelease}: a mass-domain path
+counted only in low-dynamic flight, and controller confirmation on the published no-payload
+confidence. Moment evidence must also originate from a fresh,
 successful MHE solve: the re-anchoring routine deliberately initializes $s$ to zero after five
 consecutive solver failures, so that initialization is invalid evidence rather than a physical
 collapse.
@@ -744,10 +748,14 @@ The 21/21 paired result shows that the first-moment output can drive complete NM
 without a drop event, but it does not establish distribution-wide detector robustness. The
 targeted safety ablation identifies the operative boundary: payload quantity and thrust
 residual can become simultaneously false-empty during dynamic flight, causing premature model
-clearing in 3/9 flights when combined without moment evidence. The accepted logic therefore
-requires fresh, healthy moment-collapse evidence and treats timeouts as \textsc{unresolved},
-never as proof of an empty vehicle. After this correction, 12 flights produced no premature
-declarations, 11 confirmations, and one safe unresolved outcome.
+clearing in 3/9 flights when combined without moment evidence. The accepted detector therefore
+fires only on fresh, healthy moment-collapse evidence and treats timeouts as
+\textsc{unresolved}, never as proof of an empty vehicle. After this correction, 12 flights
+produced no premature declarations, 11 confirmations, and one safe unresolved outcome. In the
+final 21-flight batch, however, only 12 confirmations passed through that detector: five
+followed the mass-domain path after a brake to hover and four rested on the no-payload
+confidence alone, because the frozen moment reference was never established in those flights.
+None was premature.
 
 The remaining detector limitation is its moment reference. A running maximum can absorb
 dynamic estimation excursions above the physically feasible envelope and thereby make an
@@ -777,14 +785,16 @@ below the release threshold within \SIrange{3.3}{3.4}{s} of leaving the maneuver
 \SI{3}{s} brake-to-hover, giving a confirmation delay of \SI{16.5}{s} instead of a few seconds.
 
 We can detect the condition but cannot yet predict it. The count of envelope-exceeding frames
-(\texttt{ovr}), already computed online, separates the two populations sharply: flights with
-\texttt{ovr}${=}0$ confirmed in maneuver in 9/9 cases versus 1/7 for \texttt{ovr}${>}0$
-(Fisher $p=\num{8.7e-4}$). What remains unexplained is \emph{which} flights drift. We
+(\texttt{ovr}), already computed online, separates the two populations at \SI{4}{m/s}: in
+the 21-flight batch, flights with \texttt{ovr}${=}0$ confirmed in maneuver in 7/11 cases versus
+1/10 for \texttt{ovr}${>}0$ (Fisher $p=0.024$), but all eight \SI{2}{m/s} flights had
+\texttt{ovr}${=}0$ and half of them still required the brake to hover, so \texttt{ovr} is not
+a sufficient indicator at low speed. What remains unexplained is \emph{which} flights drift. We
 pre-registered the hypothesis that drift is driven by maneuver intensity and tested it against
 the \SI{2}{m/s} condition, where the affected share should have dropped sharply; it did not
 (\SI{50}{\percent} at \SI{2}{m/s} versus \SI{67}{\percent} and \SI{71}{\percent} at
 \SI{4}{m/s}). We therefore report the intensity explanation as \emph{not supported} and leave
-the trigger open. A gate on \texttt{ovr} would let the vehicle leave the maneuver as soon as
+the trigger open. At \SI{4}{m/s}, a gate on \texttt{ovr} would let the vehicle leave the maneuver as soon as
 the moment channel is known to be unusable, cutting the delay from \SI{16.5}{s} to
 approximately \SI{3.5}{s}; this is implemented in neither the estimator nor the controller and
 is not claimed here.
@@ -842,10 +852,12 @@ tracking of an L1-NMPC baseline while recovering \SIrange{15}{35}{\percent} fast
 interpretable physical parameters.
 
 The release-safety ablation defines the claim boundary. Payload quantity and thrust residual
-became simultaneously false-empty during aggressive flight, so the accepted design requires
+became simultaneously false-empty during aggressive flight, so the accepted detector fires only on
 fresh moment-collapse evidence and preserves ambiguous cases as \textsc{unresolved}. This
 policy produced zero premature declarations in the corrected 12-flight smoke, with 11 confirmed
-releases and one safe unresolved outcome. The present evidence therefore demonstrates that the
+releases and one safe unresolved outcome; in the final batch 12/21 confirmations passed through
+it, and the remaining nine, via a low-dynamic mass path or the no-payload confidence, were also
+never premature. The present evidence therefore demonstrates that the
 payload-event signal can be removed from the adaptive control interface; it does not establish
 a fully robust release detector. A frozen, robust moment reference, broader SITL validation,
 and subsequent HITL and flight testing are the next steps.
