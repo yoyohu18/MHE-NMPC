@@ -34,36 +34,22 @@
 \maketitle
 
 \begin{abstract}
-A release command does not guarantee physical payload detachment, so switching a controller's
-model from an attach/drop signal can be unsafe. We present an eventless payload-adaptive control
-framework in which a moving horizon estimator (MHE) \cite{rao2003} uses only motor speeds and odometry to publish
-an atomic, health-gated frame of composite mass, first mass moment $s=m_P r_{xy}$, and the
-inertia increment derived from them to an outer-loop nonlinear model predictive controller (NMPC). The first-moment representation
-remains well defined as the payload vanishes, while bounded filtering and continuous body-rate
-scheduling prevent discontinuous model updates. In PX4 \cite{px4} SITL with
-physically attached eccentric payloads, the interface completes release confirmation in 31/31
-eligible eventless flights with no observed post-release instability. In \SI{42}{\percent} of
-flights, sufficient no-payload evidence arrives while the vehicle continues the figure-eight,
-giving a median confirmation delay of \SI{3.46}{s}. The remaining \SI{58}{\percent} lack
-reliable first-moment evidence in maneuver; after a \SI{12}{s} timeout, the system enters
-\textsc{unresolved} and executes an approximately \SI{3}{s} brake to hover. The resulting
-low-dynamic condition restores observability, yielding a median confirmation delay of
-\SI{16.48}{s}.
-A safety ablation shows payload quantity and thrust residual to be individually unreliable in
-aggressive flight---their fast branch cleared the model prematurely in 3/9 flights; restricting
-the detector to fresh moment-collapse evidence removed every premature declaration over 12
-flights.
-In five valid paired fault-injection trials, the physical joint was held for \SI{4}{s}
-after the release command: the external-event baseline cleared its model before detachment
-in 5/5 flights, whereas the eventless interface never cleared early in any of its six valid
-runs and instead retained the loaded model or entered \textsc{unresolved} until physical
-evidence arrived.
-In a separate comparison recorded with an earlier mass-only variant of the estimator, explicit
-estimation matched an L1-adaptive \cite{l1theory} NMPC in transient tracking, recovered faster
-(L1 lags by \SIrange{8}{32}{\percent}), and retained interpretable physical parameters. These results show that the eventless interface fails safely: when detection is
-uncertain, it conservatively retains the loaded model rather than clearing it prematurely.
-They do not establish that the release detector will identify detachment quickly and correctly
-under all flight conditions.
+A release command does not guarantee that a payload has physically detached, so a controller
+that clears its payload model on that command can fly a loaded vehicle as if it were empty. We
+present an eventless payload-model interface for quadrotor nonlinear model predictive control
+(NMPC) that never treats attach or release commands as evidence. A moving horizon estimator
+(MHE) \cite{rao2003} estimates composite mass and the horizontal first mass moment
+$s=m_P r_{xy}$ from odometry and a rotor-speed thrust proxy that is not computed from the
+payload estimate; unlike a center-of-mass offset, $s$ remains well defined as the payload
+vanishes. The inertia increment follows from the mass estimate and a weak vertical-arm prior,
+and health-gated, rate-limited updates drive both the NMPC model and body-rate scheduling. In
+PX4 \cite{px4} SITL with physically attached eccentric payloads, release confirmation completed
+in all 31 flights that obtained payload evidence and survived to the release command (31 of 40
+attempts). Confirmation took a median \SI{3.46}{s} when evidence arrived during the maneuver
+and \SI{16.48}{s} when the vehicle first had to brake to hover. When physical detachment was
+delayed by \SI{4}{s} after the command, a command-triggered baseline cleared its model early in
+5/5 paired flights and the proposed interface in 0/5. These results are limited to simulation
+and the tested conditions.
 \end{abstract}
 
 \section{Introduction}
@@ -82,32 +68,35 @@ mistrack or, for sufficiently heavy eccentric loads, destabilize.
 feed model-based constraints, but converges slowly across an abrupt change;
 \emph{lumped-disturbance adaptation} (L1-adaptive NMPC, INDI) reacts fast but yields no physical
 model; \emph{learning-based} estimators typically need rich sensing or ground-truth data.
+We take the explicit route deliberately and accept its latency: the proposed interface trades
+release-confirmation delay for semantics that never run ahead of physical evidence and for
+named physical parameters.
 
 The central question of this work is whether the complete grasp--carry--release lifecycle can
 adapt its payload model without trusting a commanded or externally supplied payload event.
 Our answer rests on two observations. First, payload mass and first moment can be estimated
 continuously, with the inertia increment following algebraically from the mass estimate and a
 weak geometric prior, without consuming a gripper command, attachment state, or external
-event notification. Second, \textbf{motor speeds are a free physical sensor}: both
-collective thrust and body torques can be reconstructed from rotor speeds alone, yielding
-physical residuals that are decoupled from the estimator's own state. Combining the two
-yields a \emph{sensing-minimal} estimator that needs no external event signal and no
-measurement of the attachment geometry.
+event notification. Second, rotor-speed telemetry provides a collective-thrust and body-torque
+proxy that is \emph{not computed from} the online payload estimate, under a calibrated rotor
+thrust model; residuals formed from it therefore do not inherit a mass error through the
+controller's own command. Combining the two, the estimator needs no external event signal and
+no measurement of the horizontal attachment geometry.
 
 \textbf{Contributions.}
 \begin{enumerate}
-\item An \textbf{eventless payload-adaptive NMPC architecture} whose model never consumes an
-attach/drop notification or treats its own release command as evidence. An atomic, health-gated
-$m/s/J$ frame drives bounded model updates and continuous body-rate scheduling
-(\S\ref{sec:setup}--\ref{sec:method}).
-\item \textbf{Closed-loop lifecycle and safety validation}: 31/31 eligible eventless flights complete
-eventless release without observed post-release instability, while 23 valid A/B pairs retain
-the external-event baseline and expose the cost of refusing its shortcut. A five-pair delayed-detachment
-fault injection directly tests command/plant disagreement: the event baseline clears early in
-5/5 paired flights and the eventless interface in 0/6 valid runs. A targeted ablation rejects an
-unsafe quantity-plus-residual branch that lacks moment evidence and adds an
-\textsc{unresolved} fail-safe state (\S\ref{sec:autorelease}).
+\item A \textbf{first-moment payload interface}. Estimating mass together with the horizontal
+first mass moment---the standard linear parameterization of rigid-body inertial parameters
+\cite{atkeson1986}---keeps the payload geometry well defined through release, where a CoM
+offset is not, and lets one health-gated $m/s/J$ frame drive bounded NMPC model updates and
+continuous body-rate scheduling (\S\ref{sec:setup}--\ref{sec:method}).
+\item \textbf{Release semantics that do not run ahead of evidence}: the controller clears its
+payload model only after the estimator's no-payload confidence persists, never on its own
+release command, and enters \textsc{unresolved} and brakes to hover when evidence is missing
+(\S\ref{sec:method}).
 \end{enumerate}
+We evaluate the complete interface in PX4 SITL, reporting every attempt, the confirmation path
+each flight took, and a paired delayed-detachment fault injection (\S\ref{sec:autorelease}).
 The runtime estimator consumes only motor speeds and odometry; the sole geometric quantity not
 identified online is a weak vertical-arm prior $r_z$, which is structurally unobservable from
 the thrust-moment channel.
@@ -139,7 +128,11 @@ recover a \emph{force/torque}, not a physical parameter: they cannot, e.g., upda
 thrust-margin constraint or an inner-loop gain schedule from the estimate.
 
 \textbf{MHE and online parameter estimation.} Filter- and optimization-based estimators
-recover mass, inertia, and geometric parameters \cite{svacha2020,wuest2019,bohm2021}.
+recover mass, inertia, and geometric parameters \cite{svacha2020,wuest2019,bohm2021}, and
+the mass and CoM of a grasped payload have been estimated for aerial manipulation
+\cite{mellinger2011}. Writing the CoM as a first mass moment makes inertial parameters enter the
+dynamics linearly, a standard device in manipulator load identification \cite{atkeson1986}; we
+use it because it remains well defined when the payload vanishes.
 Standard MHE performance is highly sensitive to the process/measurement weight matrices;
 neural MHE (NeuroMHE) \cite{neuromhe} learns to output these weights online, resolving the
 bias--variance trade-off but estimating a lumped disturbance force rather than explicit named
@@ -171,7 +164,24 @@ continuous rate-command scheduling. No attach/drop notification enters this path
 \textbf{Dynamics and parameterization.} The NMPC model carries the runtime parameter vector
 $p = [x_{\text{ref}}, m, \Delta J, c_{xy}]$ (extended with a lumped disturbance only for the
 L1 baseline). Thrust acting at the geometric center about the composite CoM produces
-$\tau_{\text{com}} = [-c_y T, +c_x T, 0]$. The deployed MHE augments both composite mass and
+$\tau_{\text{com}} = [-c_y T, +c_x T, 0]$. The NMPC solves
+\begin{equation}
+\begin{aligned}
+\min_{u_{0:N-1}}\;& \textstyle\sum_{k=0}^{N-1}\bigl(\lVert e_k\rVert_{Q}^2
+  +\lVert u_k-\bar u(p)\rVert_{R}^2\bigr)+\lVert e_N\rVert_{Q_N}^2\\
+\text{s.t.}\;& x_{k+1}=F(x_k,u_k,p),\quad x_0=\hat x,\quad u_k\in\mathcal U,
+\end{aligned}
+\label{eq:nmpc}
+\end{equation}
+where $x\in\mathbb R^{13}$ stacks position, velocity, attitude quaternion and body rate,
+$u=[T,\tau^{\mathsf T}]^{\mathsf T}$, $e_k$ stacks the position, velocity, quaternion-vector and
+rate errors to the reference, and $F$ is one RK4 step ($\Delta t=\SI{0.05}{s}$, $N=20$). The
+input reference $\bar u(p)=[mg,\,c_y mg,\,-c_x mg,\,0]^{\mathsf T}$ is the live hover input
+including the eccentric trim torque. $Q$ and $R$ follow Bryson's rule with tolerances
+\SI{0.1}{m}, \SI{0.3}{m/s}, 0.05, \SI{0.3}{rad/s}, \SI{2}{N} and the torque bounds; $Q_N$
+scales the position, attitude and rate blocks of $Q$ by 20, 2 and 0.2. $\mathcal U$ is the
+actuator envelope $T\in[1.27,31.35]$\,N, $|\tau_x|,|\tau_y|\le\SI{0.5}{N\,m}$,
+$|\tau_z|\le\SI{0.2}{N\,m}$. The deployed MHE augments both composite mass and
 the horizontal first mass moment,
 \begin{equation}
 \begin{aligned}
@@ -181,8 +191,30 @@ s &= m_P r_{xy},
 \end{aligned}
 \label{eq:mhe-state}
 \end{equation}
-with $\dot m=0$ and $\dot s=0$ within each window ($N=20$, $\Delta t=\SI{0.1}{s}$). The
-published geometry is reconstructed as
+with $\dot m=0$ and $\dot s=0$ within each window ($N=20$, $\Delta t=\SI{0.1}{s}$). It solves
+\begin{equation}
+\begin{aligned}
+\min_{x,\,w}\;& \lVert x_0-\bar x_0\rVert_{W_0}^2\\
+& {}+\textstyle\sum_{j=0}^{N-1}\beta_j\bigl(\lVert y_j-Cx_j\rVert_{W_y}^2
+  +\lVert w_j\rVert_{W_w}^2\bigr)\\
+\text{s.t.}\;& x_{j+1}=F_{\mathrm M}(x_j,u^{\mathrm{phys}}_j)+Gw_j,\\
+& m\in[0.95\,m_B,\,\SI{5}{kg}],\quad |s_x|,|s_y|\le\SI{1.5}{kg\,m},
+\end{aligned}
+\label{eq:mhe}
+\end{equation}
+over $x_{0:N}$ and $w_{0:N-1}$, where $y_j$ is the odometry and $C$ selects the 13 vehicle
+states,
+$u^{\mathrm{phys}}=[T_{\text{phys}},\tau_{\text{phys}}^{\mathsf T}]^{\mathsf T}$ is reconstructed
+from rotor speeds (below), and $G=[I_{13},0]^{\mathsf T}$ keeps $m$ and $s$ noise-free.
+$W_y$ is the inverse squared odometry noise (\SI{0.02}{m}, \SI{0.05}{m/s}, 0.01,
+\SI{0.02}{rad/s}); $W_w=\mathrm{diag}(10^4 I_6,10^5 I_4,10^3 I_3)$ deliberately trusts the
+dynamics. The arrival cost $W_0=\mathrm{diag}(10^3 I_6,10^4 I_4,10^2 I_3,0.1,100\,I_2)$ is
+centred on the previous window's shifted solution and is nearly uninformative in $m$
+($\sigma\approx\SI{3.2}{kg}$) and $s$ ($\sigma=\SI{0.1}{kg\,m}$). In the reported campaign
+$\beta_j=1$, except that stages
+preceding a self-detected $T_{\text{phys}}$ step (\SI{4.4}{N} from a slow baseline for two
+frames) are scaled by $10^{-4}$ until they leave the window; no external event enters this
+schedule. The published geometry is reconstructed as
 \begin{equation}
 \begin{aligned}
 c_{xy} &= \frac{s}{m},\\
@@ -191,11 +223,10 @@ c_{xy} &= \frac{s}{m},\\
 \end{aligned}
 \label{eq:continuous-geometry}
 \end{equation}
-where $r_z$ is a weak rack prior. The small $O(r_{xy}^2)$ diagonal terms and yaw increment are
-omitted in the deployed interface. The hover-input baseline is recomputed from the live model
-and includes the eccentric trim torque, avoiding a stale operating-point bias.
+where $r_z$ is a weak prior from the payload rack. The small $O(r_{xy}^2)$ diagonal terms and yaw increment are
+omitted in the deployed interface.
 
-\textbf{Model-independent physical inputs.} We reconstruct the collective thrust
+\textbf{Estimate-independent thrust proxy.} We reconstruct the collective thrust
 $T_{\text{phys}} = k \sum_i \omega_i^2$ and the body torques from rotor speeds and arm
 geometry. The quadratic coefficient $k$ is a static-thrust constant; it is known to lose
 validity under large induced inflow during fast translation \cite{bangura2012}, which we do
@@ -203,8 +234,9 @@ not model. Feeding the NMPC's \emph{commanded} thrust back into the estimator wo
 close an estimator--controller loop: that command is computed from $\hat m$ itself (its cost
 anchors $T$ near $\hat m g$), and any inversion error, saturation, or motor lag between command
 and rotor is invisible to the estimator, so a mass error can persist self-consistently rather
-than appear as a residual. The motor-speed reconstruction measures the force downstream of
-those stages and does not depend on $\hat m$.
+than appear as a residual. The rotor-speed proxy is taken downstream of those stages and is not
+computed from $\hat m$; it does depend on the calibrated $k$, and in our simulator the plant
+generates thrust with the same square law (\S\ref{sec:limits}).
 
 \textbf{Thrust-to-throttle inversion.} The offboard collective-thrust command is inverted to a
 normalized rotor command through the motor model $T = k\omega^2$. Provided that the forward
@@ -216,7 +248,7 @@ restore the PX4 rate loop's lost bandwidth. The deployed path therefore maps the
 increment to a body-rate-command scale, low-pass filters it, applies target hysteresis and
 asymmetric rise/recovery slew limits, and preserves \SI{5}{\percent} command headroom before
 the final saturation. It does \emph{not} rewrite PX4 parameters. An attach-time inertia-only
-bootstrap uses the rack's \SI{0.30}{kg} payload envelope for immediate safety, then fades out
+bootstrap uses the rack's \SI{0.30}{kg} maximum payload for immediate safety, then fades out
 after persistent coherent MHE evidence; neither payload mass nor $s$ is injected by this
 bootstrap, and the drop path remains estimate-only.
 
@@ -237,8 +269,8 @@ The NMPC additionally checks local receive age; an unhealthy or stale frame free
 accepted model and breaks the confidence persistence timer. Valid frames pass through a
 low-pass filter and separate slew limits for $m$, $s$, and $\Delta J$ before every NMPC solve.
 
-Payload presence is an estimator-owned state, deliberately distinct from the legacy flag that
-means ``an external attach notification was received.'' A hysteretic \textsc{empty}$\leftrightarrow$
+Payload presence is an estimator-owned state, distinct from any externally signalled attach
+state. A hysteretic \textsc{empty}$\leftrightarrow$
 \textsc{loaded} machine uses sustained payload-mass evidence, with a directional residual as a
 fast path, and a separate latch records that the present flight reliably entered
 \textsc{loaded}. This latch prevents an empty-flight confidence value from consuming the later
@@ -262,38 +294,61 @@ driving total mass below the bare-airframe value; 14 of 55 post-release samples 
 the lower bound. Augmenting $s$ supplies the rotational channel directly and permits
 $c_{xy}=s/m$ without knowing the grasp-dependent horizontal offset. A frozen-window inertia
 coefficient prevents the optimizer from using instantaneous mass as a free inertia knob, while
-the weak $r_z$ prior retains the dominant parallel-axis term. This structure is the minimum one
-that simultaneously represents payload existence, trim moment, and roll/pitch inertia without
-an external attachment geometry measurement.
+the weak $r_z$ prior retains the dominant parallel-axis term. It is the smallest structure we
+found that represents payload existence, trim moment, and roll/pitch inertia without an
+external attachment geometry measurement.
 
-The release detector studies three physically distinct sources: (i) collapse of
+\textbf{Estimator declaration and controller confirmation.} The controller clears its payload
+model through one route only: confirmation, i.e.\ $\gamma>0.90$ held for \SI{1.0}{s} on healthy,
+fresh frames. The estimator may additionally \emph{declare} release, which switches the
+published target of $s$ to zero and so speeds the rise of $\gamma$; a declaration is neither
+necessary nor sufficient for confirmation. The final code has two declaration routes.
+(a)~A \emph{moment-gated detector} requires collapse of
 $\rho=\lVert s\rVert/\lVert s\rVert_{\mathrm{ref}}$ below 0.30, where the loaded reference is
-formed from a healthy, low-dynamic, in-envelope interval and frozen before aggressive flight,
-with an absolute $\lVert s\rVert$ bound used only as a sanity check; (ii) payload quantity, in which mass and algebraically derived
-inertia count as \emph{one} source; and (iii) a directional thrust-residual edge with finite
-validity. Within this detector no single source releases. The slow path requires quantity-empty and
-moment-collapse evidence for five MHE frames. The release detector uses a signed two-window
-thrust-residual difference, $\Delta T=\overline{T}_{\mathrm{post}}-\overline{T}_{\mathrm{pre}}$, with
-\SI{0.3}{s} half-windows. We evaluated two fast residual branches: a \emph{quantity--residual}
-branch paired a normal \SI{0.9}{N} residual with quantity-empty evidence, while a
-\emph{moment--residual} branch paired a longer-persistent residual with moment collapse. A
-recorded figure-eight transient reached \SI{-1.69}{N}, larger
-in magnitude than the \SI{-1.47}{N} step of the minimum supported payload, so amplitude alone
-cannot separate the cases. Online and offline evaluation call the same pure decision function.
-The randomized validation of Sec.~\ref{sec:autorelease} rejects the quantity--residual branch;
-the detector therefore fires only on moment-collapse evidence (slow or moment--residual) and
-treats an unresolved timeout as unknown, never as proof of an empty vehicle. Two further routes
-remain in the final interface and are reported with their frequencies in
-Sec.~\ref{sec:autorelease}: a mass-domain path counted only in low-dynamic flight, and
-controller confirmation on the published no-payload confidence. These routes lie outside the
-moment-gated detector and do not reinstate the rejected branch: the mass-domain path does not
-accumulate in the aggressive maneuvers where that branch fired prematurely, and the confidence
-route multiplies in an absolute first-moment score.
-Neither uses the frozen-reference ratio, so confirmations through them are not counted as
-validation of that detector. Moment evidence must also originate from a fresh,
-successful MHE solve: the re-anchoring routine deliberately initializes $s$ to zero after five
-consecutive solver failures, so that initialization is invalid evidence rather than a physical
-collapse.
+formed from a healthy, low-dynamic, in-envelope interval and frozen before aggressive flight. It
+fires on quantity-empty plus moment-collapse evidence for five frames (slow path), or on moment
+collapse accompanied by a persistent signed thrust-residual step
+$\Delta T=\overline{T}_{\mathrm{post}}-\overline{T}_{\mathrm{pre}}$ over \SI{0.3}{s}
+half-windows (moment--residual path). (b)~A \emph{mass-domain route} declares release after
+$m_P<\SI{0.030}{kg}$ for 20 frames, accumulated only in low-dynamic flight. Confirmation can
+also occur without any declaration; because the confidence's moment score uses an absolute
+bound on $\lVert s\rVert$, a nonzero moment still vetoes it. Neither (b) nor confidence alone
+uses the frozen-reference ratio, so confirmations through them are not evidence for (a);
+Sec.~\ref{sec:autorelease} reports how often each occurred. Moment evidence must come from a
+fresh, successful solve: re-anchoring after five consecutive solver failures initializes $s$
+to zero, and that value is not counted as collapse. During development we also tested a
+quantity--residual branch (a \SI{0.9}{N} residual plus quantity-empty evidence, without moment
+evidence); it was removed after premature releases (Sec.~\ref{sec:autorelease}). A recorded
+figure-eight transient reached \SI{-1.69}{N}, larger in magnitude than the \SI{-1.47}{N} step of
+the smallest payload, so residual amplitude alone cannot separate the cases. Online and offline
+evaluation call the same pure decision function, and an \textsc{unresolved} timeout is treated
+as unknown, never as proof of an empty vehicle.
+
+Table~\ref{tab:thresholds} lists the lifecycle thresholds and where each value comes from. All
+were fixed in code before the final campaign began and were not retuned on it. Only $\rho$ and
+the residual floor were selected against data from earlier flights; the remaining values are
+engineering choices whose closed-loop sensitivity we have not swept.
+
+\begin{table}[tb]
+\caption{Lifecycle thresholds and their provenance. ``Earlier flights'' predate, and are
+disjoint from, the reported campaign.}
+\label{tab:thresholds}
+\centering
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.25\linewidth}>{\raggedright\arraybackslash}p{0.22\linewidth}>{\raggedright\arraybackslash}p{0.47\linewidth}@{}}
+\toprule
+threshold & value & provenance \\
+\midrule
+moment-collapse ratio $\rho$ & 0.30 & leave-one-out cross-validation on 59 earlier flights; every fold chose 0.30 (0.20 succeeded in 48/59) \\
+residual floor / persistence & \SI{0.9}{N}; 2 or 4 frames & below the \SI{1.47}{N} weight of the smallest payload; on a recorded flight, figure-eight excursions above \SI{0.9}{N} lasted $\le3$ frames, the release step 4 frames \\
+slow-path persistence & 5 frames (\SI{0.5}{s}) & engineering choice \\
+mass-domain release & $m_P<\SI{0.030}{kg}$, 20 frames & between the loaded minimum (\SI{0.079}{kg}) and post-release maximum (\SI{0.007}{kg}) of earlier \SI{0.15}{kg} flights \\
+no-payload confidence & 0.90 for \SI{1.0}{s} & engineering choice \\
+\textsc{unresolved} timeout / brake & \SI{12}{s} / \SI{3}{s} & engineering choice \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \section{Simulation Setup}\label{sec:sim}
 PX4 SITL with Gazebo \cite{gazebo} (Harmonic), an x500 quadrotor, and a magnetic DetachableJoint gripper
@@ -308,16 +363,14 @@ $\rightarrow$ NMPC hand-off and warmup hover $\rightarrow$ controlled descent $\
 active grasp enable $\rightarrow$ lift $\rightarrow$ figure-eight $\rightarrow$
 phase-triggered release. We state the NMPC scope explicitly: it governs the grasp hover and
 the post-event adaptation phase; the approach controller is not part of the claim.
-Headless batch infrastructure with a GCS-heartbeat stand-in; the physical-effectiveness
-timestamp $t = 0$ is defined by $T_{\text{phys}}$ crossing the baseline, and in-band is defined
-as \SI{\pm0.08}{kg} or \SI{15}{\percent} of the
-step, whichever is larger.
+Batches run headless, with a stand-in process supplying the ground-station heartbeat that PX4
+requires.
 
 \begin{figure}[tb]
 \centering
 \includegraphics[width=\linewidth]{figs/fig_track_3d_measured.pdf}
 \caption{Measured mission trajectory (simulator ground truth), two \SI{0.15}{kg}/\SI{2}{m/s}
-flights of the same batch: grasp (1), lift, then carry along the stereo figure-eight (blue)
+flights of the same batch: grasp (1), lift, then carry along the figure-eight with \SI{\pm0.8}{m} vertical undulation (blue)
 against the nominal reference (pale dashed). After the release command (3) one flight clears the
 moment vote in maneuver and keeps tracking (orange); the other declares \textsc{unresolved} at
 its \SI{12}{s} timeout and brakes to a hover (teal), confirming at \SI{16.40}{s}. The two paths
@@ -341,7 +394,8 @@ Setpoints are published at \SI{50}{Hz} by interpolating the latest prediction.
 \section{Results}\label{sec:results}
 \emph{Provenance.} The lifecycle cohort uses the final 16-state first-moment interface.
 The baseline matrix was recorded with the earlier mass-only 14-state MHE and supports only
-the bounded baseline comparison stated below. In Table~\ref{tab:matrix}, \emph{truth}
+the bounded baseline comparison stated below; it does not evaluate the proposed first-moment
+interface. In Table~\ref{tab:matrix}, \emph{truth}
 gives the NMPC the attachment geometry measured in simulation, \emph{online} replaces the CoM
 offset with a motor-torque-inversion estimate, and \emph{l1} is the L1-adaptive baseline.
 
@@ -484,8 +538,9 @@ reaches the estimator, which runs with no horizontal attachment geometry. $\hat{
 before grasp, rises with no attach notification, holds near truth through the figure-eight,
 and decays to zero after release. Across all 31 eligible flights the carry-phase estimate is
 biased toward zero (slope 0.85; median magnitude underestimate 10.8\%, same direction in
-31/31; largest at \SI{0.30}{kg}, median 15.7\%); the release criterion uses the
-ratio $\|s\|/\|s\|_{\mathrm{ref}}$ and is insensitive to this scale bias.}
+31/31; largest at \SI{0.30}{kg}, median 15.7\%). The cause of this bias is not identified; the
+moment-gated detector uses the ratio $\|s\|/\|s\|_{\mathrm{ref}}$, which is insensitive to a
+common scale bias.}
 \label{fig:moment}
 \end{figure}
 
@@ -524,7 +579,9 @@ cells); the mechanism is that its compensation low-pass cutoff
 $\omega_c$ is bounded by closed-loop stability (0.5 stable, 1.0 unstable on this platform), a
 bandwidth wall that explicit estimation does not face. (iii) L1 yields no interpretable
 $m$/$c_{xy}$ and still requires the same class prior for gain scaling; it is a translational
-3-DoF augmentation driven by $T_{\text{phys}}$ (the commanded thrust self-excites).
+3-DoF augmentation driven by $T_{\text{phys}}$ (the commanded thrust self-excites). The larger
+\emph{truth} peak in cell 0.3/0.10 is not explained; more accurate parameters need not reduce a
+transient peak. All three arms used the earlier mass-only MHE.
 
 \begin{table}[tb]
 \caption{Three-way method $\times$ scenario matrix ($n=5$): pos\_err peak~[m] / recovery~[s].}
@@ -545,8 +602,21 @@ cell (mass/ecc) & truth & online & l1 \\
 \section{Limitations and Future Work}\label{sec:limits}
 All system-level evidence is presently SITL-only. Hardware migration replaces simulated motor
 speeds with ESC telemetry and must re-identify thrust/torque coefficients, noise floors, timing,
-and gripper compliance before free flight. The vertical arm $r_z$ is unobservable from the
-thrust-moment channel and remains a weak rack prior; the $s_x$/pitch channel is noisier than
+and gripper compliance before free flight.
+
+\emph{Thrust proxy.} In simulation the plant generates rotor thrust with the same square law
+$k\omega^2$ that the estimator uses, and motor speeds are exact. The experiments therefore do
+not test thrust-map error, speed-measurement noise, bias or delay, or induced-inflow mismatch at
+\SI{4}{m/s} \cite{bangura2012}. Such a test must perturb the plant's thrust map independently of
+the estimator's; changing a shared $k$ cannot probe it.
+
+\emph{Missing baselines.} We have not compared against a command-triggered baseline that also
+requires persistent residual confirmation, a fixed-parameter NMPC, a CUSUM detector
+\cite{basseville1993} on the same signals under a matched false-alarm constraint, or L1-NMPC with
+the final estimator. The removed quantity--residual branch is not a substitute for the first:
+a command-triggered detector opens its window only after the command and faces different
+false-alarm exposure. The vertical arm $r_z$ is unobservable from the
+thrust-moment channel and remains a weak prior; the $s_x$/pitch channel is noisier than
 $s_y$/roll. The deployed diagonal inertia approximation also drops the small
 $O(r_{xy}^{2})$ and yaw-inertia terms.
 
@@ -597,7 +667,7 @@ evidence and an estimator-quality diagnostic. Raw $\hat s$ may also fail to retu
 real drop; this remains a safe miss handled by \textsc{unresolved}, not permission to clear $s$
 from the controller's command.
 \fi
-The safety ablation and three final-batch confirmation paths are reported in
+The development-stage tests and the three final-batch confirmation paths are reported in
 Sec.~\ref{sec:autorelease}; 31/31 completions do not establish distribution-wide detector
 robustness. In 12/31 flights the healthy, low-dynamic, in-envelope reference window never
 filled after the \textsc{loaded} declaration, so the moment-ratio test never ran.
@@ -620,17 +690,27 @@ versus 1/12 otherwise; Fisher $p<0.001$), but misses all six delayed \SI{2}{m/s}
 Earlier exit from the maneuver remains unimplemented
 and requires validation.
 
-\emph{Selection and pre-release failures.} The system results condition on successful payload
-evidence and survival to the release command. Of 40 eventless flights, 31 met these criteria;
-six crashed before release and three lacked MHE payload evidence. Two crashes occurred before
+\emph{Pre-release failures.} Of the six arm~B crashes (Sec.~\ref{sec:autorelease}), two occurred before
 the figure-eight at \SI{0.15}{kg}/\SI{2}{m/s}, whereas four were loaded figure-eight
 divergences at \SI{0.30}{kg}/\SI{4}{m/s}, an operating boundary of that condition. Their grasp
 offsets ($\lvert r_y\rvert=$ \SIrange{0.07}{0.14}{m}) and pre-maneuver roll trim reconstructed
 from rotor speeds (\SIrange{0.20}{0.40}{N\,m} against a \SI{0.5}{N\,m} limit) lie within the
 range of the eleven surviving flights at that condition, so attachment-induced torque
-saturation does not explain them; their mechanism remains unidentified. We therefore claim no
-improvement in grasp, lift, or figure-eight stability; attachment observability and pre-release
-instability require separate experiments.
+saturation does not explain them; their mechanism remains unidentified. We make no claim about
+grasp, lift, figure-eight stability, or end-to-end mission reliability.
+
+\emph{Self-triggered de-weighting.} The residual-triggered $\beta_j$ schedule of \eqref{eq:mhe}
+fired in 19/21 eligible \SI{0.30}{kg} flights and 2/18 at \SI{0.15}{kg}/\SI{4}{m/s}
+(both arms), but in none of the 22 at \SI{2}{m/s}. Its \SI{4.4}{N} threshold exceeds both
+payload weights, so it responds to fast thrust transients rather than discriminating payload
+weight; in these flights it was crossed by grasp and release transients. A
+later repeat of the two \SI{4}{m/s} conditions with it disabled ($\beta_j\equiv1$; not
+interleaved with the original runs) completed 20 of 21 eligible eventless releases. The
+moment-gated detector again declared first in 10 of them, and no load declaration relied on the
+residual trigger (4 in the original runs). The incomplete flight is a failure we report rather
+than exclude: during the loaded figure-eight the MHE re-initialized repeatedly after consecutive
+solver failures, and the vehicle diverged \SI{2.8}{s} after the release command, before the
+\textsc{unresolved} timeout. Re-initialization seeding is under separate investigation.
 
 A sustained vertical up/downdraft remains intrinsically confounded with a payload change on a
 collective-thrust-only residual; wind is not evaluated in the reported cohort.
@@ -641,18 +721,15 @@ DetachableJoint platform, which attaches a separate rigid body (\S\ref{sec:sim})
 are not modeled. Neither affects which signals the estimator consumes.
 
 \section{Conclusion}
-We presented an eventless payload-adaptive NMPC interface driven by motor speeds and
-odometry. An atomic, health-gated $m/s/J$ frame supports continuous
-model and body-rate adaptation without treating release commands as detachment evidence.
-The interface completed 31/31 eligible eventless SITL flights without observed post-release
-instability, conditional on attachment and pre-release survival. The safety ablation
-rejects quantity-plus-residual clearing without moment evidence; the final batch also
-exercised mass-domain and confidence-only confirmation paths. Under a \SI{4}{s} delayed-detachment
-fault, the external-event baseline cleared its model before physical release in 5/5 valid
-pairs, whereas the eventless interface did so in 0/6 valid runs and remained conservative until
-estimator evidence arrived. These results demonstrate
-interface feasibility, not a universally robust detector. Reliable moment-reference
-formation and hardware validation remain open.
+We presented an eventless payload-model interface for quadrotor NMPC that estimates composite
+mass and the horizontal first mass moment from odometry and a rotor-speed thrust proxy, and
+that clears its payload model only on persistent estimator evidence, never on its own release
+command. In PX4 SITL the complete interface confirmed release in all 31 eligible flights (31 of
+40 attempts) through three confirmation paths, with median delays of \SI{3.46}{s} in maneuver
+and \SI{16.48}{s} after braking to hover. Under a \SI{4}{s} delayed detachment, a
+command-triggered baseline cleared its model early in 5/5 pairs and the proposed interface in
+0/5. Hardware validation, thrust-map mismatch, reliable moment-reference formation, and
+stronger baselines remain open.
 
 \bibliographystyle{IEEEtran}
 \bibliography{refs}
