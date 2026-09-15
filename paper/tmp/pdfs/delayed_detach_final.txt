@@ -1,0 +1,507 @@
+ Eventless Payload-Adaptive NMPC for Quadrotors
+                                                        Anonymous Authors
+                                         Affiliation withheld for double-anonymous review
+
+
+    Abstract—A release command does not guarantee physical               The central question of this work is whether the complete
+payload detachment, so switching a controller’s model from            grasp–carry–release lifecycle can adapt its payload model
+an attach/drop signal can be unsafe. We present an eventless          without trusting a commanded or externally supplied payload
+payload-adaptive control framework in which a moving horizon
+estimator (MHE) [1] uses only motor speeds and odometry               event. Our answer rests on two observations. First, payload
+to publish an atomic, health-gated frame of composite mass,           mass, first moment, and inertia can be estimated continuously
+first mass moment s = mP rxy , and inertia to an outer-loop           without consuming a gripper command, attachment state, or
+nonlinear model predictive controller (NMPC). The first-moment        external event notification. Second, motor speeds are a free
+representation remains well defined as the payload vanishes,          physical sensor: both collective thrust and body torques can
+while bounded filtering and continuous body-rate scheduling
+prevent discontinuous model updates. In PX4 [2] SITL with             be reconstructed from rotor speeds alone, yielding physical
+physically attached eccentric payloads, the interface completes       residuals that are decoupled from the estimator’s own state.
+release confirmation in 31/31 eligible eventless flights with no      Combining the two yields a sensing-minimal estimator that
+observed post-release instability, at a median delay of 3.46 s when   needs no external event signal and no measurement of the
+confirmation clears in maneuver and 16.48 s when a brake to           attachment geometry.
+hover is required first. A safety ablation shows payload quantity
+and thrust residual to be individually unreliable in aggressive          Contributions.
+flight—their fast branch cleared the model prematurely in 3/9            1) An eventless payload-adaptive NMPC architecture
+flights; restricting the detector to fresh moment-collapse evidence          whose model never consumes an attach/drop notifica-
+removed every premature declaration over 12 flights. In five valid           tion or treats its own release command as evidence.
+paired fault-injection trials, the physical joint was held for 4 s
+after the release command: the external-event baseline cleared
+                                                                             An atomic, health-gated m/s/J frame drives bounded
+its model before detachment in 5/5 flights, whereas the eventless            model updates and continuous body-rate scheduling
+interface never cleared early and instead retained the loaded                (§III–IV).
+model or entered UNRESOLVED until physical evidence arrived.             2) Closed-loop lifecycle and safety validation: 31/31
+Against an L1-adaptive [3] NMPC baseline, the proposed method                eligible eventless flights complete eventless release with-
+provides comparable transient tracking, recovers faster (L1 lags
+by 8 % to 32 %), and retains interpretable physical parameters.
+                                                                             out observed post-release instability, while 23 valid
+These results demonstrate the eventless control interface and its            A/B pairs retain the external-event baseline and expose
+fail-safe semantics, while not claiming distribution-wide robust-            the cost of refusing its shortcut. A five-pair delayed-
+ness of the release detector.                                                detachment fault injection directly tests command/plant
+                                                                             disagreement: the event baseline clears early in 5/5
+                       I. I NTRODUCTION
+                                                                             flights and the eventless interface in 0/5. A targeted
+   Autonomous aerial delivery and in-flight aerial manipulation              ablation rejects an unsafe quantity-plus-residual branch
+subject a multirotor to abrupt changes in its own dynamics.                  that lacks moment evidence and adds an UNRESOLVED
+Grasping or releasing a parcel changes three coupled quantities              fail-safe state (§VI-A).
+at once: the total mass m (which rescales the thrust-to-              The runtime estimator consumes only motor speeds and odom-
+acceleration map and the hover throttle), the center of mass          etry; the sole geometric quantity not identified online is a weak
+(a thrust that no longer passes through the composite CoM             vertical-arm prior rz , which is structurally unobservable from
+produces a constant trim torque τ ≈ ∆r × f , significant even         the thrust-moment channel.
+for small offsets because f ≈ mg is large), and the rotational
+inertia (which slows the attitude response and effectively                                 II. R ELATED W ORK
+lowers the inner-loop bandwidth). The first channel is an outer-        Agile quadrotor flight. Geometric tracking on SE(3) [4]
+loop (position/thrust) problem; the latter two are inner-loop         and time-optimal flight [5] assume known, fixed inertial pa-
+(attitude/rate) problems. A controller that models the payload        rameters, which a payload event invalidates mid-flight.
+only as a scalar mass will mistrack or, for sufficiently heavy          Aerial manipulation and transport. Aerial robots that
+eccentric loads, destabilize.                                         grasp, carry and release objects are surveyed in [6]; dynamic
+   Explicit parameter estimation (EKF/MHE of mass, CoM,               aerial grasping, with explicitly modeled gripper dynamics, was
+inertia) is interpretable and can feed model-based constraints,       demonstrated in [7]. Load transportation, by grasping or cable
+but converges slowly across an abrupt change; lumped-                 suspension, is surveyed in [8]. Ours is the transport-and-release
+disturbance adaptation (L1-adaptive NMPC, INDI) reacts                subproblem: the payload is rigidly attached, so the controller
+fast but yields no physical model; learning-based estimators          must handle the resulting change in mass, inertia and centre
+typically need rich sensing or ground-truth data.                     of mass.
+   Control under changing payload. Adaptive and robust             with ṁ = 0 and ṡ = 0 within each window (N = 20, ∆t =
+designs—L1-adaptive NMPC [9], INDI [10]—treat the load             0.1 s). The published geometry is reconstructed as
+as a lumped disturbance and are the standard baselines for                                 s
+payload-carrying flight; L1-NMPC in particular reports large                        cxy = ,
+                                                                                           m
+tracking-error reductions under unknown load on aggressive                                 mB max{m − mB , 0}           (2)
+trajectories. A parallel line learns the residual dynamics in-                        µ=                         ,
+                                                                                                    m
+stead: [11] fits unmodeled aerodynamic effects with Gaussian                     ∆Jxx = ∆Jyy = µrz2 ,
+processes inside the MPC, which improves tracking without
+                                                                                                                      2
+yielding a named physical parameter either. Slung-load control     where rz is a weak rack prior. The small O(rxy        ) diagonal
+addresses the swinging-payload case explicitly [12], exploiting    terms and yaw increment are omitted in the deployed inter-
+differential flatness of the cable-suspended system; a rigidly     face. The hover-input baseline is recomputed from the live
+attached payload instead changes the vehicle’s own inertial        model and includes the eccentric trim torque, avoiding a stale
+parameters. A related proprioceptive line estimates the external   operating-point bias.
+wrench directly with momentum-based observers, enabling               Model-independent physical       inputs. We reconstruct the
+                                                                   collective thrust Tphys = k i ωi2 and the body torques from
+                                                                                                P
+collision detection and interaction control [13]. All of these
+recover a force/torque, not a physical parameter: they cannot,     rotor speeds and arm geometry. The quadratic coefficient k
+e.g., update a thrust-margin constraint or an inner-loop gain      is a static-thrust constant; it is known to lose validity under
+schedule from the estimate.                                        large induced inflow during fast translation [21], which we
+   MHE and online parameter estimation. Filter- and                do not model and which is one source of the estimator bias
+optimization-based estimators recover mass, inertia, and ge-       discussed in Sec. VII. Feeding the NMPC’s commanded input
+ometric parameters [14]–[16]. Standard MHE performance is          back into the estimator instead creates a self-consistent blind
+highly sensitive to the process/measurement weight matrices;       spot: at hover m ≈ T /g is self-consistent for any m, so the
+neural MHE (NeuroMHE) [17] learns to output these weights          mass is unobservable from the commanded thrust. The motor-
+online, resolving the bias–variance trade-off but estimating a     speed reconstruction breaks this because it is decoupled from
+lumped disturbance force rather than explicit named parame-        the controller/estimator state.
+ters.                                                                 Thrust-to-throttle inversion. The offboard collective-thrust
+                                                                   command is inverted to a normalized rotor command through
+   Residual-based       change     detection. Residual-based
+                                                                   the motor model T = kω 2 ; because k appears on both the
+fault/change detection (CUSUM and related methods [18])
+                                                                   forward and inverse paths, steady-state tracking is independent
+motivates the evidence checks used by the payload lifecycle
+                                                                   of the absolute thrust calibration.
+state machine. Our positioning: we do not learn dynamics
+                                                                      Continuous inner-loop scheduling. Model consistency in
+and add no sensing; every deployed signal derives from
+                                                                   the NMPC cannot by itself restore the PX4 rate loop’s lost
+motor speeds and odometry. This is a deliberate departure
+                                                                   bandwidth. The deployed path therefore maps the live inertia
+from learning-based MPC [19] and the broader safe-learning
+                                                                   increment to a body-rate-command scale, low-pass filters it,
+agenda [20], where a learned component absorbs the
+                                                                   applies target hysteresis and asymmetric rise/recovery slew
+model mismatch; here the mismatch is resolved into named
+                                                                   limits, and preserves 5 % command headroom before the final
+parameters that downstream constraints can consume.
+                                                                   saturation. It does not rewrite PX4 parameters. An attach-time
+                                                                   inertia-only bootstrap uses the rack’s 0.30 kg payload envelope
+      III. S YSTEM OVERVIEW AND P ROBLEM S ETUP                    for immediate safety, then fades out after persistent coherent
+                                                                   MHE evidence; neither payload mass nor s is injected by this
+   Architecture (Fig. 1). Three layers: Gazebo physics (with       bootstrap, and the drop path remains estimate-only.
+a magnetic DetachableJoint gripper producing genuine iner-
+                                                                    IV. O NLINE E STIMATION AND E VENTLESS A DAPTATION
+tia/CoM changes), the PX4 inner-loop rate controller, and a
+ROS 2 outer loop (NMPC + MHE). The outer loop publishes            A. Continuous payload interface and autonomous lifecycle
+a collective thrust and a body-rate setpoint; PX4 tracks the          The deployed arm B configuration keeps the nominal MHE
+body rate.                                                         stage weights fixed; it does not invoke residual-step window
+   Dynamics and parameterization. The NMPC model car-              reweighting. Release completion is decided separately from
+ries the runtime parameter vector p = [xref , m, ∆J, cxy ]         that optional weight-scheduling mechanism. The MHE pub-
+(extended with a lumped disturbance only for the L1 baseline).     lishes one atomic frame
+Thrust acting at the geometric center about the composite
+                                                                                         
+                                                                                   P = m, sx , sy , cx , cy ,
+CoM produces τcom = [−cy T, +cx T, 0]. The deployed MHE
+                                                                                          ∆Jxx , ∆Jyy , ∆Jzz ,                  (3)
+augments both composite mass and the horizontal first mass
+moment,                                                                                   Jxx , Jyy , Jzz , γ, h, a ,
+
+                                           T                      where γ is no-payload confidence, h is a health bit and a
+            xMHE = xT                           ∈ R16 ,
+                  
+                            m    sx   sy                           is solution age. Health requires a successful latest solve and
+                                                             (1)
+                 s = mP rxy ,                                      fresh odometry, motor-speed, and known-input streams. The
+             attach / drop notification
+                                                                                 ROS 2 OUTER LOOP
+                                                  NOT CONSUMED                                                  NMPC
+                                                                                          model update     p = [xref , m, cxy , J]   T
+                                                                ATOMIC FRAME                              state x ← odometry              PX4 RATE LOOP
+                     ONLINE MHE
+                                                                = {m, s, ΔJ, γ, h, a}
+                                                   qualified
+                  continuous estimation                                                                                                   fixed gains · 1 kHz
+                 estimate m, s = mP rxy , J                      atomic timestamp          rate scale    RATE SCHEDULER              ω⋆
+                                  Tphys , τphys                                                            ΔJ → rate scale                           motor cmd
+                                                                            γ, h, a
+                  ROTOR WRENCH                                                                                                            QUADROTOR
+                    (Tphys , τphys ) ← ωi                                             UNRESOLVED
+                                                                       no valid evidence → smooth brake-to-hover                            rigid payload
+                                                                                                                                           Gazebo · DART
+
+                                                                      only motor speeds ωi + odometry x
+
+
+
+Fig. 1. System architecture and information flow. The full pipeline consumes only motor speeds and odometry; one atomic, health-gated m/s/J frame drives
+both the NMPC model and continuous rate-command scheduling. No attach/drop notification enters this path.
+
+
+
+NMPC additionally checks local receive age; an unhealthy or                              payload existence, trim moment, and roll/pitch inertia without
+stale frame freezes the last accepted model and breaks the                               an external attachment geometry measurement.
+confidence persistence timer. Valid frames pass through a low-                              The release detector studies three physically distinct
+pass filter and separate slew limits for m, s, and ∆J before                             sources: (i) collapse of ρ = ∥s∥/∥s∥ref below 0.30, where
+every NMPC solve.                                                                        the loaded reference is formed from a healthy, low-dynamic,
+   Payload presence is an estimator-owned state, deliberately                            in-envelope interval and frozen before aggressive flight, with
+distinct from the legacy flag that means “an external attach                             an absolute ∥s∥ bound used only as a sanity check; (ii)
+notification was received.” A hysteretic EMPTY↔ LOADED                                   payload quantity, in which mass and algebraically derived
+machine uses sustained payload-mass evidence, with a direc-                              inertia count as one source; and (iii) a directional thrust-
+tional residual as a fast path, and a separate latch records that                        residual edge with finite validity. Within this unified detector a
+the present flight reliably entered LOADED. This latch prevents                          single source never releases. The slow path requires quantity-
+an empty-flight confidence value from consuming the later                                empty and moment-collapse evidence for five MHE frames.
+drop confirmation and prevents a transient mass dip during                               The release-only residual is deliberately separate from the
+a figure-eight from disarming the true release path.                                     4.4 N schedule-confirmation threshold and uses a signed two-
+   No-payload confidence is the product of smooth empty                                  window difference, ∆T = T post − T pre , with 0.3 s half-
+scores for payload quantity, first moment, and inertia. A                                windows. We evaluated two residual branches: fastA paired
+nonzero moment therefore vetoes a false empty decision even                              a normal 0.9 N residual with quantity-empty evidence, while
+if the mass estimate touches its lower bound. On accepted                                fastB paired a longer-persistent residual with moment collapse.
+release evidence, the estimator switches only the published                              A recorded figure-eight transient reached −1.69 N, larger in
+target of s to zero; the optimization state is not overwritten.                          magnitude than the −1.47 N step of the minimum supported
+The output filter consequently produces a continuous decay                               payload, so amplitude alone cannot separate the cases. Online
+rather than a geometric step. The controller marks a planned                             and offline evaluation call the same pure decision function.
+drop complete, resets its L1 state, and finishes recovery only                           The randomized smoke of Sec. VI-A rejects fastA; the unified
+after healthy confidence remains above 0.90 for 1.0 s; issuing                           detector therefore fires only on moment-collapse evidence
+the gripper command itself does none of these things.                                    (slow or fastB) and treats an unresolved timeout as unknown,
+                                                                                         never as proof of an empty vehicle. Two further routes remain
+B. Why the first mass moment is the essential state                                      in the final interface and are reported with their frequencies in
+                                                                                         Sec. VI-A: a mass-domain path counted only in low-dynamic
+   Estimating CoM offset alone is ill-conditioned at release:                            flight, and controller confirmation on the published no-payload
+physically s = mP rxy → 0, whereas rxy itself is undefined as                            confidence. Moment evidence must also originate from a fresh,
+mP → 0. In an earlier mass-only formulation, the optimizer                               successful MHE solve: the re-anchoring routine deliberately
+could suppress a phantom eccentricity only by driving total                              initializes s to zero after five consecutive solver failures, so
+mass below the bare-airframe value; 14 of 55 post-release                                that initialization is invalid evidence rather than a physical
+samples then pinned at the lower bound. Augmenting s                                     collapse.
+supplies the rotational channel directly and permits cxy = s/m
+without knowing the grasp-dependent horizontal offset. A                                                              V. S IMULATION S ETUP
+frozen-window inertia coefficient prevents the optimizer from
+using instantaneous mass as a free inertia knob, while the                                 PX4 SITL with Gazebo [22] (Harmonic), an x500 quadrotor,
+weak rz prior retains the dominant parallel-axis term. This                              and a magnetic DetachableJoint gripper that produces genuine
+structure is the minimum one that simultaneously represents                              inertia and CoM changes.
+                            carrying        brake to hover (unresolved)
+                            after release   reference                                                                                                                            truth
+                                                                                                  1.0
+                                                       hover
+
+
+
+
+                                                                                   sŷ / sytrue
+                    3 release                                          6                          0.5
+
+
+
+
+                                                                           z [m]
+                                                                       3
+                                                                                                  0.0
+                      −10                      1 grasp                 0
+                                                                   5                                            grasp         figure-8                                 release
+                                  x [m0]                       0
+                                                  10      −5         m]
+                                                                   y[                                   0           10   20              30         40         50          60    70
+                                                                                                                             time since NMPC handoff [s]
+Fig. 2.     Measured mission trajectory (simulator ground truth), two
+0.15 kg/2 m/s flights of the same batch: grasp (1), lift, then carry along the     Fig. 3. First mass moment against ground truth (W5, n = 7, each normalised
+stereo figure-eight (blue) against the nominal reference (pale dashed). After      by its own truth). Truth is reconstructed offline as mP ry from the simulator-
+the release command (3) one flight clears the moment vote in maneuver and          measured grasp offset and never reaches the estimator, which runs with no
+keeps tracking (orange); the other declares UNRESOLVED at its 12 s timeout         horizontal attachment geometry. ŝy is zero before grasp, rises with no attach
+and brakes to a hover (teal), confirming at 16.40 s. The two paths agree to        notification, holds near truth through the figure-eight, and decays to zero after
+within 0.12 m (median) before the timeout; loaded tracking RMS is 0.053 m,         release. Across all 14 usable flights the carry-phase estimate is biased low
+and 0.060 m after release.                                                         (slope 0.86; median +8.7%, same sign in 14/14); the release criterion uses
+                                                                                   the ratio ∥s∥/∥s∥ref and is insensitive to this scale bias.
+
+   The physical DetachableJoint gripper attaches a separate                                                      TABLE I
+rigid body and therefore couples mass, inertia and CoM                              PAIRED EXTERNAL - EVENT ABLATION . A RM A CLEARS THE MODEL FROM
+                                                                                       THE COMMAND BY CONSTRUCTION ; ARM B REQUIRES ESTIMATOR
+together. It supports the lifecycle, baseline, and safety claims
+                                                                                         EVIDENCE . T HE LAST ROW INJECTS A COMMAND / PHYSICAL -
+in the paper; no wrench-emulated mass-step result is retained.                       DETACHMENT MISMATCH ; “ EARLY ” MEANS MODEL CLEARING BEFORE
+   Task sequence (Fig. 2): approach (position control) →                                            THE D ETACHABLE J OINT IS REMOVED .
+
+NMPC hand-off and warmup hover → controlled descent →
+                                                                                                        condition             pairs A compl. B compl. early clear A/B
+active grasp enable → lift → figure-eight → phase-triggered
+                                                                                                        W3: 0.15 kg, 4 m/s      8             8/8        8/8           –
+release. We state the NMPC scope explicitly: it governs the                                             W4: 0.30 kg, 4 m/s      7             7/7        7/7           –
+grasp hover and the post-event adaptation phase; the approach                                           W5: 0.15 kg, 2 m/s      8             8/8        8/8           –
+controller is not part of the claim. Headless batch infrastruc-                                         nominal pooled         23         23/23      23/23              –
+ture with a GCS-heartbeat stand-in; the physical-effectiveness                                          W5 + 4 s hold          5           5/5        5/5           5/5 / 0/5
+
+timestamp t = 0 is defined by Tphys crossing the baseline, and
+in-band is defined as ±0.08 kg or 15 % of the step, whichever
+is larger.                                                                         A. Eventless grasp–release lifecycle
+   Real-time budget. Both optimizers are acados [23] SQP                              The controller issues the gripper-release command itself,
+solvers with merit backtracking and the HPIPM [24] QP                              but deliberately does not use that command to clear its
+solver. On one desktop core shared with Gazebo/PX4 SITL,                           payload model: a commanded release is not proof of physical
+the deployed 13-state NMPC (N = 20, 20 Hz) solves in 1.3 ms                        detachment. The proposed interface consumes only healthy,
+at the median and 2.2 ms at the 99th percentile (n = 1009),                        fresh m/s/J frames and completes a release only after its no-
+i.e. 2.6 % and 4.4 % of its 50 ms period. The deployed 16-state                    payload confidence remains above 0.90 for 1.0 s. We report
+first-moment MHE (N = 20, 10 Hz) solves in 9.2 ms at the                           every eventless flight in the frozen campaign that met the
+median, 24.6 ms at the 90th and 59.2 ms at the 99th percentile,                    pre-registered eligibility criteria: successful MHE payload
+with a 72.8 ms maximum (n = 3740, first 20 frames per flight                       evidence and survival to the release command. Exclusions are
+discarded), against a 100 ms period—roughly 7× the 1.4 ms                          reported below and are not absorbed into the completion result.
+median of the historical mass-only estimator. This meets the                             a) Paired external-event baseline: We retain the pre-
+deadline in simulation, but the tail margin is narrow, so we                       registered paired ablation rather than selecting arm B alone
+make no onboard-headroom claim; that requires measurement                          after the comparison. Arm A is an external-event baseline:
+on the target computer. Setpoints are published at 50 Hz by                        it treats the release command as the detachment event and
+interpolating the latest prediction.                                               immediately resets payload geometry and inner-loop scaling.
+                                                                                   Arm B is the proposed eventless interface above. A pair
+                                 VI. R ESULTS                                      enters this comparison only when both arms satisfy the same
+                                                                                   eligibility criteria. There are 23 such pairs (W3/W4/W5:
+   Provenance. The lifecycle cohort uses the final 16-state first-                 8/7/8); both arms complete 23/23 releases with no observed
+moment interface. The baseline matrix was recorded with the                        post-release instability (Table I). Arm A has zero confirmation
+earlier mass-only 14-state MHE and supports only the bounded                       delay by definition, whereas arm B waits for physical evidence.
+baseline comparison stated below. In Table III, truth gives                        This comparison therefore quantifies the cost of refusing the
+the NMPC the attachment geometry measured in simulation,                           event shortcut; it is not evidence that arm A detects physical
+online replaces the CoM offset with a motor-torque-inversion                       detachment.
+estimate, and l1 is the L1-adaptive baseline.                                         To exercise the mismatch that motivates the paper, a fault
+                                                                                                              (b) Recorded grasp–carry–release flight
+                                  (a) Measured horizontal path
+
+
+
+
+                                                                       z [m]
+                                                                                   5.0   lift       carry                              release
+                      5.0                                                          2.5
+
+                                                                                                  20                40                   60                    80                  100
+    relative y [m]
+
+
+                      2.5
+                                                   carry starts
+
+
+
+
+                                                                       mass [kg]
+                                                                                   2.2
+                      0.0
+                                                                                   2.1
+
+                     −2.5                                                                         20                40                   60                    80                  100
+
+
+
+
+                                                                       error [m]
+                     −5.0                                                          0.5                                                           confirmed +4.46 s
+                                                                                   0.0
+                            −10    −5          0              5   10
+                                                                                                  20                40                   60                    80                  100
+                                         relative x [m]
+                                                                                                                  time since NMPC handoff [s]
+
+Fig. 4. One final-batch W5 eventless flight (run 20260911 033026). Left: the measured horizontal path (blue while carrying, orange after release) against the
+nominal reference including its amplitude ramp (grey dashed). Right: recorded height, controller-consumed mass estimate, and position-error norm through
+grasp, lift, carrying, release command, and confirmation. This flight confirms in maneuver, 4.46 s after the command; it illustrates one execution and does not
+replace the cohort statistics in Table II.
+
+
+
+injector received the normal release command but retained                                                                     TABLE II
+the physical DetachableJoint for a median 4.01 s. Across five                                     E VENTLESS RELEASE COMPLETION AND CONFIRMATION DELAY ( ALL
+                                                                                                   ELIGIBLE EVENTLESS FLIGHTS ). D ELAY RUNS FROM THE RELEASE
+valid W5 pairs, arm A cleared its payload model at the                                           COMMAND TO THE FRAME WHERE THE NO - PAYLOAD CONFIDENCE HAS
+command in every flight—a median 4.01 s before physical                                         HELD FOR THE FULL 1.0 s, SO IT INCLUDES THAT HOLD . T HE TWO DELAY
+detachment—whereas arm B never cleared before detachment.                                        COLUMNS ARE DISTINCT CONTROL PATHS AND MUST NOT BE POOLED .
+
+Arm B entered UNRESOLVED in 4/5 flights and completed                                                                                                 delay median [IQR]
+confirmation a median 12.45 s after detachment; the remain-
+                                                                                                  condition              n    compl.          in-maneuver            via brake-to-hover
+ing flight confirmed 3.00 s after detachment without entering
+                                                                                                  W3: 0.15 kg, 4 m/s 9         9/9      2.78 s [2.76, 2.90]      16.56 s [16.46, 16.60]
+UNRESOLVED . Median position-error peaks during the four-                                         W4: 0.30 kg, 4 m/s 11       11/11     7.08 s [6.96, 7.50]      16.40 s [15.76, 16.60]
+second hold were 0.071 m (A) and 0.068 m (B), so we claim                                         W5: 0.15 kg, 2 m/s 11       11/11     3.46 s [3.16, 4.36]      16.48 s [16.40, 16.50]
+a semantic safety distinction, not a tracking advantage. Twelve                                   pooled                 31   31/31     3.46 s [2.86, 4.46]      16.48 s [16.36, 16.60]
+arm-runs were attempted: one arm A run never armed PX4 and                                            Pooled completion 100 %, two-sided 95 % Clopper–Pearson CI
+one otherwise eligible arm B run was consequently unpaired,                                     [88.8 %, 100 %]; overall delay max 16.70 s. The share of flights confirming
+                                                                                                  only after the brake-to-hover maneuver is 56 % (W3), 64 % (W4), 55 %
+leaving the five reported valid pairs. Every included run had                                         (W5) and 58 % pooled; the complement confirms in maneuver.
+an independent Gazebo DETACHED state record.
+   The eventless interface completed autonomous release con-
+firmation in 31/31 eligible flights with no observed post-                                      payload confidence alone, as detailed below. Four of the 31
+release instability (Table II). The two-sided 95 % Clopper–                                     load declarations were raised by the estimator’s own direc-
+Pearson interval is [88.8 %, 100 %], so this result demonstrates                                tional thrust-residual evidence rather than by sustained mass
+closed-loop feasibility rather than a zero failure rate.                                        evidence; no external grasp signal was consumed. The pub-
+   The confirmation delay is bimodal, and the two modes are                                     lished first moment decayed continuously rather than stepping
+two distinct control paths rather than a spread within one path.                                to zero, confirming that recovery used the intended estimator
+In 42 % of flights the no-payload confidence crosses threshold                                  interface rather than the controller’s release command.
+while the vehicle is still flying the figure-eight and confirma-                                      b) Safety boundary: The 31/31 batch validates the in-
+tion completes in 3.46 s (median). In the remaining 58 % no                                     terface once its release evidence is accepted; it does not
+moment vote is available in maneuver—ŝ has drifted under                                       validate a universally robust detector. We therefore tested
+sustained excitation or the frozen reference never formed—                                      three physically distinct evidence sources: payload quantity,
+so the system reaches its 12 s timeout, declares the payload                                    directional thrust residual, and collapse of the normalized
+state UNRESOLVED, and executes a 3 s smooth brake to hover;                                     first moment. A fast branch combining quantity and residual
+deceleration alone restores observability and confirmation then                                 without moment evidence declared release prematurely in
+completes at 16.48 s (median). Reporting one median across                                      3/9 randomized flights during a 4 m/s figure-eight. Loaded-
+both paths would be misleading, so Table II separates them.                                     flight mass estimates could remain below the nominal empty
+   In 26 of the 31 flights the payload-presence machine made                                    threshold for up to 48 s, while a dynamic thrust excursion
+exactly two transitions—one load declaration at grasp and                                       reached −1.69 N, exceeding the −1.47 N weight change of
+one empty declaration at release—with no spurious carrying-                                     the smallest payload. Neither source is therefore reliable on
+phase transition. In the five remaining flights, all of which                                   its own in this regime.
+confirmed in maneuver, the estimator’s presence machine                                            We rejected that branch: the estimator’s unified release
+never declared EMPTY within the logged window (over 40 s                                        detector now fires only on fresh, successful moment-collapse
+past confirmation); confirmation rested on the published no-                                    evidence (the slow and fastB paths); the legacy mass-domain
+route that remains is quantified below. Ambiguous cases                                        TABLE III
+enter UNRESOLVED; a timeout does not clear the model or            T HREE - WAY METHOD × SCENARIO MATRIX (n = 5): POS ERR PEAK [ M ] /
+                                                                                             RECOVERY [ S ].
+reset adaptive state. In a subsequent 12-flight smoke test, no
+flight declared release before the command: all 11 confirmed             cell (mass/ecc)      truth         online            l1
+releases passed through moment-gated paths (fastB 9, slow
+                                                                         0.2 / 0.05        0.806 / 4.28   0.768 / 3.70   0.821 / 4.26
+2) with a median detector delay of 1.9 s, and one remained               0.2 / 0.10        0.794 / 3.62   0.810 / 3.92   0.812 / 4.24
+safely unresolved. That smoke preceded the frozen moment                 0.3 / 0.05        0.834 / 3.56   0.837 / 3.72   0.883 / 4.90
+reference.                                                               0.3 / 0.10        1.011 / 3.64   0.876 / 3.88   0.891 / 4.54
+      c) Release paths in the final batch: The moment-gated
+detector is not the only route to confirmation in the final
+code, and the 31-flight batch of Table II exercised three. The     to 0.05 m; L1 is higher in the two low-eccentricity cells
+controller confirms release when the published no-payload          (p = .008, .012 uncorrected, not surviving correction over
+confidence—the product of mass, first-moment and inertia           eight tests), so we claim no transient advantage. (ii) Against
+“empty” scores, where the moment score uses an absolute            the deployed online estimate, L1 recovers 8 % to 32 % slower
+bound on ∥s∥ rather than the frozen-reference ratio—holds          (median 16 %; significant in three of four cells); the mecha-
+above 0.90 for 1.0 s on healthy, fresh frames. (i) In 19/31        nism is that its compensation low-pass cutoff ωc is bounded by
+flights (W3 9/9, W4 1/11, W5 9/11) the moment-gated detector       closed-loop stability (0.5 stable, 1.0 unstable on this platform),
+declared release first and the confidence followed. (ii) In 7/31   a bandwidth wall that explicit estimation does not face. (iii) L1
+flights, all in W4, the flights that reached UNRESOLVED,           yields no interpretable m/cxy and still requires the same class
+the frozen moment reference was never established because          prior for gain scaling; it is a translational 3-DoF augmentation
+its low-dynamic, in-envelope sampling window never filled,         driven by Tphys (the commanded thrust self-excites).
+so the ratio test never ran; the confidence crossed threshold
+during or shortly after the brake to hover, and the estimator’s               VII. L IMITATIONS AND F UTURE W ORK
+mass-domain path (mP < 0.030 kg for 20 frames, counted
+only in low-dynamic flight) declared release 0.9–3.1 s later.         All system-level evidence is presently SITL-only. Hardware
+(iii) In 5/31 flights (three in W4, two in W5), all confirmed      migration replaces simulated motor speeds with ESC telemetry
+in maneuver, the reference was likewise never established and      and must re-identify thrust/torque coefficients, noise floors,
+the estimator never declared release; confirmation rested on the   timing, and gripper compliance before free flight. The vertical
+confidence alone. No flight in any path declared release before    arm rz is unobservable from the thrust-moment channel and
+the command. The supported safety conclusion is therefore          remains a weak rack prior; the sx /pitch channel is noisier
+bounded: the smoke validates the moment-gated detector,            than sy /roll. The deployed diagonal inertia approximation also
+                                                                                         2
+while the final batch shows that 12/31 confirmations did not       drops the small O(rxy   ) and yaw-inertia terms.
+pass through it. Broader detector robustness remains outside          Release-detector boundary. First-moment augmentation is
+the present claim.                                                 now part of the default path. The safety ablation and three
+   The cohort is conditional on successful MHE payload             final-batch confirmation paths are reported in Sec. VI-A; 31/31
+evidence and survival to the release command. Of 40 event-         completions do not establish distribution-wide detector robust-
+less flights, 31 were eligible: six crashed before release and     ness. In 12/31 flights the healthy, low-dynamic, in-envelope
+three lacked MHE payload evidence. The available logs can-         reference window never filled after the LOADED declaration, so
+not distinguish physical capture failure from estimator non-       the moment-ratio test never ran. Out-of-envelope ŝ samples are
+recognition in those three cases. Confirmation delay is a          excluded from moment votes but still reach the controller’s cxy
+median 3.46 s when it clears in maneuver and 16.48 s when          through filtering and slew limits. Reliable reference formation
+the vehicle must first brake to hover.                             therefore remains necessary for a robust autonomous release
+   Across the paired campaign there were 81 attempts: arm A        detector.
+contributed 41 attempts (30 eligible, 11 pre-release crashes),        All reported release batches explicitly enable the release-
+and arm B contributed 40 (31 eligible, six pre-release crashes     evidence path. Its built-in default is off, under which every
+and three payload-evidence failures). Only the 23 pairs in         flight ends UNRESOLVED, so deployment requires an explicit
+which both arms were eligible enter Table I; all 31 eligible       enable plus startup validation of the configuration.
+B flights enter Table II. These are different estimands and are       First-moment drift. Sustained figure-eight excitation can
+not substituted for one another. Tail-window tracking is not       increase ∥ŝ∥ from 0.012 kg m to 0.031 kg m; withholding mo-
+compared: arm B brakes to hover after an unresolved timeout,       ment evidence then delays confirmation. Deceleration restored
+while arm A continues the figure-eight.                            the vote within 3.3 s to 3.4 s in the affected test flights.
+                                                                   Together with missing-reference cases, this yields the brake-
+B. Baselines and ablations                                         to-hover delays in Table II. The online envelope-exceedance
+   L1-NMPC three-way matrix (Table III). {truth, online,           counter ovr correlates with this outcome at 4 m/s (in-
+l1} × {0.2, 0.3} kg × {0.05, 0.10} m, n = 5, 60/60 runs            maneuver confirmation 7/8 for zero exceedances versus 1/12
+stable, zero divergence. (i) Within-cell transient peaks agree     otherwise; Fisher p < 0.001), but misses all six delayed 2 m/s
+cases. Earlier exit from the maneuver remains unimplemented                        [6] A. Ollero, M. Tognon, A. Suarez, D. Lee, and A. Franchi, “Past,
+and requires validation.                                                               present, and future of aerial robotic manipulators,” IEEE Transactions
+                                                                                       on Robotics, vol. 38, no. 1, pp. 626–645, 2022.
+   Selection and pre-release failures. The system results con-                     [7] J. Thomas, G. Loianno, J. Polin, K. Sreenath, and V. Kumar, “Toward
+dition on successful payload evidence and survival to the                              autonomous avian-inspired grasping for micro aerial vehicles,” Bioin-
+release command. Of 40 eventless flights, 31 met these criteria;                       spiration & Biomimetics, vol. 9, no. 2, p. 025010, 2014.
+                                                                                   [8] D. K. D. Villa, A. S. Brandão, and M. Sarcinelli-Filho, “A survey on load
+six crashed before release and three lacked MHE payload                                transportation using multirotor UAVs,” Journal of Intelligent & Robotic
+evidence. Two crashes occurred before the figure-eight in                              Systems, vol. 98, no. 2, pp. 267–296, 2020.
+W5, whereas four were loaded figure-eight divergences in W4                        [9] D. Hanover, P. Foehn, S. Sun, E. Kaufmann, and D. Scaramuzza,
+                                                                                       “Performance, precision, and payloads: Adaptive nonlinear MPC for
+(0.30 kg, 4 m/s), an operating boundary of that condition. We                          quadrotors,” IEEE Robotics and Automation Letters, vol. 7, no. 2, pp.
+therefore claim no improvement in grasp, lift, or figure-eight                         690–697, 2022.
+stability; attachment observability and pre-release instability                   [10] E. J. J. Smeur, Q. Chu, and G. C. H. E. de Croon, “Adaptive incremental
+                                                                                       nonlinear dynamic inversion for attitude control of micro air vehicles,”
+require separate experiments.                                                          Journal of Guidance, Control, and Dynamics, vol. 39, no. 3, pp. 450–
+   A sustained vertical up/downdraft remains intrinsically con-                        461, 2016.
+founded with a payload change on a collective-thrust-only                         [11] G. Torrente, E. Kaufmann, P. Foehn, and D. Scaramuzza, “Data-driven
+                                                                                       MPC for quadrotors,” IEEE Robotics and Automation Letters, vol. 6,
+residual; the existing wind ablation characterizes this limita-                        no. 2, pp. 3769–3776, 2021.
+tion but does not remove it.                                                      [12] K. Sreenath, N. Michael, and V. Kumar, “Trajectory generation and
+   Simulator fidelity. (i) gz-sim Harmonic cannot change a                             control of a quadrotor with a cable-suspended load — a differentially-
+                                                                                       flat hybrid system,” in IEEE International Conference on Robotics and
+link’s inertia at runtime in a way the physics adopts (issue                           Automation (ICRA), 2013, pp. 4888–4895.
+#2733), so the wrench mechanism emulates only a transla-                          [13] T. Tomić, C. Ott, and S. Haddadin, “External wrench estimation, colli-
+tional mass step; every inertia, CoM, or eccentricity claim                            sion detection, and reflex reaction for flying robots,” IEEE Transactions
+                                                                                       on Robotics, vol. 33, no. 6, pp. 1467–1482, 2017.
+comes from the DetachableJoint platform (§V). (ii) The pay-                       [14] J. Svacha, J. Paulos, G. Loianno, and V. Kumar, “IMU-based inertia es-
+load is rigidly attached; gripper compliance and pendulum                              timation for a quadrotor using Newton–Euler dynamics,” IEEE Robotics
+modes are not modeled. Neither affects which signals the                               and Automation Letters, vol. 5, no. 3, pp. 3861–3867, 2020.
+                                                                                  [15] V. Wüest, V. Kumar, and G. Loianno, “Online estimation of geometric
+estimator consumes.                                                                    and inertia parameters for multirotor aerial vehicles,” in IEEE Interna-
+                                                                                       tional Conference on Robotics and Automation (ICRA), 2019, pp. 1884–
+                          VIII. C ONCLUSION                                            1890.
+                                                                                  [16] C. Böhm, M. Scheiber, and S. Weiss, “Filter-based online system-
+   We presented an eventless payload-adaptive NMPC in-                                 parameter estimation for multicopter UAVs,” in Robotics: Science and
+terface driven by motor speeds and odometry. An atomic,                                Systems (RSS), 2021, paper 087, DOI 10.15607/RSS.2021.XVII.087.
+health-gated m/s/J frame supports continuous model and                            [17] B. Wang, Z. Ma, S. Lai, and L. Zhao, “Neural moving horizon estimation
+                                                                                       for robust flight control,” IEEE Transactions on Robotics, vol. 40, pp.
+body-rate adaptation without treating release commands as                              639–659, 2024, open source: RCL-NUS/NeuroMHE.
+detachment evidence. The interface completed 31/31 eligible                       [18] M. Basseville and I. V. Nikiforov, Detection of Abrupt Changes: Theory
+eventless SITL flights without observed post-release instabil-                         and Application. Prentice-Hall, 1993.
+                                                                                  [19] L. Hewing, K. P. Wabersich, M. Menner, and M. N. Zeilinger, “Learning-
+ity, conditional on attachment and pre-release survival. The                           based model predictive control: Toward safe learning in control,” Annual
+safety ablation rejects quantity-plus-residual clearing without                        Review of Control, Robotics, and Autonomous Systems, vol. 3, pp. 269–
+moment evidence; the final batch also exercised mass-domain                            296, 2020.
+                                                                                  [20] L. Brunke, M. Greeff, A. W. Hall, Z. Yuan, S. Zhou, J. Panerati, and
+and confidence-only confirmation paths. Under a 4 s delayed-                           A. P. Schoellig, “Safe learning in robotics: From learning-based control
+detachment fault, the external-event baseline cleared its model                        to safe reinforcement learning,” Annual Review of Control, Robotics,
+before physical release in 5/5 valid pairs, whereas the eventless                      and Autonomous Systems, vol. 5, pp. 411–444, 2022.
+                                                                                  [21] M. Bangura and R. Mahony, “Nonlinear dynamic modeling for high
+interface did so in 0/5 and remained conservative until esti-                          performance control of a quadrotor,” in Australasian Conference on
+mator evidence arrived. These results demonstrate interface                            Robotics and Automation (ACRA), 2012.
+feasibility, not a universally robust detector. Reliable moment-                  [22] N. Koenig and A. Howard, “Design and use paradigms for Gazebo,
+                                                                                       an open-source multi-robot simulator,” in IEEE/RSJ International Con-
+reference formation and hardware validation remain open.                               ference on Intelligent Robots and Systems (IROS), vol. 3, 2004, pp.
+                                                                                       2149–2154.
+                              R EFERENCES                                         [23] R. Verschueren, G. Frison, D. Kouzoupis, J. Frey, N. van Duijkeren,
+ [1] C. V. Rao, J. B. Rawlings, and D. Q. Mayne, “Constrained state                    A. Zanelli, B. Novoselnik, T. Albin, R. Quirynen, and M. Diehl,
+     estimation for nonlinear discrete-time systems: stability and moving              “acados—a modular open-source framework for fast embedded optimal
+     horizon approximations,” IEEE Transactions on Automatic Control,                  control,” Mathematical Programming Computation, vol. 14, no. 1, pp.
+     vol. 48, no. 2, pp. 246–258, 2003.                                                147–183, 2022.
+ [2] L. Meier, D. Honegger, and M. Pollefeys, “PX4: A node-based mul-             [24] G. Frison and M. Diehl, “HPIPM: a high-performance quadratic
+     tithreaded open source robotics framework for deeply embedded plat-               programming framework for model predictive control,” in IFAC-
+     forms,” in IEEE International Conference on Robotics and Automation               PapersOnLine (21st IFAC World Congress), vol. 53, no. 2, 2020, pp.
+     (ICRA), 2015, pp. 6235–6240.                                                      6563–6569.
+ [3] N. Hovakimyan and C. Cao, L1 Adaptive Control Theory: Guaranteed
+     Robustness with Fast Adaptation. SIAM, 2010.
+ [4] T. Lee, M. Leok, and N. H. McClamroch, “Geometric tracking control
+     of a quadrotor UAV on SE(3),” in IEEE Conference on Decision and
+     Control (CDC), 2010, pp. 5420–5425.
+ [5] P. Foehn, A. Romero, and D. Scaramuzza, “Time-optimal planning for
+     quadrotor waypoint flight,” Science Robotics, vol. 6, no. 56, p. eabh1221,
+     2021.
+
