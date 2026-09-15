@@ -350,6 +350,7 @@ def _replay_real(step_on, T, att=None, release_thresh=2.0):
     s._mass_observable = mn.MHENode._mass_observable.__get__(s)
     s.attach_offset = np.array([0.006, -0.093, -0.516])
     s.resid_release_geom = True
+    s.resid_confirm_enable = True
     s.resid_step_enable = step_on
     s.resid_step_half = 3
     s.resid_step_thresh = 1.0

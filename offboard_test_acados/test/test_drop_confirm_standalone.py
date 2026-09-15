@@ -183,6 +183,8 @@ class _NMPCStub:
         self.gripper_mode = True
         self.grip_drop_pending = False
         self.grip_drop_done = False
+        # 2026-09-15:acados_nmpc_node 新增故障注入开关(默认关),_grip_drop_phase 会读它
+        self.grip_uncommanded_loss = False
         self.grip_dropped = False
         self.now_sec = 100.0
         # unresolved 路径(2026-09-05)

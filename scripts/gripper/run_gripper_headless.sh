@@ -135,6 +135,8 @@ EVAL_TRUE_PAYLOAD_D=$(_f2d "${EVAL_TRUE_PAYLOAD_MASS:-$GRIP_PAYLOAD_KG}")
 L1_A_GAIN_D=$(_f2d "${L1_A_GAIN:-10.0}")
 L1_OMEGA_C_D=$(_f2d "${L1_OMEGA_C:-0.5}")
 GRIP_DROP_AFTER_D=$(_f2d "${GRIP_DROP_AFTER:-0.0}")
+# 仅供 command/detachment mismatch 故障注入；默认 0 保持历史物理行为。
+GRIP_DETACH_DELAY_D=$(_f2d "${GRIP_DETACH_DELAY_SEC:-0.0}")
 # DROP_UNRES_TIMEOUT:卸载未证实(UNRESOLVED)兜底的超时 [s],默认 12.0 与节点一致。
 # 暴露出来是为了**构造回归轮**:调到 2s 可让每一轮都走 UNRESOLVED 路径,把
 # 自然发生率 ~50% 提到接近 100%,n=6 就有决定性功效(见 run_drop_unresolved_ab.sh)。
@@ -282,6 +284,27 @@ sed -e "s|<mass>[0-9.]*</mass>|<mass>$GRIP_PAYLOAD_KG</mass>|" \
     -e "s|<iyy>[0-9.]*</iyy>|<iyy>$BOX_I</iyy>|" \
     -e "s|<izz>[0-9.]*</izz>|<izz>$BOX_I</izz>|" \
     "$WORLD_SRC" > "$PX4_WORLDS/gripper_test.sdf"
+# 部分丢失实验(2026-09-15):GRIP_NBOX=4 时把单箱换成 4 个 GRIP_BOX_KG 小箱(2x2 排布),
+# 并把 proximity 的目标列表扩成 4 个。默认不设 = 历史单箱世界逐字不变。
+PROX_TARGETS_ARG=""
+if [ "${GRIP_NBOX:-1}" = "4" ]; then
+  python3 "$WS/src/scripts/gripper/make_multibox_world.py" "$WORLD_SRC" \
+      "$PX4_WORLDS/gripper_test.sdf" 4 "${GRIP_BOX_KG:-0.05}" || exit 1
+  # ⚠️ 必须走第二个 --params-file:gripper_params.yaml 里按节点名写的 targets/r_xy
+  # 优先级高于全局 -p,-p 覆盖会被静默忽略(09-15 冒烟轮实测 targets 仍为 ['box'])。
+  PROX_OVERRIDE_YAML="$RUNDIR/grip_prox_override_$STAMP.yaml"
+  cat > "$PROX_OVERRIDE_YAML" <<YAML
+proximity_gripper_node:
+  ros__parameters:
+    targets: ["box", "box2", "box3", "box4"]
+    r_xy: $(python3 -c "print(f'{$GRIP_ECC_Y + $GRIP_ATTACH_TOL:.3f}')")
+YAML
+  PROX_TARGETS_ARG="--params-file $PROX_OVERRIDE_YAML"
+fi
+PROX_SCHED_ARG=()
+if [ -n "${GRIP_PARTIAL_LOSS_SCHEDULE:-}" ]; then
+  PROX_SCHED_ARG=(-p "partial_loss_schedule:='${GRIP_PARTIAL_LOSS_SCHEDULE}'")
+fi
 
 # 1. PX4 SITL + gz(headless,不开终端窗口)
 # stdout 经护栏消费者:前 PX4_LOG_CAP 存文件(排错用),超出的全吞进 /dev/null。
@@ -316,6 +339,8 @@ sleep 2
 nohup ros2 run offboard_test_acados proximity_gripper_node --ros-args \
     --params-file "$PKG/config/gripper/gripper_params.yaml" \
     -p drone_model:=x500_0 -p r_xy:=$R_XY -p h_min:=0.35 -p h_max:=0.60 \
+    -p detach_delay_sec:=$GRIP_DETACH_DELAY_D \
+    $PROX_TARGETS_ARG "${PROX_SCHED_ARG[@]}" \
     > "$RUNDIR/grip_proximity_$STAMP.log" 2>&1 &
 
 # 6. (方案a)gripper enable 不再由脚本持续发——改由 NMPC 节点在
@@ -366,6 +391,7 @@ nohup ros2 run offboard_test_acados acados_nmpc_node --ros-args \
     -p grip_dyn_dz:=$GRIP_DYN_DZ_D \
     -p traj_scale_weights:=${TRAJ_SCALE_WEIGHTS:-false} \
     -p grip_drop_at_fig8_tip:=${GRIP_DROP_AT_TIP:-false} \
+    -p grip_uncommanded_loss:=$(_b "${GRIP_UNCOMMANDED_LOSS:-false}") \
     -p attach_window_sec:=$ATTACH_WINDOW_SEC_D \
     -p tau_lumped_enable:=${NMPC_TAU_LUMPED:-false} \
     -p xi_max:=$XI_MAX_D -p xi_omega_c:=$XI_OMEGA_C_D \
@@ -483,6 +509,10 @@ nohup ros2 run offboard_test_acados mhe_node --ros-args \
     -p c_xy_from_moment:=$(_b "${MHE_C_XY_FROM_MOMENT:-true}") \
     -p maneuver_gate_enable:=$(_b "${MHE_MANEUVER_GATE:-false}") \
     -p resid_release_geom:=$(_b "${MHE_RESID_RELEASE_GEOM:-true}") \
+    -p resid_confirm_enable:=$(_b "${MHE_RESID_CONFIRM:-true}") \
+    -p release_arm_on_command:=$(_b "${MHE_RELEASE_ARM_ON_COMMAND:-false}") \
+    -p thrust_map_fault_gain:=$(_f2d "${MHE_THRUST_FAULT_GAIN:-1.0}") \
+    -p motor_speed_noise_frac:=$(_f2d "${MHE_MOTOR_NOISE:-0.0}") \
     -p resid_step_enable:=$(_b "${MHE_RESID_STEP:-false}") \
     -p resid_step_half:=${MHE_RESID_STEP_HALF:-3} \
     -p resid_step_thresh:=$(_f2d "${MHE_RESID_STEP_TH:-1.0}") \

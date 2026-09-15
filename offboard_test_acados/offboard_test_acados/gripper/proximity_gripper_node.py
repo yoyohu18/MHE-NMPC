@@ -10,6 +10,8 @@
   - 收到外部"夹取使能"信号 /gripper/enable (std_msgs/Bool = true)
 
 detach:收到 /gripper/release (std_msgs/Bool = true),或 enable 拉低时释放。
+`detach_delay_sec` 可仅在故障注入实验中延迟真正的 DetachableJoint 移除；
+默认 0.0 s，因此不改变正常飞行或历史实验。
 
 位姿来源 / attach 命令出口都走 **gz-transport 直连**,不经 ros_gz_bridge:
   - 订阅 gz 的 /world/<world>/pose/info(gz.msgs.Pose_V),里面每个 Pose 自带
@@ -91,6 +93,12 @@ class ProximityGripperNode(Node):
         self.declare_parameter('detach_topic', '/gripper/detach')
         self.declare_parameter('enable_topic', '/gripper/enable')
         self.declare_parameter('release_topic', '/gripper/release')
+        self.declare_parameter('detach_delay_sec', 0.0)
+        # 部分丢失故障注入(2026-09-15,默认空=关):"box4:45,box3:80,box2:115" 表示首次
+        # ATTACH 后 45 s 松开 box4 ……;前缀 "dry:" 只打标记不松开(对照臂)。被松开的
+        # 目标永久拉黑、不再重吸(否则 ~40 ms 就被吸回,见 on_release 注释)。
+        # NMPC/MHE 不收任何信号 —— 这是非计划的部分载荷丢失。
+        self.declare_parameter('partial_loss_schedule', '')
 
         g = self.get_parameter
         world = g('world_name').value
@@ -104,6 +112,19 @@ class ProximityGripperNode(Node):
         self.v_rel_max = float(g('v_rel_max').value)
         self.reject_log_period = float(g('reject_log_period').value)
         self.attach_timeout_warn = float(g('attach_timeout_warn').value)
+        self.detach_delay_sec = max(
+            0.0, float(g('detach_delay_sec').value))
+        sched = str(g('partial_loss_schedule').value).strip()
+        self.partial_dry = sched.startswith('dry:')
+        if self.partial_dry:
+            sched = sched[4:]
+        self.partial_schedule = []
+        for item in filter(None, (x.strip() for x in sched.split(','))):
+            tgt, t = item.split(':')
+            self.partial_schedule.append((float(t), tgt.strip()))
+        self.partial_schedule.sort()
+        self._first_attach_mono = None
+        self._blocked = set()
         self._last_reject = None        # 最近一次拒绝的原因串,或 None
         self._last_reject_log = 0.0     # 上次打拒绝日志的墙钟
         self._enable_stamp = None       # 收到 enable=true 的墙钟
@@ -114,6 +135,7 @@ class ProximityGripperNode(Node):
         for t in self.targets:
             self.poses[t] = TrackedPose()
         self.attached = set()
+        self._pending_detach = {}
 
         # gz-transport:订阅 pose/info,广告 attach/detach。
         self.gz = gztransport.Node()
@@ -145,7 +167,9 @@ class ProximityGripperNode(Node):
             f'proximity_gripper ready (gz-transport): drone={self.drone_model} '
             f'targets={self.targets} pose_topic={self.pose_topic} '
             f'r_xy={self.r_xy} h=[{self.h_min},{self.h_max}] '
-            f'v_rel_max={self.v_rel_max}')
+            f'v_rel_max={self.v_rel_max} '
+            f'detach_delay={self.detach_delay_sec:.2f}s '
+            f'partial_loss={"dry:" if self.partial_dry else ""}{self.partial_schedule}')
 
     # --- gz-transport 回调(gz 线程)---
     def on_pose_gz(self, msg: Pose_V):
@@ -168,22 +192,30 @@ class ProximityGripperNode(Node):
         if not self.enabled:
             self._enable_stamp = None
             for tgt in list(self.attached):
-                self.send_detach(tgt)
+                self.schedule_detach(tgt, 'enable=false')
 
     def on_release(self, msg: Bool):
         if msg.data:
+            # 2026-09-15:释放同时关闭重吸。原实现只 detach 不动 enabled,tick() 在
+            # box 刚脱开(仍与机体同速、在吸附范围内)时 ~40-80ms 就把它重新吸上
+            # (08-30 与 09-15 两次实测),推力无阶跃 = 注入的意外脱落根本没发生。
+            # 该话题全仓无其他发布方(历史批次均改用 enable=false 规避),口径不受影响;
+            # 与 enable=false 的区别只在于 NMPC/MHE 订阅不到它(意外脱落注入要的正是这点)。
+            self.enabled = False
             for tgt in list(self.attached):
-                self.send_detach(tgt)
+                self.schedule_detach(tgt, 'release=true')
 
     # --- 主判定 ---
     def tick(self):
+        self.flush_pending_detach()
+        self._run_partial_schedule()
         if not self.enabled:
             return
         drone = self.poses.get(self.drone_model)
         if drone is None or drone.pos is None:
             return
         for tgt in self.targets:
-            if tgt in self.attached:
+            if tgt in self.attached or tgt in self._blocked:
                 continue
             tp = self.poses.get(tgt)
             if tp is None or tp.pos is None:
@@ -193,6 +225,51 @@ class ProximityGripperNode(Node):
                 self.publish_offset(drone, tp)
             else:
                 self._log_reject(tgt)
+
+    def _run_partial_schedule(self):
+        if not self.partial_schedule or self._first_attach_mono is None:
+            return
+        el = time.monotonic() - self._first_attach_mono
+        while self.partial_schedule and el >= self.partial_schedule[0][0]:
+            t, tgt = self.partial_schedule.pop(0)
+            if self.partial_dry:
+                self.get_logger().warn(
+                    f'PARTIAL LOSS (dry) "{tgt}" at +{el:.2f}s after first attach '
+                    f'(marker only, still attached={tgt in self.attached})')
+                continue
+            self._blocked.add(tgt)
+            was = tgt in self.attached
+            if was:
+                self.send_detach(tgt)
+            self.get_logger().warn(
+                f'PARTIAL LOSS injected "{tgt}" at +{el:.2f}s after first attach '
+                f'(was_attached={was}, remaining={sorted(self.attached)})')
+
+    def schedule_detach(self, tgt, source):
+        """Schedule physical detach while preserving the command timestamp.
+
+        The nonzero-delay path is a deliberate fault injector: the controller has
+        issued its release command, but the simulated gripper remains physically
+        attached until the deadline. Repeated commands do not extend the delay.
+        """
+        if tgt not in self.attached or tgt in self._pending_detach:
+            return
+        if self.detach_delay_sec <= 0.0:
+            self.send_detach(tgt)
+            return
+        deadline = time.monotonic() + self.detach_delay_sec
+        self._pending_detach[tgt] = deadline
+        self.get_logger().warn(
+            f'DELAYED DETACH injected for "{tgt}": source={source}, '
+            f'physical joint held for {self.detach_delay_sec:.2f}s')
+
+    def flush_pending_detach(self):
+        now = time.monotonic()
+        for tgt, deadline in list(self._pending_detach.items()):
+            if now >= deadline:
+                self.get_logger().warn(
+                    f'DELAYED DETACH elapsed for "{tgt}": issuing physical detach')
+                self.send_detach(tgt)
 
     def should_attach(self, drone, tgt):
         """三条判据全过才 attach。不过时把**原因**写进 self._last_reject,
@@ -260,6 +337,8 @@ class ProximityGripperNode(Node):
         self.attach_pub.publish(msg)
         self.attached.add(tgt)
         self.get_logger().info(f'-> ATTACH "{payload}"')
+        if self._first_attach_mono is None:
+            self._first_attach_mono = time.monotonic()
 
     def send_detach(self, tgt):
         payload = (f'{self.drone_model} {self.parent_link} '
@@ -267,6 +346,7 @@ class ProximityGripperNode(Node):
         msg = StringMsg()
         msg.data = payload
         self.detach_pub.publish(msg)
+        self._pending_detach.pop(tgt, None)
         self.attached.discard(tgt)
         self.get_logger().info(f'-> DETACH "{payload}"')
 

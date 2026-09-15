@@ -15,7 +15,8 @@ import sys
 AW = re.compile(r'\[attach-window\] t=([\d.-]+)s pos_err=([\d.]+)m '
                 r'T=[\d.-]+N z=([\d.-]+) m_est=([\d.-]+)')
 EMPTY = re.compile(r'empty m_est=([\d.]+)kg')
-TCMD = re.compile(r't=([\d.]+)s \| DROP (?:command issued|: released)')
+# UNCOMMANDED LOSS = 意外脱落故障注入的对应时刻(2026-09-14;历史日志不含此串,口径不变)
+TCMD = re.compile(r't=([\d.]+)s \| (?:DROP (?:command issued|: released)|UNCOMMANDED LOSS injected)')
 
 # 判据阈值。pos_err 用 2m(远超正常暂态峰 0.3m,又不会把 drop 后的正常恢复算进来);
 # attach 判据 0.08kg 是最小载荷 0.15kg 的一半,估计器再保守也不至于只认到一半。

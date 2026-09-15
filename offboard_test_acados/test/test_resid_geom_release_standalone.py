@@ -40,6 +40,7 @@ class _S:
         self._m_p_hat_ratchet = 0.30
         self.attach_offset = np.array([0.006, -0.093, -0.516])
         self.resid_release_geom = True
+        self.resid_confirm_enable = True   # 2026-09-14 慢基线分支开关,默认=历史行为
         # 2026-08-26 _residual_detect 新增的并行阶跃判据状态。这里显式**关掉**
         # 它:本模块测的是"慢基线那条路上的几何释放",两条判据混在一起会说不清
         # 是谁触发的。阶跃判据自己的验证在 test_step_detector_replay.py。

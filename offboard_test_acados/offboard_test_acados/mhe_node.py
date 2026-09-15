@@ -19,7 +19,7 @@ from scipy.linalg import block_diag
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Empty, Float64, Float64MultiArray
+from std_msgs.msg import Bool, Empty, Float64, Float64MultiArray
 from actuator_msgs.msg import Actuators
 
 from offboard_test.nmpc_node import quat_to_rotmat
@@ -536,6 +536,17 @@ class MHENode(Node):
         self.declare_parameter('resid_release_geom', True)
         self.resid_release_geom = bool(
             self.get_parameter('resid_release_geom').value)
+        # 慢基线确认判据(confirm_thresh)的独立开关(2026-09-14)。
+        # 为什么不直接用 event_trigger_enable=false:那个总开关在 timer_cb 里
+        # 同时关掉 _update_release_residual(),即释放判据的第三信息源 fastB,
+        # 会顺带改掉 §VI-C 的检测器。这里只关慢基线这一支 —— 它越阈后有三个
+        # 下游:窗口降权、ATTACH 方向快速进 LOADED、DROP 方向投释放票。
+        # 实测(mainline_ab3*,thresh 4.4N):0.15kg 从不越阈,0.30kg 的
+        # attach/drop 暂态会越阈(W4 A 10/10、B 9/11 轮)。
+        # 默认 True = 历史行为逐位不变;并行阶跃判据(resid_step)不受影响。
+        self.declare_parameter('resid_confirm_enable', True)
+        self.resid_confirm_enable = bool(
+            self.get_parameter('resid_confirm_enable').value)
 
         # ---- 并行阶跃判据(2026-08-26,默认关)----
         # 上面那条判据看的是"T_phys 偏离**慢基线**",需要一条可信基线,因此带一道
@@ -981,6 +992,46 @@ class MHENode(Node):
                 f'慢层 T·cosθ/g < m_B+{self.pl_mass_margin}kg 持续 '
                 f'{self.pl_hold_frames * mhe_p.dt:.1f}s (|vz|<{self.pl_vz_gate})')
 
+        # ---- matched 指令武装确认基线(2026-09-14,默认关,仅供对照实验)----
+        # 审稿缺口:"command-triggered baseline that also requires persistent
+        # confirmation"。开启后 eventless 的两条放行路径(质量域、统一 moment 判据)
+        # 照常计算并记日志(detector 心跳不变),但**不放行**;释放只能走:
+        #   /gripper/enable 的 True->False 边沿(= NMPC 发出的释放指令)开窗 ->
+        #   倾角修正推力隐含质量 T·cosθ/g < m_B + margin 持续 hold_sec(|vz| 门)。
+        # 阈值/持续/门**直接复用看门狗慢层的既有参数**(payload_lost_mass_margin /
+        # hold_sec / vz_gate),不针对本实验另调。其余 MHE/NMPC 配置与 B 臂逐字相同,
+        # NMPC 的 DROP complete 与 UNRESOLVED 兜底两臂共用。
+        # ---- 推力代理故障注入(2026-09-14,默认关,仅供 §VII 推力代理验证)----
+        # 只改**估计器**读到的 k·ω²(推力与 roll/pitch/yaw 力矩同乘),被控对象的
+        # Gazebo 推力律与 NMPC 的推力->油门映射都不动 —— 即论文限制节所说的
+        # "独立于被控对象的推力映射失配"。noise_frac 为每电机转速的乘性白噪声 σ。
+        self.declare_parameter('thrust_map_fault_gain', 1.0)
+        self.declare_parameter('motor_speed_noise_frac', 0.0)
+        self.thrust_map_fault_gain = float(
+            self.get_parameter('thrust_map_fault_gain').value)
+        self.motor_speed_noise_frac = max(0.0, float(
+            self.get_parameter('motor_speed_noise_frac').value))
+        self._fault_rng = np.random.default_rng()
+        if self.thrust_map_fault_gain != 1.0 or self.motor_speed_noise_frac > 0.0:
+            self.get_logger().warn(
+                f'[thrust-fault] estimator-side thrust map gain='
+                f'{self.thrust_map_fault_gain:.3f}, motor-speed noise '
+                f'sigma={100 * self.motor_speed_noise_frac:.1f}% (plant/NMPC unchanged)')
+        self.declare_parameter('release_arm_on_command', False)
+        self.release_arm_on_command = bool(
+            self.get_parameter('release_arm_on_command').value)
+        self._cmd_enable_prev = None
+        self._release_cmd_armed = False
+        self._cmd_hold = 0
+        if self.release_arm_on_command:
+            self.create_subscription(
+                Bool, '/gripper/enable', self._release_cmd_enable_cb, 10)
+            self.get_logger().warn(
+                '[cmd-armed] matched command-armed baseline ON: eventless release '
+                'paths suppressed; release window opens on /gripper/enable '
+                f'True->False, confirm T*cos/g < m_B+{self.pl_mass_margin:.2f}kg '
+                f'for {self.pl_hold_frames * mhe_p.dt:.1f}s (|vz|<{self.pl_vz_gate})')
+
         # ---- 机动门控:降低机动期质量估计的权重(2026-08-25)----
         # 动机:m_est 静态准(-0.17%)但**机动中系统性低估 8%**(记忆
         # new-4ms-workpoint-validation / high-maneuver-ablation 实测)。机动期
@@ -1239,7 +1290,11 @@ class MHENode(Node):
         if len(msg.velocity) >= 4:
             w = np.array(msg.velocity[:4])
             if np.all(np.isfinite(w)):
-                w2 = w * w
+                if self.motor_speed_noise_frac > 0.0:
+                    w = w * (1.0 + self.motor_speed_noise_frac
+                             * self._fault_rng.standard_normal(4))
+                # thrust_map_fault_gain:估计器侧推力映射失配注入(默认 1.0 逐位不变)
+                w2 = self.thrust_map_fault_gain * w * w
                 self.thrust_phys = float(
                     THRUST_CAL_GAIN * MOTOR_CONSTANT * np.sum(w2))
                 # 体力矩反算(B.3 Phase0,见文件头 ROTOR_X/Y 注释)。F_i=k_f·ω_i²,
@@ -1465,6 +1520,48 @@ class MHENode(Node):
         self._pl_hold = 0
         self._pl_hist.clear()
 
+    def _release_cmd_enable_cb(self, msg):
+        """matched 基线:只认 enable 的 True->False 边沿为释放指令。"""
+        cur = bool(msg.data)
+        if self._cmd_enable_prev is True and not cur and not self._release_cmd_armed:
+            self._release_cmd_armed = True
+            self._cmd_hold = 0
+            self.get_logger().warn(
+                f'[cmd-armed] release command received (load_armed='
+                f'{int(self._load_armed)} m_est={float(self.m_est):.3f} '
+                f'solve_ok={int(self._last_solve_ok)} '
+                f'reanchored={int(self._s_reanchored)}) — confirmation window open')
+        self._cmd_enable_prev = cur
+
+    def _command_armed_confirm(self):
+        """matched 基线的确认:指令之后,推力隐含质量持续贴近空机才释放。"""
+        if not self._release_cmd_armed or self.thrust_phys is None:
+            return
+        if self.x_meas is None or abs(float(self.x_meas[5])) > self.pl_vz_gate:
+            self._cmd_hold = 0
+            return
+        _q = self.x_meas[6:10]
+        _n = float(np.linalg.norm(_q))
+        if _n < 1e-6:
+            return
+        _qw, _qx, _qy, _qz = (_q / _n)
+        _c = float(np.clip(1.0 - 2.0 * (_qx * _qx + _qy * _qy), 1e-3, 1.0))
+        m_implied = float(self.thrust_phys) * _c / mhe_p.g
+        if m_implied < mhe_p.m_B + self.pl_mass_margin:
+            self._cmd_hold += 1
+        else:
+            self._cmd_hold = 0
+        if self._cmd_hold >= self.pl_hold_frames:
+            self._release_cmd_armed = False
+            self._cmd_hold = 0
+            self._update_payload_presence('drop')
+            self._release_payload(
+                f'command-armed thrust confirmation (T*cos/g={m_implied:.3f}kg '
+                f'< {mhe_p.m_B + self.pl_mass_margin:.3f}kg for '
+                f'{self.pl_hold_frames * mhe_p.dt:.1f}s)')
+            self.get_logger().warn(
+                f'[cmd-armed] RELEASE confirmed: m_implied={m_implied:.3f}kg')
+
     def mass_event_cb(self, msg):
         """质量突变事件 = **卸载**(wrench drop / gripper drop——nmpc_node 释放
         夹爪时同帧发这条)。真实载荷已不存在,必须立刻释放"幽灵几何",否则
@@ -1607,6 +1704,10 @@ class MHENode(Node):
 
         if not use_thrust:
             return fallback, False
+        if mhe_p.seed_window_balance:
+            m_win = self._window_balance_mass()
+            if m_win is not None:
+                return float(np.clip(m_win, mhe_p.m_min, mhe_p.m_max)), True
         T = self.thrust_phys
         if T is None or not math.isfinite(T) or T < mhe_p.seed_thrust_min:
             self.get_logger().warn(
@@ -1616,6 +1717,29 @@ class MHENode(Node):
                 f'{fallback_why} kg')
             return fallback, False
         return float(np.clip(T / mhe_p.g, mhe_p.m_min, mhe_p.m_max)), True
+
+    def _window_balance_mass(self):
+        """窗口竖直力平衡的质量种子(见 mhe_params.seed_window_balance)。
+        缓冲不满、推力过低或分母退化时返回 None,由调用方回退瞬时 T/g。"""
+        N = mhe_p.N
+        u_buf = getattr(self, 'u_buf', None)
+        y_buf = getattr(self, 'y_buf', None)
+        if u_buf is None or y_buf is None or len(u_buf) < N or len(y_buf) < N + 1:
+            return None
+        y = np.asarray(self.y_buf[-(N + 1):], dtype=float)
+        T = np.asarray([u[0] for u in self.u_buf[-N:]], dtype=float)
+        if not np.all(np.isfinite(T)) or float(np.mean(T)) < mhe_p.seed_thrust_min:
+            return None
+        q = y[:N, 6:10]
+        qn = np.linalg.norm(q, axis=1)
+        if np.any(qn < 1e-6):
+            return None
+        q = q / qn[:, None]
+        c = np.clip(1.0 - 2.0 * (q[:, 1] ** 2 + q[:, 2] ** 2), 1e-3, 1.0)
+        den = N * mhe_p.g + (y[N, 5] - y[0, 5]) / mhe_p.dt
+        if not math.isfinite(den) or den < 0.5 * N * mhe_p.g:
+            return None
+        return float(np.sum(T * c) / den)
 
     @staticmethod
     def _aug(y13, m_seed):
@@ -2041,6 +2165,8 @@ class MHENode(Node):
             else:
                 self._step_pending = 0
 
+        if not self.resid_confirm_enable:
+            return
         if self._resid_baseline is None:
             self._resid_baseline = T
             self._resid_stable = 0
@@ -2227,6 +2353,8 @@ class MHENode(Node):
         self._update_payload_presence()
         if self.payload_lost_watch:
             self._payload_lost_watch()
+        if self.release_arm_on_command:
+            self._command_armed_confirm()
         if self.event_enabled and self.signal_mode == 'residual':
             self._update_release_residual()
             self._residual_detect()
@@ -2275,7 +2403,13 @@ class MHENode(Node):
                 self._c_xy_mass_low = 0   # 高动态:质量不可观测,不累计释放计数
             elif _m_p < self.c_xy_mass_release_mp:
                 self._c_xy_mass_low += 1
-                if self._c_xy_mass_low >= self.c_xy_mass_release_persist:
+                if (self._c_xy_mass_low >= self.c_xy_mass_release_persist
+                        and self.release_arm_on_command):
+                    # matched 基线:eventless 放行被抑制(只记一次/秒)
+                    if self._c_xy_mass_low % 10 == 0:
+                        self.get_logger().info(
+                            '[cmd-armed] suppressed eventless mass-based release')
+                elif self._c_xy_mass_low >= self.c_xy_mass_release_persist:
                     self._c_xy_mass_low = 0
                     self._c_xy_mass_high = 0
                     self._c_xy_mass_armed = False
@@ -2388,7 +2522,11 @@ class MHENode(Node):
                     f'reanch={int(self._s_reanchored)} '
                     f'm_p={float(self.m_est) - mhe_p.m_B:+.4f} '
                     f'slow={self._s_low}/{self.s_release_persist}')
-            if fire:
+            if fire and self.release_arm_on_command:
+                if self._s_ratio_log_n % 10 == 1:
+                    self.get_logger().info(
+                        f'[cmd-armed] suppressed eventless release ({why})')
+            elif fire:
                 self._update_payload_presence('drop')
                 self._release_payload(why)
                 return
@@ -2662,11 +2800,19 @@ class MHENode(Node):
                 # m_p 探负 => slow 误释放。标记它,由 health 门控挡住,直到下一次
                 # 成功解产生真实的 s。
                 self._s_reanchored = True
+                # 2026-09-14:日志原先无条件写 "seeded from thrust_phys",
+                # 但 MHE_SEED_FROM_THRUST 默认关时走的是上面的 m_est 回退 ——
+                # 20260914_185509 就是被这行字误导,以为种子来自推力。
+                _src = (('thrust_phys window balance' if mhe_p.seed_window_balance
+                         else 'thrust_phys') if from_thrust
+                        else 'previous m_est (seed_from_thrust off/unavailable)')
+                _T = self.thrust_phys
                 self.get_logger().warn(
                     f're-anchored arrival prior to current window after '
                     f'{self._fail_streak} consecutive failures '
-                    f'(m seeded from thrust_phys: {self.m_est:.3f} -> '
-                    f'{m_seed:.3f} kg)')
+                    f'(m seeded from {_src}: {self.m_est:.3f} -> '
+                    f'{m_seed:.3f} kg; T_phys/g='
+                    f'{(_T / mhe_p.g) if _T else float("nan"):.3f})')
                 self.m_est = m_seed
                 self._fail_streak = 0
             return

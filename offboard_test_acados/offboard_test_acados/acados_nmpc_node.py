@@ -671,6 +671,8 @@ class AcadosNMPCNode(Node):
         # a=3π/2),grip_drop_after_sec 退化为"最早哪一圈可 drop"的最小门;
         # false=按 grip_drop_after_sec 固定时刻 drop。默认 false 保持现有行为。
         self.declare_parameter('grip_drop_at_fig8_tip', False)
+        # 意外脱落故障注入(见 _check_grip_drop 内注释),默认关
+        self.declare_parameter('grip_uncommanded_loss', False)
         # 定时质量阶跃(和 MHE 解耦的诊断):吸附后把 m_est 从空机手动抬到
         # p.m+grip_payload_mass,给 NMPC "正确的带载质量认知",用来区分发散到底
         # 是"NMPC 不知道质量变了"还是"吊挂物理(CoM/摆动/拴系)本身补不了"。
@@ -883,6 +885,10 @@ class AcadosNMPCNode(Node):
             # enable,attach 成为受控、时刻明确的事件(RELIABLE QoS,proximity
             # 早在线保证送达)。启动脚本里持续发 enable 的行已删。
             self.enable_pub = self.create_publisher(Bool, '/gripper/enable', 10)
+            self.grip_uncommanded_loss = bool(
+                self.get_parameter('grip_uncommanded_loss').value)
+            self.grip_release_pub = self.create_publisher(
+                Bool, '/gripper/release', 10)
             # PX4 内环增益同步(见 scale_px4_rate_gains 参数声明处的根因注释)
             self.scale_px4_rate_gains = bool(
                 self.get_parameter('scale_px4_rate_gains').value)
@@ -2758,6 +2764,17 @@ class AcadosNMPCNode(Node):
             tip_win = max(0.12, 3.0 * self.grip_dyn_w * p.dt)
             if not (1.5 * np.pi <= a_mod < 1.5 * np.pi + tip_win):
                 return
+        if self.grip_uncommanded_loss:
+            # 故障注入(2026-09-14,默认关):载荷在与计划 drop 相同的轨迹相位**意外脱落**。
+            # 走 proximity 的 /gripper/release 通道做物理 detach,**不发** enable=false、
+            # 不置 drop_pending/drop_time、不发 mass_event —— 控制器与 MHE 都收不到
+            # 任何释放指令。grip_drop_done 置位只为让本函数不重复触发。
+            self.grip_drop_done = True
+            self.grip_release_pub.publish(Bool(data=True))
+            self.get_logger().warn(
+                f't={nmpc_time:.1f}s | UNCOMMANDED LOSS injected: physical release '
+                'via /gripper/release; no release command issued')
+            return
         self.drop_time = nmpc_time                 # 指令兑现检查的起点
         self.enable_pub.publish(Bool(data=False))  # 拉低 → proximity 释放 box
         if self.continuous_payload_estimates:

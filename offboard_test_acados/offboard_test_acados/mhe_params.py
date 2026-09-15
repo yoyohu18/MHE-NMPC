@@ -176,15 +176,27 @@ class MHEParams:
     # 同一个种子逻辑此前**已经**在 5 连败重锚路径上用了(mhe_node 里那段"用
     # thrust_phys 而不是可能已错的 m_est 重新出发"),这里只是把它从兜底提升为
     # 常规路径,两处现已共用 _seed_mass_from_thrust()。
-    # 默认 **关**(2026-08-25):机制与单测都就绪(test_mass_seed_standalone.py,
-    # 7/7 通过),但还没有 SITL 的 A/B 证据。本仓惯例是"没有 n>=8 的实测就不动
-    # 默认值"——同日 #1 那次正是栽在"n=1 背书就改默认"上(prior0 臂 1/7 轮
-    # LIFT 段发散)。用 MHE_SEED_FROM_THRUST=1 开启,验过再改这里。
+    # 2026-08-25 起默认关(当时无 SITL A/B)。
+    # ★ 2026-09-15 用户拍板改为默认 **开**,与 seed_window_balance 一起:
+    #   09-14 瞬时 T/g 版 A/B(seedthrust_ab)机制修掉但 drop 前坠机压线;
+    #   09-15 窗口版 A/B(seedwindow_ab_manifest.csv,W4,预注册见
+    #   重锚推力种子_预注册_20260914.md 附录 A):S1 10/10 有效 vs S0 8/10,
+    #   figure-8 重锚 29→1 次、种子误差 17.1%→2.8%、最长重锚串 17→1,
+    #   完成 10/10、释放后坠机 0,预注册改默认条件全满足(另一会话独立复核)。
+    #   保留意见:S1 仅 1 次重锚事件,机制在开启臂基本未被激发。
+    # ⚠️ 复现 09-15 之前的历史批次必须显式 MHE_SEED_FROM_THRUST=0 MHE_SEED_WINDOW_BALANCE=0。
     seed_from_thrust = os.environ.get(
-        'MHE_SEED_FROM_THRUST', '0') not in ('0', '', 'false', 'False')
+        'MHE_SEED_FROM_THRUST', '1') not in ('0', '', 'false', 'False')
     # 低推力门控 [N]:低于此值认为"没在飞"(未起飞/异常),悬停近似不成立。
     # 与 mhe_node._update_c_xy_est 里那个 T<1.0 的门控同口径。
     seed_thrust_min = float(os.environ.get('MHE_SEED_THRUST_MIN', '1.0'))
+    # 窗口力平衡种子(2026-09-14 实现,09-15 改默认开;需 seed_from_thrust 同时打开):
+    # 瞬时 T/g 在 4m/s figure-8 中摆 −42%~+30%(seedthrust_ab 实测),重锚种子
+    # 仍会被机动带偏。窗口内逐帧 m·(g+a_z) = T·cosθ(竖直力平衡,忽略竖直气动),
+    # 求和后 m = Σ T_i·cosθ_i / (N·g + (vz_N − vz_0)/dt) —— Σa_z 按速度端点精确
+    # 伸缩求和,不做数值微分;只用 T_phys 与 odom,仍与 MHE 自身状态解耦。
+    seed_window_balance = os.environ.get(
+        'MHE_SEED_WINDOW_BALANCE', '1') not in ('0', '', 'false', 'False')
 
     # --- 几何-质量耦合开关(2026-08-24)---
     # False(默认,与历史批次逐位一致):dJ/c_xy 由窗外算好当常参数喂进来。

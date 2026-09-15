@@ -22,13 +22,15 @@ class _Log:
 class _Stub:
     """只带 thrust_phys + logger 的替身,借用 MHENode 的未绑定方法。
 
-    ⚠️ mhe_p.seed_from_thrust 默认是 **关**(2026-08-25 回退,见 mhe_params 注释),
-    所以除 test_switch_off_restores_legacy 外,每个用例都要先把它打开 —— seed()
-    封装了这件事,免得测到的其实是关闭分支。"""
+    mhe_p.seed_from_thrust 自 2026-09-15 默认开;seed() 仍显式设置开关,
+    使每个用例不依赖默认值。桩对象没有窗口缓冲,窗口种子自动回退到瞬时 T/g。"""
     def __init__(self, T):
         self.thrust_phys = T
         self._log = _Log()
     def get_logger(self): return self._log
+    # 窗口种子默认开(09-15):桩对象没有 u_buf/y_buf,借用的方法返回 None,
+    # 于是走瞬时 T/g 分支 —— 这正是本文件各用例要测的路径。
+    _window_balance_mass = MHENode._window_balance_mass
 
     def seed(self, why, enabled=True):
         orig = mhe_p.seed_from_thrust
@@ -90,10 +92,11 @@ def test_switch_off_restores_legacy():
     assert not s._log.warns
 
 
-def test_default_is_off():
-    """把"默认关"这件事本身锁进测试:改默认必须同时改这里,不会悄悄漂移。
-    改默认的前提是 n>=8 的 SITL A/B —— 见 mhe_params.seed_from_thrust 注释。"""
-    assert mhe_p.seed_from_thrust is False
+def test_default_is_on():
+    """把默认值锁进测试:改默认必须同时改这里,不会悄悄漂移。
+    2026-09-15 由关改开(窗口种子 A/B 过预注册、用户拍板)—— 见 mhe_params.seed_from_thrust 注释。"""
+    assert mhe_p.seed_from_thrust is True
+    assert mhe_p.seed_window_balance is True
 
 
 if __name__ == '__main__':
