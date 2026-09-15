@@ -1,26 +1,25 @@
 #!/bin/bash
-# 连续主线验收·第二轮(2026-09-04):W3/W4/W5,每格 8 个**有效**配对。
+# ★ 2026-09-14 窗口力平衡种子变体:S1 臂 = MHE_SEED_FROM_THRUST=1 + MHE_SEED_WINDOW_BALANCE=1
+#   (其余与 run_seed_thrust_ab.sh 逐字相同;预注册见 重锚推力种子_预注册_20260914.md 附录)
+# 重锚推力种子 A/B(2026-09-14),预注册见 ~/ros2_ws_HJH/重锚推力种子_预注册_20260914.md
 #
-# 与第一轮(run_mainline_ab.sh)的差别只有两处:
-#   ① 修了三个缺陷后重跑 —— MHE 释放时把 s 的发布目标切零(不是放宽 conf 阈值)、
-#      NMPC 发释放指令时无条件重新武装空载检测、payload-health 的 logger severity。
-#   ② 预注册的**配对有效性**:drop 之前坠机 / attach 未兑现 = 该配对作废并补跑,
-#      发生率单独统计(check_run_valid.py)。作废的轮次数据仍留在盘上可复查。
+# 由 run_mainline_ab_valid.sh 派生(清栈/锁/溯源/有效性判定/ABBA 逐字复用),差别只有:
+#   ① 两臂都是部署 eventless 配置(原 B 臂),唯一差异 MHE_SEED_FROM_THRUST: S0=0 / S1=1
+#   ② 默认只跑 W4、VALID_PAIRS=8、MAX_TRIES=20(预注册写定)
+#   ③ manifest 默认 seedthrust_ab_manifest.csv
+# 背景: 20260914_185509 重锚种子回退到卡在下界的 m_est,54s 内重锚 112 次不恢复 → 释放后坠机。
 #
-# 主线验收(预注册):有效的 24 次 B 臂必须全部完成 drop、confidence 达标、
-# 且 drop 之后零失稳。
-#
-# 用法: [VALID_PAIRS=8] [MAX_TRIES=16] [ONLY_W=W3] bash src/scripts/gripper/run_mainline_ab_valid.sh
+# 用法: [VALID_PAIRS=8] [MAX_TRIES=20] [ONLY_W=W4] bash src/scripts/gripper/run_seed_thrust_ab.sh
 set -u
 
 WS=/home/clear/ros2_ws_HJH
 RES=$WS/nmpc_test_results
 # ⚠️ 2026-09-10:manifest 原为固定文件名 + **追加**模式,直接重跑会把新数据混进
 # 09-04 那份已冻结的表(论文 §VI-F 的数据源)。改为可配置,重跑必须传 MAN_FILE。
-MAN=${MAN_FILE:-$RES/mainline_ab2_manifest.csv}
+MAN=${MAN_FILE:-$RES/seedwindow_ab_manifest.csv}
 LOCK=/tmp/mainline_ab.lock          # 与第一轮同一把锁:同时只允许一个 SITL 批次
 VALID_PAIRS=${VALID_PAIRS:-8}
-MAX_TRIES=${MAX_TRIES:-16}          # 每格尝试上限;够不到 8 对就如实少报,不硬凑
+MAX_TRIES=${MAX_TRIES:-20}          # 预注册写定 20;够不到 8 对就如实少报,不硬凑
 POST_SEC=${POST_SEC:-40}
 CHECK=$WS/src/scripts/gripper/check_run_valid.py
 
@@ -74,11 +73,11 @@ w_env() {
 w_truth() { case "$1" in W4) echo 0.30 ;; *) echo 0.15 ;; esac; }
 
 arm_env() {
-  if [ "$1" = "A" ]; then
-    echo "CONTINUOUS_PAYLOAD_ESTIMATES=false NMPC_GEOM_SOURCE=online \
-NMPC_GEOM_RELEASE_MODE=event MHE_PAYLOAD_LOST_WATCH=0"
+  # 两臂同为部署 eventless 配置;唯一差异是重锚/首帧质量种子来源
+  if [ "$1" = "S0" ]; then
+    echo "CONTINUOUS_PAYLOAD_ESTIMATES=true MHE_PAYLOAD_LOST_WATCH=0 MHE_SEED_FROM_THRUST=0"
   else
-    echo "CONTINUOUS_PAYLOAD_ESTIMATES=true MHE_PAYLOAD_LOST_WATCH=0"
+    echo "CONTINUOUS_PAYLOAD_ESTIMATES=true MHE_PAYLOAD_LOST_WATCH=0 MHE_SEED_FROM_THRUST=1 MHE_SEED_WINDOW_BALANCE=1"
   fi
 }
 
@@ -108,18 +107,18 @@ run_one() {
   local t0; t0=$(date +%FT%T)
   echo "[批次] === #$IDX  $wid pair$pair arm=$arm  $(date +%T) ==="
   cleanup
-  ls "$RES"/grip_nmpc_*.log 2>/dev/null | xargs -r -n1 basename > /tmp/.mainline2_before
+  ls "$RES"/grip_nmpc_*.log 2>/dev/null | xargs -r -n1 basename > /tmp/.seedab_before
 
   setsid nohup env $COMMON_ENV $(w_env "$wid") $(arm_env "$arm") \
     EVAL_TRUE_PAYLOAD_MASS=$(w_truth "$wid") \
     bash "$WS/src/scripts/gripper/run_gripper_headless.sh" \
-    > /tmp/mainline2_cur.log 2>&1 9>&- &
+    > /tmp/seedab_cur.log 2>&1 9>&- &
 
   local N="" i
   for i in $(seq 1 72); do
     N=$(for f in "$RES"/grip_nmpc_*.log; do
           [ -e "$f" ] || continue
-          grep -qxF "$(basename "$f")" /tmp/.mainline2_before || echo "$f"
+          grep -qxF "$(basename "$f")" /tmp/.seedab_before || echo "$f"
         done | sort | tail -1)
     [ -n "$N" ] && break
     sleep 5
@@ -146,13 +145,13 @@ run_one() {
   case "$v" in valid) return 0 ;; *) return 1 ;; esac
 }
 
-WIDS="${ONLY_W:-W3 W4 W5}"
+WIDS="${ONLY_W:-W4}"
 for wid in $WIDS; do
   pair=0; tries=0
   while [ "$pair" -lt "$VALID_PAIRS" ] && [ "$tries" -lt "$MAX_TRIES" ]; do
     tries=$((tries + 1))
     # 对内 ABBA/BAAB 交替
-    if [ $((tries % 2)) -eq 1 ]; then order="A B"; else order="B A"; fi
+    if [ $((tries % 2)) -eq 1 ]; then order="S0 S1"; else order="S1 S0"; fi
     ok=1
     for arm in $order; do
       run_one "$wid" "$arm" "$((pair + 1))" || ok=0
