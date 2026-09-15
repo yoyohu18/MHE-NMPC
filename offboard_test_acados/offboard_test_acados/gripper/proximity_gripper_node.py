@@ -104,6 +104,17 @@ class ProximityGripperNode(Node):
         # 目标永久拉黑、不再重吸(否则 ~40 ms 就被吸回,见 on_release 注释)。
         # NMPC/MHE 不收任何信号 —— 这是非计划的部分载荷丢失。
         self.declare_parameter('partial_loss_schedule', '')
+        # 吸附持续判据(2026-09-16,默认 0 = 旧行为:判据首次满足的那一 tick 就吸)。
+        # 旧行为下偏心在 0.13~0.16 间来回摆时,"掠过"上限的瞬时值就触发吸附,吸附点
+        # 堆在边界上(E1 冒烟 5/6 轮 d_xy∈[0.123,0.130]),而吸附后 1~4 s 力矩饱和
+        # 振荡的坠机都出在这一档。>0 时三条判据须**连续**满足这么久才吸,任一 tick
+        # 不满足计时清零。
+        self.declare_parameter('attach_dwell_sec', 0.0)
+        # 偏心下限(默认 0 = 不设)。偏心过小时一阶矩参考 s_ref 也小,释放判据
+        # |s|<ratio·s_ref 的绝对门槛随之变低,机动噪声下迟迟压不进去(冒烟 C_SAME/d0:
+        # d_xy=0.058, s_ref=0.0070, 脱离后 15.1 s 才清模)。设为 ECC_Y−TOL 可把偏心
+        # 这个检测延迟协变量收在设计值附近。
+        self.declare_parameter('attach_r_min', 0.0)
 
         g = self.get_parameter
         world = g('world_name').value
@@ -123,6 +134,11 @@ class ProximityGripperNode(Node):
         if self.detach_jam and self.detach_delay_sec > 0.0:
             raise ValueError('detach_jam and detach_delay_sec>0 are mutually exclusive')
         self._jam_logged = set()
+        self.attach_dwell_sec = max(0.0, float(g('attach_dwell_sec').value))
+        self.attach_r_min = max(0.0, float(g('attach_r_min').value))
+        if self.attach_r_min >= self.r_xy:
+            raise ValueError('attach_r_min must be < r_xy')
+        self._dwell_start = {}          # target -> 判据开始连续满足的单调钟
         sched = str(g('partial_loss_schedule').value).strip()
         self.partial_dry = sched.startswith('dry:')
         if self.partial_dry:
@@ -180,6 +196,7 @@ class ProximityGripperNode(Node):
             f'targets={self.targets} pose_topic={self.pose_topic} '
             f'r_xy={self.r_xy} h=[{self.h_min},{self.h_max}] '
             f'v_rel_max={self.v_rel_max} '
+            f'attach_dwell={self.attach_dwell_sec:.2f}s r_min={self.attach_r_min} '
             f'detach_delay={self.detach_delay_sec:.2f}s jam={self.detach_jam} '
             f'partial_loss={"dry:" if self.partial_dry else ""}{self.partial_schedule}')
 
@@ -222,6 +239,7 @@ class ProximityGripperNode(Node):
         self.flush_pending_detach()
         self._run_partial_schedule()
         if not self.enabled:
+            self._dwell_start.clear()   # 重新使能后持续计时必须从头算
             return
         drone = self.poses.get(self.drone_model)
         if drone is None or drone.pos is None:
@@ -233,9 +251,22 @@ class ProximityGripperNode(Node):
             if tp is None or tp.pos is None:
                 continue
             if self.should_attach(drone, tp):
+                now = time.monotonic()
+                t0 = self._dwell_start.setdefault(tgt, now)
+                held = now - t0
+                if held + 1e-9 < self.attach_dwell_sec:
+                    self._last_reject = (f'判据已满足,持续 {held:.1f}/'
+                                         f'{self.attach_dwell_sec:.1f}s')
+                    self._log_reject(tgt)
+                    continue
+                self._dwell_start.pop(tgt, None)
+                self.get_logger().info(
+                    f'attach condition met: {self._met_desc} '
+                    f'held={held:.2f}s (dwell {self.attach_dwell_sec:.2f}s)')
                 self.send_attach(tgt)
                 self.publish_offset(drone, tp)
             else:
+                self._dwell_start.pop(tgt, None)
                 self._log_reject(tgt)
 
     def _run_partial_schedule(self):
@@ -308,6 +339,8 @@ class ProximityGripperNode(Node):
             why.append(f'偏心 d_xy={d_xy:.3f} ≥ r_xy={self.r_xy:.3f} '
                        f'(配平 roll ≈ {2.944 * d_xy:.3f}N·m = '
                        f'{100.0 * 2.944 * d_xy / 0.5:.0f}% 的 ±0.5 约束)')
+        elif d_xy < self.attach_r_min:
+            why.append(f'偏心 d_xy={d_xy:.3f} < r_min={self.attach_r_min:.3f}')
         if not (self.h_min <= dz <= self.h_max):
             why.append(f'高度 dz={dz:.3f} ∉ [{self.h_min},{self.h_max}]')
         if v_rel >= self.v_rel_max:
@@ -316,9 +349,9 @@ class ProximityGripperNode(Node):
             self._last_reject = '; '.join(why)
             return False
         self._last_reject = None
-        self.get_logger().info(
-            f'attach condition met: d_xy={d_xy:.3f} dz={dz:.3f} '
-            f'v_rel={v_rel:.3f} (r_xy 上限 {self.r_xy:.3f})')
+        # 日志留给 tick 在真正吸附时打(持续判据下本函数会连续多 tick 返回 True)。
+        self._met_desc = (f'd_xy={d_xy:.3f} dz={dz:.3f} v_rel={v_rel:.3f} '
+                          f'(r_xy 上限 {self.r_xy:.3f})')
         return True
 
     def _log_reject(self, name):
