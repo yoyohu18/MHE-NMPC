@@ -262,7 +262,7 @@ find "$PX4_DIR/build/px4_sitl_default/rootfs" -maxdepth 1 -name 'parameters*.bso
 
 source /opt/ros/jazzy/setup.bash
 cd "$WS"
-colcon build --packages-select offboard_test offboard_test_acados
+colcon build --packages-select offboard_test_acados
 source "$WS/install/setup.bash"
 
 mkdir -p "$GRIPPER_DIR/build"

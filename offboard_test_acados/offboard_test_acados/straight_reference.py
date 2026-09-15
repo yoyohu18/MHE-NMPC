@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# 直来直去的往返(shuttle)轨迹,跟 offboard_test.nmpc_node.build_reference(圆形)
-# 接口完全一致,独立放在 acados 包内。用来直观验证机头朝向是否跟随飞行方向,
+# 直来直去的往返(shuttle)轨迹，与本包圆形轨迹接口一致。用来直观验证机头朝向是否跟随飞行方向,
 # 比圆形/8字更容易在 RViz 里一眼看出对不对。
 #
 # 参数化: x = d*sin(w*tc),沿 +X 轴在 [-d, d] 之间往复,w 决定往返速度和周期。
@@ -16,7 +15,7 @@
 
 import numpy as np
 
-from offboard_test.nmpc_node import euler_to_quat
+from .common import euler_to_quat
 
 from .acados_params import p
 

@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 # acados 版 NMPC 节点。状态机(预热→等EKF→切OFFBOARD→解锁→飞到起点→NMPC接管)
-# 跟 offboard_test/nmpc_node.py 的 NMPCNode 完全一致,直接照搬,只有 solve_nmpc()
-# 内部换成调 acados 求解器,其它行为(包括坐标系、限幅、推力归一化、body_rate
-# 斜坡)都保持不变,方便跟 CasADi/IPOPT 版本直接对比。
+# acados 版 NMPC 节点，包含状态机、坐标系、限幅、推力归一化和 body-rate 斜坡。
 
 import functools
 import math
@@ -25,7 +23,7 @@ from mavros_msgs.srv import CommandBool, ParamGet, ParamSetV2, SetMode
 from rcl_interfaces.msg import ParameterType, ParameterValue
 from std_msgs.msg import Bool, Empty, Float64, Float64MultiArray
 
-from offboard_test.nmpc_node import (
+from .common import (
     build_reference,
     build_reference_window,
     quat_to_euler,
@@ -1021,7 +1019,7 @@ class AcadosNMPCNode(Node):
             PoseStamped,
             '/mavros/setpoint_position/local', 10)
 
-        # 话题名加 acados_ 前缀,跟 offboard_test 的 plot_logger.py 区分开,
+        # 话题名保留 acados_ 前缀，与既有日志和分析工具兼容。
         # 避免两个节点同时跑起来互相串话题
         self.ref_path_pub = self.create_publisher(
             Path, '/acados_nmpc/reference_path', 10)
@@ -1119,7 +1117,7 @@ class AcadosNMPCNode(Node):
         if qn < 1e-6:
             return
         qw, qx, qy, qz = q.w/qn, q.x/qn, q.y/qn, q.z/qn
-        # body(FLU) -> world(ENU),跟 offboard_test 的 odom_cb 一样的转换,
+        # body(FLU) -> world(ENU) 坐标转换。
         # 不转的话飞机一倾斜速度就对不上,几秒内发散
         R_wb = quat_to_rotmat(qw, qx, qy, qz)
         vel_world = R_wb @ np.array([vel.x, vel.y, vel.z])
@@ -1928,7 +1926,7 @@ class AcadosNMPCNode(Node):
             self.solve_fail_count = 0
             u_opt = self.solver.get(0, 'u')
             # 取"提前一步的预测状态"里的角速度,不是 u_opt 里的力矩——跟
-            # offboard_test/nmpc_node.py 里 omega_cmd = X_sol[10:13, 1] 的语义
+            # omega_cmd 使用下一预测节点 X_sol[10:13, 1]。
             # 完全一致,不要"顺手"改成更直接的 u_opt 角速度通道。
             omega_cmd = self.solver.get(1, 'x')[10:13]
             X_sol = np.array(
@@ -1942,7 +1940,7 @@ class AcadosNMPCNode(Node):
             self._traj_omega = X_sol[10:13, :].copy()
             self._traj_thrust = U_sol[0, :].copy()
 
-            # warm-start 向前滚动一步、末端复制,跟 offboard_test/nmpc_node.py
+            # warm-start 向前滚动一步并复制末端。
             # 里 X_init/U_init 的 shift 逻辑完全对应——这一步原来漏掉了:
             # acados 自己只会把"上一次第 i 阶段的解"留在第 i 阶段,不会自动按
             # 时间往前挪,放着不管的话每次给的初始猜测都系统性慢一拍,在持续

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # MHE(Moving Horizon Estimation,移动时域估计)的参数/权重配置。
-# 跟 acados_params.py 一样,物理常数(g/kd/Jxx/Jyy/Jzz)直接复用
-# offboard_test.nmpc_node.Params,避免两边各存一份却忘了同步;
+# 跟 acados_params.py 一样，物理常数(g/kd/Jxx/Jyy/Jzz)来自本包 common.py；
 # MHE 自己的窗口长度/噪声权重故意独立,不影响 NMPC 那边。
 #
 # 这一版只估"质量 m"这一个参数(配送场景里影响最大:决定推力->加速度映射、
@@ -11,13 +10,13 @@
 import os
 
 import numpy as np
-from offboard_test.nmpc_node import Params as _BaseParams
+from .common import AirframeParams
 
-_base = _BaseParams()
+_base = AirframeParams()
 
 
 class MHEParams:
-    # --- 物理常数,跟 offboard_test/acados 共享 ---
+    # --- 与 acados NMPC 共享的物理常数 ---
     g   = _base.g     # 重力加速度(m/s^2)
     kd  = _base.kd    # 线性空气阻力系数,跟动力学方程里的一致
     Jxx = _base.Jxx

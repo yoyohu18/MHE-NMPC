@@ -51,7 +51,7 @@ sleep 2
 
 source /opt/ros/jazzy/setup.bash
 cd "$WS"
-colcon build --packages-select offboard_test offboard_test_acados
+colcon build --packages-select offboard_test_acados
 source "$WS/install/setup.bash"
 
 # 编译 magnetic_gripper 插件(独立 CMake)

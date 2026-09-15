@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# offboard_test/plot_logger.py 的拷贝,话题名换成 acados_nmpc_node 发布的
+# 记录 acados_nmpc_node 发布的轨迹话题。
 # /acados_nmpc/... 系列——原版 plot_logger 是硬编码 /nmpc/... 的,对这个节点会
 # 一声不响地什么都画不出来,所以需要单独一份,不能直接复用。
 

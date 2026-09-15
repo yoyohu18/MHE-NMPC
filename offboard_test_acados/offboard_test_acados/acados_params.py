@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
-# 物理/安全常数(质量、惯量、推力/力矩边界)直接复用 offboard_test.nmpc_node.Params,
-# 避免两边各存一份、以后改了机架参数却忘了同步。
-# Q/R/P/N/dt 是 NMPC 自己的代价函数和时域设置,故意跟 offboard_test 独立、各自能调,
-# 调一个控制器的参数不该悄悄影响另一个。
+# 物理/安全常数集中在本包 common.py；Q/R/P/N/dt 是 NMPC 自己的配置。
 
 import os
 
 import numpy as np
-from offboard_test.nmpc_node import Params as _BaseParams
+from .common import AirframeParams
 
-_base = _BaseParams()
+_base = AirframeParams()
 
 # ===== 执行器真实推力包线(2026-09-10)=====
 # 原来 Tmin/Tmax 直接取 _base 的 0.5N / 2·m·g=40.50N,那是**按飞机重量拍的**,
@@ -63,11 +60,7 @@ THRUST_BOX_LEGACY = os.environ.get(
 
 
 class AcadosParams:
-    # --- 物理常数,跟 offboard_test 共享(数值定义在 offboard_test/nmpc_node.py
-    #     的 Params 类里,这里只是引用,改机架参数去那边改,两边自动同步) ---
-    # Physical constants shared with offboard_test (values live in the Params
-    # class in offboard_test/nmpc_node.py; these are just references — edit
-    # the airframe params there and both packages stay in sync).
+    # --- 物理常数统一定义在本包 common.AirframeParams。---
     m   = _base.m    # 机体质量(kg)。出现在推力方程 vel_dot=(1/m)(R@[0,0,T]-kd*v)-g 里
                       # Mass (kg). Appears in vel_dot = (1/m)(R@[0,0,T] - kd*v) - g
     g   = _base.g    # 重力加速度(m/s^2),ENU 坐标系(Z 朝上),方程里是 -g_vec(沿 -Z)
@@ -120,9 +113,9 @@ class AcadosParams:
     nu = 4   # 控制维度: 总推力 T(1) + 力矩 tau_x,tau_y,tau_z(3) = 4
               # Control dimension: total thrust T(1) + torques tau_x,tau_y,tau_z(3) = 4
 
-    # --- acados 控制器自己的时域/代价权重,独立调(不影响 offboard_test 那边) ---
+    # --- acados 控制器自己的时域/代价权重。---
     # acados controller's own horizon/cost weights, tuned independently
-    # (changing these never affects the offboard_test CasADi/IPOPT side).
+    # These values are independent of the shared physical constants.
     # 20 Hz NMPC: dt 同时是离散步长和 ROS2 求解定时器周期。N 随 dt 从原来的
     # 10@0.1s 同步增至 20，保持 N*dt=1.0s 的预测时域不变。
     # 旧实验曾观察到 20 Hz 配置的 attach 瞬态和求解耗时变差，因此切换频率后

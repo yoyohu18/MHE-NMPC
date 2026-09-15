@@ -13,7 +13,6 @@ import sys
 import numpy as np
 
 sys.path.insert(0, '/home/clear/ros2_ws_HJH/src/offboard_test_acados')
-sys.path.insert(0, '/home/clear/ros2_ws_HJH/src/offboard_test')
 
 from offboard_test_acados.figure8_reference import (
     auto_ramp_time, build_reference_figure8, build_reference_window_figure8)
@@ -139,4 +138,5 @@ for w in [0.25, 0.424, 0.566, 0.707, 1.0, 1.5]:
 
 print()
 print(f'{"ALL PASS" if not fail else "FAILED: " + ", ".join(fail)}')
-sys.exit(1 if fail else 0)
+if __name__ == '__main__':
+    sys.exit(1 if fail else 0)

@@ -8,7 +8,7 @@
 #   3. 区间平均(抗混叠)在 F 上做而不是在 ω 上做 —— 先平均再平方会因 Jensen
 #      系统性低估真实冲量
 #
-# 跑法:PYTHONPATH=<ws>/src/offboard_test_acados:<ws>/src/offboard_test:. python3 本文件
+# 跑法:PYTHONPATH=<ws>/src/offboard_test_acados python3 本文件
 
 import numpy as np
 

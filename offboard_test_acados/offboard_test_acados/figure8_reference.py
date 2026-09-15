@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# 8 字轨迹(Gerono lemniscate)参考生成,跟 offboard_test.nmpc_node.build_reference
-# (圆形轨迹)接口完全一致,独立放在 acados 包内,不动 offboard_test。
+# 8 字轨迹(Gerono lemniscate)参考生成，与本包圆形轨迹接口一致。
 #
 # 参数化: x=r*sin(a), y=r*sin(a)*cos(a)=r/2*sin(2a), a=w*tc 匀角速度转动。
 # 在交叉点(a=0,π,即原点)处 v=wr*(cos a, cos 2a) 幅值固定为 wr*sqrt(2)≠0,
@@ -12,7 +11,7 @@ import math
 
 import numpy as np
 
-from offboard_test.nmpc_node import euler_to_quat
+from .common import euler_to_quat
 
 from .acados_params import p
 

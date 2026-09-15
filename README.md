@@ -1,8 +1,8 @@
 # PX4-nmpc
 
-基于 ROS 2 + PX4 SITL 的四旋翼 **NMPC(非线性模型预测控制)** 实验工作区,包含两套并行的控制器实现、一个在线 **MHE(移动窗口质量估计)** 诊断模块,以及一套磁吸夹爪 / 吊挂负载的 Gazebo 仿真扩展。
+基于 ROS 2 + PX4 SITL 的四旋翼 **NMPC(非线性模型预测控制)** 实验工作区，包含 acados 控制器、在线 **MHE(移动窗口估计)** 模块，以及磁吸夹爪 / 吊挂负载的 Gazebo 仿真扩展。
 
-本仓库是某 ROS 2 工作区的 `src/` 目录,包含两个 ament_python 功能包和一组 SITL 启动脚本。
+本仓库是 ROS 2 工作区的 `src/` 目录，包含一个 ament_python 功能包和一组 SITL 启动脚本。
 
 ---
 
@@ -10,8 +10,7 @@
 
 ```
 src/
-├── offboard_test/            # 基线:CasADi/IPOPT 版 NMPC + 位置 setpoint 节点
-├── offboard_test_acados/     # acados 版 NMPC 移植 + MHE + 夹爪/吊挂扩展
+├── offboard_test_acados/     # acados NMPC + MHE + 夹爪/吊挂扩展
 │   ├── config/gripper/, urdf/gripper/, worlds/gripper/
 │   ├── gz_plugins/magnetic_gripper/
 │   └── offboard_test_acados/gripper/          # 夹爪专属节点子包
@@ -26,22 +25,9 @@ src/
 
 ## 功能包
 
-### 1. `offboard_test` — 基线控制器(CasADi / IPOPT)
+### `offboard_test_acados` — acados NMPC + MHE + 夹爪/吊挂
 
-原始的参考实现,便于与 acados 版本逐项对比。
-
-| 可执行节点 | 说明 |
-|-----------|------|
-| `offboard_node` | 最简 MAVROS offboard 演示,位置 setpoint 画圆/悬停,用于打通 PX4 offboard 链路 |
-| `nmpc_node` | CasADi + IPOPT 求解的 NMPC 姿态/推力控制器(状态机:预热 → 等 EKF2 → 切 OFFBOARD → 解锁 → 飞到起点 → NMPC 接管) |
-| `plot_logger` | 记录参考/实际/预测轨迹,离线画图 |
-| `metrics_collector` | 采集跟踪误差等指标 |
-
-物理参数(`nmpc_node.py` 内 `Params`):x500 机型 `m≈2.06kg`,`J=diag(0.0142,0.0142,0.0210)`,预测步长 `dt=0.1s`、`N=10`(horizon 0.4s)。
-
-### 2. `offboard_test_acados` — acados 版 NMPC + MHE + 夹爪/吊挂
-
-将 `offboard_test/nmpc_node` 的 NMPC 内核换成 **acados** 求解器,状态机、坐标系、限幅、推力归一化、body-rate 斜坡等外围行为与 CasADi 版完全一致,便于直接对比两种求解器。在此基础上新增了在线质量估计与负载操作场景。
+该包包含 **acados** NMPC、在线负载估计与负载操作场景。共享机架常数和数学工具集中在 `offboard_test_acados/common.py`，不依赖其他工作区内 Python 包。
 
 | 可执行节点 | 说明 |
 |-----------|------|
@@ -70,7 +56,6 @@ src/
 
 | 脚本 | 用途 |
 |------|------|
-| `run_sitl_nmpc.sh` | 基线:PX4 SITL + MAVROS + NMPC(CasADi 版),与夹爪场景无关 |
 | `gcs_heartbeat.py` | 无头模式下顶替 QGC 的 pymavlink GCS 心跳 |
 
 **`gripper/`**
@@ -104,7 +89,7 @@ exact commit 运行”。`paper/data/**` 是不参与仿真执行的冻结论文
 - ROS 2(rclpy)、Gazebo(gz-sim)、`ros_gz_bridge`
 - PX4-Autopilot(SITL)+ MAVROS(`mavros_msgs`)+ QGroundControl
 - 消息:`geometry_msgs`、`nav_msgs`、`std_msgs`、`sensor_msgs`、`actuator_msgs`、`tf2_ros`
-- 求解器:CasADi + IPOPT(`offboard_test`);[acados](https://github.com/acados/acados) 及其 Python 接口(`offboard_test_acados`)
+- 求解器：[acados](https://github.com/acados/acados) 及其 Python 接口
 - `robot_state_publisher`
 
 ---
@@ -115,8 +100,8 @@ exact commit 运行”。`paper/data/**` 是不参与仿真执行的冻结论文
 # 假设本仓库位于 ~/ros2_ws_HJH/src
 cd ~/ros2_ws_HJH
 
-# 构建两个功能包
-colcon build --packages-select offboard_test offboard_test_acados
+# 构建功能包
+colcon build --packages-select offboard_test_acados
 source install/setup.bash
 
 # 另需单独构建 gz 自定义插件(见 gz_plugins/*/ 内的 build/)
@@ -128,7 +113,6 @@ source install/setup.bash
 
 ## 说明
 
-- `offboard_test` 与 `offboard_test_acados` 刻意保持独立,以便在不动已验证的 CasADi/IPOPT 流水线的前提下试验 acados。
 - `mhe_node` 仅做诊断,**不会**修改发给 PX4 的任何指令。
 - `.gitignore` 忽略了 `nmpc_acados_px4`(本地生成的 acados 代码/产物)。
 

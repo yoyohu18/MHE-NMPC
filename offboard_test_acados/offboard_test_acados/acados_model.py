@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
-# acados 专用的动力学,跟 offboard_test.nmpc_node.build_dynamics() 数学上完全
-# 一致,唯一区别是质量 m 不再是常数 p.m,而是 model.p 里的一个运行时参数——
+# acados 专用动力学。质量 m 不是常数 p.m，而是 model.p 里的运行时参数——
 # 这样 mhe_node 估出来的质量才能真的喂给 NMPC 用,不是只发个诊断话题。
-# (CasADi/IPOPT 版本的 offboard_test/nmpc_node.py 不需要这个能力,继续用它
-# 自己原来的 build_dynamics(),两边没有耦合。)
 #
 # model.p = [xr(13维,参考状态); m(1维,当前质量估计); dJ(1维,吊挂惯量增量);
 #            c_xy(2维,复合质心在机体系的水平偏移); d_lumped(3维,平动 lumped
@@ -16,7 +13,7 @@
 import casadi as cs
 from acados_template import AcadosModel
 
-from offboard_test.nmpc_node import tracking_error_sym
+from .common import tracking_error_sym
 
 from .acados_params import p
 

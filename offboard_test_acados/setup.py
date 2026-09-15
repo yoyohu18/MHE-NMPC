@@ -19,7 +19,7 @@ setup(
     zip_safe=True,
     maintainer='clear',
     maintainer_email='chasequarkko@gmail.com',
-    description='acados-based NMPC port of offboard_test/nmpc_node, kept isolated for comparison',
+    description='Payload-adaptive acados NMPC, MHE, and gripper simulation nodes',
     license='TODO: License declaration',
     extras_require={
         'test': ['pytest'],

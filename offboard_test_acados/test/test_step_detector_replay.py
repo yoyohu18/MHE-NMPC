@@ -26,7 +26,7 @@
 # 所以回放等价于把检测器接到真实飞行上。该轮全程 solve failed=0(正常飞行,不是发散
 # 数据),attach t=6.50s,figure-8 切入 t=19.5s,drop t=71.50s。
 #
-# 跑法:PYTHONPATH=<ws>/src/offboard_test_acados:<ws>/src/offboard_test:. python3 本文件
+# 跑法:PYTHONPATH=<ws>/src/offboard_test_acados python3 本文件
 
 import os
 import numpy as np

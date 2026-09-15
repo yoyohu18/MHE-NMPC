@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# MHE 的 acados 模型:把 offboard_test.nmpc_node.build_dynamics() 里同一套四旋翼
+# MHE 的 acados 模型：使用与 NMPC 一致的四旋翼
 # 动力学(旋转矩阵/四元数动力学/角速度动力学)搬过来,唯一的区别是质量 m 不再是
 # 常数 p.m,而是增广进状态向量、跟其余 13 个物理状态一起被估计——这是 acados
 # 官方 MHE 范式(见 acados/examples/acados_python/pendulum_on_cart/mhe/

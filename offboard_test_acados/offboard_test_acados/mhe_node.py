@@ -22,7 +22,7 @@ from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool, Empty, Float64, Float64MultiArray
 from actuator_msgs.msg import Actuators
 
-from offboard_test.nmpc_node import quat_to_rotmat
+from .common import quat_to_rotmat
 
 from .mhe_params import p as mhe_p
 from .mhe_solver_builder import ensure_mhe_ocp_solver
