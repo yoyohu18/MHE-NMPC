@@ -118,6 +118,12 @@ class MHENode(Node):
             'MHE node starting, building/loading solver... '
             f'(geom_coupled={mhe_p.geom_coupled}, N={mhe_p.N}, '
             f'm_min={mhe_p.m_min:.3f}, m_B={mhe_p.m_B:.4f})')
+        # 批次归属凭据:种子 09-15 改默认开,默认值不进 experiment.env,
+        # 这里记节点实际生效值(实验计划 §12.2 配置断代)。
+        self.get_logger().info(
+            f'[effective-env] seed_from_thrust={int(mhe_p.seed_from_thrust)} '
+            f'seed_window_balance={int(mhe_p.seed_window_balance)} '
+            f'geom_coupled={int(mhe_p.geom_coupled)} N={mhe_p.N}')
         self.solver = ensure_mhe_ocp_solver()
 
         # 默认部署链路只允许 motor speed + odometry 进入估计器。旧的 attach/drop

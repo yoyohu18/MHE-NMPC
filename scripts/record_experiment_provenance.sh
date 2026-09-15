@@ -20,6 +20,13 @@ env | LC_ALL=C sort | awk -F= '
   }
 ' > "$OUT_DIR/experiment.env"
 
+# experiment.env 只有显式设置的变量;代码默认值不落盘会让"改默认值"前后的批次
+# 外观相同(09-15 种子默认开时暴露,见实验计划 §12.2)。这里再记每个开关的生效值。
+python3 "$WS/src/scripts/dump_effective_env.py" \
+  "$WS/src/offboard_test_acados/offboard_test_acados" \
+  > "$OUT_DIR/experiment.effective_env.tsv" \
+  || echo "[provenance] WARN: effective env dump failed" >&2
+
 printf '%s\n' \
   "schema_version=1" \
   "run_label=$RUN_LABEL" \
