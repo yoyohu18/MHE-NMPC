@@ -13,7 +13,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKSPACE="$(cd "$REPO/.." && pwd)"
 BUNDLED_RUN="$REPO/paper/data"
 LEGACY_RUN="$WORKSPACE/nmpc_test_results"
-if [ -f "$BUNDLED_RUN/mainline_ab2_manifest.csv" ]; then
+if [ -f "$BUNDLED_RUN/mainline_ab3_manifest.csv" ]; then
   RUN="$BUNDLED_RUN"
   echo "数据源: $RUN (仓库内冻结数据)"
 elif [ -d "$LEGACY_RUN" ]; then
@@ -46,14 +46,21 @@ SOURCES=(
   "cxy_ecc_sweep_20260714_143710.txt|Fig.4 偏心扫格 est-vs-truth(绘图直接解析)"
   "grip_nmpc_20260715_165245.log|Fig.5 B.5 全流程(绘图实际读取源)"
   "grip_mhe_20260803_144036.log|Table 6 timing:MHE solve 耗时(仪表化轮次)"
-  "mainline_ab2_manifest.csv|autonomous-release Tables:76 flights/38 attempted pairs"
+  "mainline_ab3_manifest.csv|原始批次 W3 (483db88;09-15 起仅作对照)"
+  "mainline_ab3b_manifest.csv|Table II W5 + 原始批次 W4 (483db88)"
+  "mainline_ab3c_manifest.csv|原始批次 W3 补 2 对"
+  "mainline_ab3d_manifest.csv|Table II W3/W4(09-14 重跑,MHE_RESID_CONFIRM=false)"
+  "cmdarm_ab_thrustmap_20260915_033942.csv|§Limitations 推力映射 ±5%"
+  "seedwindow_ab_manifest.csv|§Limitations 窗口种子 A/B"
 )
+# 09-15 口径:表 II = ab3d(W3/W4)+ ab3b(W5),有效性按物理 attach(grip_proximity 日志)。
+RELEASE_MANIFESTS=(mainline_ab3_manifest.csv mainline_ab3b_manifest.csv mainline_ab3c_manifest.csv mainline_ab3d_manifest.csv)
 
 echo "=== 1/3 校验冻结数据源 ==="
 missing=0
 if [ -f "$RUN/SHA256SUMS" ]; then
   if (cd "$RUN" && sha256sum --quiet -c SHA256SUMS); then
-    echo "  OK    SHA256SUMS (711 files)                  冻结数据字节级完整性"
+    printf '  OK    %-46s %s\n' "SHA256SUMS ($(wc -l < "$RUN/SHA256SUMS") files)" "冻结数据字节级完整性"
   else
     echo "!! 冻结数据 SHA-256 校验失败"
     missing=$((missing + 1))
@@ -140,16 +147,33 @@ else
 fi
 
 # paired-release manifest 中每个 stamp 必须同时有 MHE/NMPC 原始日志。
-while IFS=, read -r _ _ _ _ stamp _; do
-  [ "$stamp" = "stamp" ] && continue
-  [ "$stamp" = "NA" ] && continue
-  for prefix in grip_mhe grip_nmpc; do
-    if [ ! -e "$RUN/${prefix}_${stamp}.log" ]; then
-      echo "  MISS  ${prefix}_${stamp}.log  mainline_ab2_manifest.csv referenced"
-      missing=$((missing + 1))
-    fi
-  done
-done < "$RUN/mainline_ab2_manifest.csv"
+for manifest in "${RELEASE_MANIFESTS[@]}"; do
+  [ -e "$RUN/$manifest" ] || continue
+  while IFS=, read -r _ _ _ _ stamp _; do
+    [ "$stamp" = "stamp" ] && continue
+    [ "$stamp" = "NA" ] && continue
+    for prefix in grip_mhe grip_nmpc; do
+      if [ ! -e "$RUN/${prefix}_${stamp}.log" ]; then
+        echo "  MISS  ${prefix}_${stamp}.log  $manifest referenced"
+        missing=$((missing + 1))
+      fi
+    done
+  done < "$RUN/$manifest"
+done
+
+# 表 II 及正文依赖配对数的统计:从日志重算,并核对有效配对数没有漂移。
+if [ "$missing" -eq 0 ]; then
+  release_out=$(RELEASE_VALIDITY=physical \
+    RELEASE_MANIFESTS="mainline_ab3d_manifest.csv mainline_ab3b_manifest.csv:W5" \
+    python3 "$REPO/scripts/gripper/aggregate_release_table.py" "$RUN")
+  if grep -q 'pooled pairs=19 ' <<<"$release_out" && grep -q 'pooled completion 32/36,' <<<"$release_out"; then
+    echo "  OK    aggregate_release_table.py (19 pairs, 32/36) Table I/II + 正文释放统计"
+  else
+    echo "!! Table I/II 与正文口径(19 对、32/36)不符:"
+    echo "$release_out" | grep -E 'pooled' | head -5
+    missing=$((missing + 1))
+  fi
+fi
 if [ "$missing" -gt 0 ]; then
   echo "!! 缺 $missing 个数据源,无法复现。这些是冻结日志,不能靠重跑仿真再生"
   echo "   (SITL 无可注入随机种子,重跑得到的是另一次实现,不是同一组数字)。"

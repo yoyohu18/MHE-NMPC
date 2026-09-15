@@ -15,10 +15,11 @@ execution and does not replace the cohort statistics in Table~\ref{tab:complete}
 \label{fig:mission}
 \end{figure*}
 
-The controller issues the gripper-release command itself, but deliberately does not use that
-command to clear its payload model. We report every eventless flight in the final campaign that
-met the pre-registered eligibility criteria---successful MHE payload evidence and survival to
-the release command---and report the excluded attempts separately.
+The controller issues the gripper-release command itself but does not use it to clear its
+payload model. We report every eventless flight in which the payload physically attached (from
+the gripper's attach record) and the vehicle survived to the release command. The
+pre-registered rule judged attachment from MHE mass evidence instead, which silently excluded
+flights whose estimator failed to recognize an attached payload.
 
 \paragraph{Paired command-triggered baseline}
 We retain the pre-registered paired design rather than selecting arm~B alone after the
@@ -27,16 +28,18 @@ command as the detachment event and immediately resets payload geometry and inne
 Arm~B is the proposed interface. The arms also differ before release: arm~A uses the legacy,
 non-continuous geometry path and schedules the inner loop by rewriting PX4 rate gains, whereas
 arm~B uses the continuous $m/s/J$ frame and body-rate-command scaling. A pair enters the
-comparison only when both arms are eligible. Across 23 such pairs (8/7/8 across the three
-conditions) both arms complete 23/23 releases with no observed post-release instability
-(Table~\ref{tab:paired-event}); arm~A has zero confirmation delay by definition.
+comparison only when both arms are eligible. Across 19 such pairs (8/3/8 across the three
+conditions) both arms complete 19/19 releases with no observed post-release instability
+(Table~\ref{tab:paired-event}); arm~A has zero confirmation delay by definition. Only three
+\SI{0.30}{kg}/\SI{4}{m/s} pairs formed because arm~A crashed during or immediately after lift in 11 of 16 attempts
+at that condition (Sec.~\ref{sec:limits}).
 
 \begin{table}[tb]
 \caption{Paired command-triggered ablation. Arm~A clears the model at the command by
-construction; arm~B requires estimator evidence. The last row injects a command/physical-
-detachment mismatch; ``early'' means model clearing before the DetachableJoint is removed
-(``--'': no hold injected, not scored). The one valid but unpaired arm~B run of that row also
-did not clear early (0/6).}
+construction; arm~B requires estimator evidence; arm~C is arm~B with its release evidence armed
+only by the command. The last two rows inject a command/physical-detachment mismatch; ``early''
+means model clearing before the DetachableJoint is removed (``--'': not scored). The one valid
+unpaired arm~B run of the A/B hold row also did not clear early.}
 \label{tab:paired-event}
 \centering
 \scriptsize
@@ -46,11 +49,12 @@ did not clear early (0/6).}
 condition & pairs & A compl. & B compl. & early clear A/B \\
 \midrule
 \SI{0.15}{kg}, \SI{4}{m/s} & 8 & 8/8 & 8/8 & -- \\
-\SI{0.30}{kg}, \SI{4}{m/s} & 7 & 7/7 & 7/7 & -- \\
+\SI{0.30}{kg}, \SI{4}{m/s} & 3 & 3/3 & 3/3 & -- \\
 \SI{0.15}{kg}, \SI{2}{m/s} & 8 & 8/8 & 8/8 & -- \\
 \midrule
-nominal pooled & 23 & 23/23 & 23/23 & -- \\
+nominal pooled & 19 & 19/19 & 19/19 & -- \\
 \SI{0.15}{kg}, \SI{2}{m/s} + \SI{4}{s} hold & 5 & 5/5 & 5/5 & 5/5 / 0/5 \\
+\quad same, arm~C instead of A & 6 & 6/6 (C) & 6/6 & 0/6 / 0/6 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -69,25 +73,42 @@ result supports a difference in model--plant consistency, not a tracking advanta
 avoidance. We did not test a permanently jammed gripper, under which arm~A would carry a loaded
 vehicle with an empty model.
 
-\paragraph{Completion and delay of the complete interface}
-The complete interface confirmed release in 31/31 eligible flights with no observed
-post-release instability (Table~\ref{tab:complete}; two-sided \SI{95}{\percent}
-Clopper--Pearson interval $[\SI{88.8}{\percent},\SI{100}{\percent}]$). This is a conditional
-closed-loop result for the interface as a whole, not a validation of any single release
-detector: Table~\ref{tab:paths} shows that three confirmation paths occurred.
+\paragraph{Command-armed confirmation and unsignaled loss}
+The hold result reflects persistent confirmation, not eventlessness: a variant armed only by the
+command (arm~C, otherwise identical to arm~B, confirming on a \SI{3}{s} thrust drop) also never
+cleared early (0/6 pairs) and confirmed sooner after detachment (median \SI{4.3}{s} versus
+\SI{7.3}{s}). Eventlessness matters when no release command reaches the controller---a gripper
+that opens by itself, a load torn off, or a release triggered elsewhere whose notification is
+lost. With such losses injected at the release phase, arm~B detected the loss in 10 of 18 paired
+flights (4/9 at \SI{2}{m/s}, 4/5 and 2/4 at \SI{0.15}{kg} and \SI{0.30}{kg}/\SI{4}{m/s}; median
+latency \SIrange{2.2}{2.9}{s}), while arm~C, never armed, detected none and kept a phantom first
+moment. Seven of the eight misses occurred because the loaded moment reference had not formed,
+or the payload had not been recognized, before the loss. The cost, a detector exposed throughout loaded flight, was not observed: no release was
+declared before a command or injected loss in 209 loaded flights (\SI{3.7}{h}; per-flight
+\SI{95}{\percent} upper bound \SI{1.4}{\percent}).
 
-The confirmation delay is \emph{bimodal}. In \SI{42}{\percent} of flights the confidence
+\paragraph{Completion and delay of the complete interface}
+The complete interface confirmed release in 32 of 36 eligible flights (Table~\ref{tab:complete};
+two-sided \SI{95}{\percent} Clopper--Pearson interval
+$[\SI{73.9}{\percent},\SI{96.9}{\percent}]$). All four failures, at \SI{4}{m/s}, trace to estimator failure
+(Sec.~\ref{sec:limits}): three never recognized the payload and stayed \textsc{unresolved}, and
+one diverged after release. The pre-registered rule would have excluded the first three
+(31/32). This is a
+conditional closed-loop result for the interface as a whole, not a validation of any single
+release detector: Table~\ref{tab:paths} shows that three confirmation paths occurred.
+
+The confirmation delay is \emph{bimodal}. In 17 of the 32 completed flights the confidence
 crosses threshold while the vehicle is still flying the figure-eight, and confirmation completes
-in a median \SI{3.46}{s} (Fig.~\ref{fig:mission}). In the remaining \SI{58}{\percent} no release
+in a median \SI{3.46}{s} (Fig.~\ref{fig:mission}). In the remaining 15 no release
 evidence is available in maneuver---$\hat s$ has drifted under sustained excitation or the frozen
 reference never formed---so the system reaches its \SI{12}{s} timeout, declares
 \textsc{unresolved}, and executes a \SI{3}{s} smooth brake to hover; confirmation then completes
-at a median \SI{16.48}{s}. Table~\ref{tab:complete} keeps the two modes separate.
+at a median \SI{16.56}{s}. Table~\ref{tab:complete} keeps the two modes separate.
 
 \begin{table}[tb]
 \caption{Release completion and confirmation delay (all eligible arm~B flights). Delay runs
-from the release command to the end of the \SI{1.0}{s} confidence hold. The two delay columns
-are distinct control paths and are not pooled.}
+from the release command to the end of the \SI{1.0}{s} confidence hold and is computed over
+completed flights. The two delay columns are distinct control paths and are not pooled.}
 \label{tab:complete}
 \centering
 \scriptsize
@@ -98,20 +119,21 @@ are distinct control paths and are not pooled.}
 \cmidrule(lr){4-5}
 condition & $n$ & compl. & in-maneuver & via brake-to-hover \\
 \midrule
-\SI{0.15}{kg}, \SI{4}{m/s} & 9 & 9/9 & \SI{2.78}{s} [2.76, 2.90] & \SI{16.56}{s} [16.46, 16.60] \\
-\SI{0.30}{kg}, \SI{4}{m/s} & 11 & 11/11 & \SI{7.08}{s} [6.96, 7.50] & \SI{16.40}{s} [15.76, 16.60] \\
-\SI{0.15}{kg}, \SI{2}{m/s} & 11 & 11/11 & \SI{3.46}{s} [3.16, 4.36] & \SI{16.48}{s} [16.40, 16.50] \\
+\SI{0.15}{kg}, \SI{4}{m/s} & 11 & 10/11 & \SI{2.90}{s} [2.90, 2.90] & \SI{16.60}{s} [16.60, 16.60] \\
+\SI{0.30}{kg}, \SI{4}{m/s} & 13 & 10/13 & \SI{8.95}{s} [8.00, 9.26] & \SI{16.40}{s} [16.20, 16.70] \\
+\SI{0.15}{kg}, \SI{2}{m/s} & 12 & 12/12 & \SI{3.31}{s} [2.95, 4.36] & \SI{16.48}{s} [16.40, 16.50] \\
 \midrule
-pooled & 31 & 31/31 & \SI{3.46}{s} [2.86, 4.46] & \SI{16.48}{s} [16.36, 16.60] \\
+pooled & 36 & 32/36 & \SI{3.46}{s} [2.90, 8.00] & \SI{16.56}{s} [16.46, 16.60] \\
 \bottomrule
 \end{tabular}
 \\[2pt]
 \footnotesize Overall delay max \SI{16.70}{s}. Share confirming only after brake-to-hover:
-\SI{56}{\percent}, \SI{64}{\percent}, \SI{55}{\percent} (rows in order), \SI{58}{\percent} pooled.
+\SI{50}{\percent}, \SI{40}{\percent}, \SI{50}{\percent} of completed flights (rows in order),
+\SI{47}{\percent} pooled.
 \end{table}
 
 \begin{table}[tb]
-\caption{Confirmation paths in the 31 flights of Table~\ref{tab:complete}. Every confirmation
+\caption{Confirmation paths in the 32 completed flights of Table~\ref{tab:complete}. Every confirmation
 used the controller's confidence route (\S\ref{sec:method}); columns record the estimator
 declaration, if any. \emph{Moment-gated}: the detector declared before the confidence crossed.
 \emph{Mass-domain}: the frozen reference never formed; the confidence crossed during or shortly
@@ -126,38 +148,48 @@ maneuver).}
 \toprule
 condition & $n$ & moment-gated & mass-domain & confidence only \\
 \midrule
-\SI{0.15}{kg}, \SI{4}{m/s} & 9 & 9 & 0 & 0 \\
-\SI{0.30}{kg}, \SI{4}{m/s} & 11 & 1 & 7 & 3 \\
-\SI{0.15}{kg}, \SI{2}{m/s} & 11 & 9 & 0 & 2 \\
+\SI{0.15}{kg}, \SI{4}{m/s} & 10 & 9 & 1 & 0 \\
+\SI{0.30}{kg}, \SI{4}{m/s} & 10 & 1 & 3 & 6 \\
+\SI{0.15}{kg}, \SI{2}{m/s} & 12 & 9 & 0 & 3 \\
 \midrule
-pooled & 31 & 19 & 7 & 5 \\
+pooled & 32 & 19 & 4 & 9 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-No flight in any path declared release before the command. In 26 of the 31 flights the
-payload-presence machine made exactly two transitions, one at grasp and one at release; in the
-five confidence-only flights it never declared \textsc{empty} within the logged window (over
-\SI{40}{s} past confirmation). Four of the 31 load declarations were raised by the estimator's
-own directional thrust-residual evidence rather than sustained mass evidence; no external grasp
-signal was consumed. The published first moment decayed continuously rather than stepping to
+No flight in any path declared release before the command. In 23 of the 32 completed flights
+the payload-presence machine made exactly two transitions, one at grasp and one at release; in
+the nine confidence-only flights it never declared \textsc{empty} within the logged window (over
+\SI{40}{s} past confirmation). Every load declaration came from sustained mass evidence; no
+external grasp signal was consumed. The published first moment decayed continuously rather than stepping to
 zero (Fig.~\ref{fig:moment}).
+
+\paragraph{Partial payload loss}
+Four \SI{0.05}{kg} boxes were grasped together and three were detached one at a time (45, 80
+and \SI{115}{s} after grasp) with no signal and no release command; a control arm carried the
+same boxes without loss (five alternating valid pairs per speed). Pre-registered criteria: (a)
+$\hat m$ enters $\pm\SI{0.02}{kg}$ of each new truth in $\ge\SI{80}{\percent}$ of steps; (b)
+paired tracking-RMS difference $\le\SI{0.02}{m}$, no crash; (c) no \textsc{empty} declaration
+after the first two losses. At \SI{2}{m/s} all criteria pass: $\hat m$ followed 14 of 15 steps (median convergence
+\SIrange{1.1}{8.8}{s}) with no false \textsc{empty} and tracking indistinguishable from the
+control arm. At \SI{4}{m/s} (a) reached only its threshold (12/15), so we claim recovery at
+\SI{2}{m/s} only.
 
 \paragraph{Development-stage evidence}
 Two earlier tests motivated the final design but used earlier code and do not validate the final
 detector. A quantity--residual fast branch without moment evidence declared release prematurely
-in 3/9 randomized flights during a \SI{4}{m/s} figure-eight; loaded-flight mass estimates could
-remain below the nominal empty threshold for up to \SI{48}{s}. After its removal, a 12-flight
+in 3/9 randomized flights during a \SI{4}{m/s} figure-eight. After its removal, a 12-flight
 randomized test of the moment-gated detector, run before the frozen reference was introduced,
 produced no pre-command declaration, 11 moment-gated releases (median detector delay
 \SI{1.9}{s}), and one flight that stayed \textsc{unresolved}.
 
 \paragraph{Attempts and exclusions}
-The paired campaign comprised 81 attempts. Arm~B (proposed) made 40: 31 eligible, six crashed
-before the release command, and three lacked MHE payload evidence (the logs cannot distinguish
-capture failure from non-recognition). Arm~A made 41: 30 eligible and 11 pre-release crashes.
-Because the arms differ before release, these rates are reported per arm rather than pooled or
-compared, and neither characterizes end-to-end mission reliability. Table~\ref{tab:paired-event}
-uses the 23 pairs with both arms eligible; Tables~\ref{tab:complete}--\ref{tab:paths} use all 31
-eligible arm~B flights. Tail-window tracking is not compared, because arm~B brakes to hover
+The paired campaign comprised 84 attempts. Arm~B (proposed) made 42: 36 eligible, five crashed
+before the release command (three in the \SI{0.30}{kg}/\SI{4}{m/s} figure-eight, two during
+lift at \SI{2}{m/s}), and one did not physically attach. Arm~A made 42: 25 eligible and 17
+pre-release crashes, 11 of them during or just after lift at \SI{0.30}{kg}/\SI{4}{m/s}. Because the arms
+differ before release, these rates are reported per arm rather than pooled or compared, and
+neither characterizes end-to-end mission reliability. Table~\ref{tab:paired-event} uses the 19
+pairs with both arms eligible; Table~\ref{tab:complete} uses all 36 eligible arm~B flights and
+Table~\ref{tab:paths} the 32 that completed. Tail-window tracking is not compared, because arm~B brakes to hover
 after an unresolved timeout while arm~A continues the figure-eight.

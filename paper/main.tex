@@ -43,12 +43,14 @@ $s=m_P r_{xy}$ from odometry and a rotor-speed thrust proxy that is not computed
 payload estimate; unlike a center-of-mass offset, $s$ remains well defined as the payload
 vanishes. The inertia increment follows from the mass estimate and a weak vertical-arm prior,
 and health-gated, rate-limited updates drive both the NMPC model and body-rate scheduling. In
-PX4 \cite{px4} SITL with physically attached eccentric payloads, release confirmation completed
-in all 31 flights that obtained payload evidence and survived to the release command (31 of 40
-attempts). Confirmation took a median \SI{3.46}{s} when evidence arrived during the maneuver
-and \SI{16.48}{s} when the vehicle first had to brake to hover. When physical detachment was
-delayed by \SI{4}{s} after the command, a command-triggered baseline cleared its model early in
-5/5 paired flights and the proposed interface in 0/5. These results are limited to simulation
+PX4 \cite{px4} SITL with physically attached eccentric payloads, including a \SI{0.30}{kg},
+\SI{4}{m/s} stress test at the vehicle's torque limit, release confirmation completed in 32 of
+36 flights in which the payload attached and the vehicle survived to the release command; all
+four failures, at \SI{4}{m/s}, trace to estimator failure. Confirmation took a median
+\SI{3.46}{s} in maneuver and \SI{16.56}{s} after braking to hover. When detachment lagged the command by \SI{4}{s},
+a baseline clearing on the command did so too early in 5/5 flights, but persistent confirmation,
+with or without the command, never did; when no command reached the controller, the interface still detected
+unsignaled payload loss in 10 of 18 flights. These results are limited to simulation
 and the tested conditions.
 \end{abstract}
 
@@ -96,7 +98,9 @@ release command, and enters \textsc{unresolved} and brakes to hover when evidenc
 (\S\ref{sec:method}).
 \end{enumerate}
 We evaluate the complete interface in PX4 SITL, reporting every attempt, the confirmation path
-each flight took, and a paired delayed-detachment fault injection (\S\ref{sec:autorelease}).
+each flight took, a paired delayed-detachment fault injection, unsignaled partial payload loss,
+and the failures observed at the vehicle's actuator limit (\S\ref{sec:autorelease},
+\S\ref{sec:limits}).
 The runtime estimator consumes only motor speeds and odometry; the sole geometric quantity not
 identified online is a weak vertical-arm prior $r_z$, which is structurally unobservable from
 the thrust-moment channel.
@@ -210,11 +214,11 @@ $W_y$ is the inverse squared odometry noise (\SI{0.02}{m}, \SI{0.05}{m/s}, 0.01,
 \SI{0.02}{rad/s}); $W_w=\mathrm{diag}(10^4 I_6,10^5 I_4,10^3 I_3)$ deliberately trusts the
 dynamics. The arrival cost $W_0=\mathrm{diag}(10^3 I_6,10^4 I_4,10^2 I_3,0.1,100\,I_2)$ is
 centred on the previous window's shifted solution and is nearly uninformative in $m$
-($\sigma\approx\SI{3.2}{kg}$) and $s$ ($\sigma=\SI{0.1}{kg\,m}$). In the reported campaign
-$\beta_j=1$, except that stages
-preceding a self-detected $T_{\text{phys}}$ step (\SI{4.4}{N} from a slow baseline for two
-frames) are scaled by $10^{-4}$ until they leave the window; no external event enters this
-schedule. The published geometry is reconstructed as
+($\sigma\approx\SI{3.2}{kg}$) and $s$ ($\sigma=\SI{0.1}{kg\,m}$). In the reported \SI{4}{m/s} conditions $\beta_j\equiv1$. An earlier residual-triggered
+schedule, which scaled stages preceding a self-detected $T_{\text{phys}}$ step (\SI{4.4}{N} from
+a slow baseline) by $10^{-4}$, remained armed in the \SI{2}{m/s} flights but never fired there; it was
+disabled at \SI{4}{m/s} because grasp and release transients crossed its threshold. No external
+event enters $\beta_j$. The published geometry is reconstructed as
 \begin{equation}
 \begin{aligned}
 c_{xy} &= \frac{s}{m},\\
@@ -392,7 +396,9 @@ make \emph{no} onboard-headroom claim; that requires measurement on the target c
 Setpoints are published at \SI{50}{Hz} by interpolating the latest prediction.
 
 \section{Results}\label{sec:results}
-\emph{Provenance.} The lifecycle cohort uses the final 16-state first-moment interface.
+\emph{Provenance.} The lifecycle cohort uses the final 16-state first-moment interface; its
+two \SI{4}{m/s} conditions were re-flown with the residual-triggered schedule disabled, and all
+lifecycle flights predate the window-based re-initialization seed of \S\ref{sec:limits}.
 The baseline matrix was recorded with the earlier mass-only 14-state MHE and supports only
 the bounded baseline comparison stated below; it does not evaluate the proposed first-moment
 interface. In Table~\ref{tab:matrix}, \emph{truth}
@@ -536,8 +542,8 @@ normalised by its own truth).
 Truth is reconstructed offline as $m_P r_y$ from the simulator-measured grasp offset and never
 reaches the estimator, which runs with no horizontal attachment geometry. $\hat{s}_y$ is zero
 before grasp, rises with no attach notification, holds near truth through the figure-eight,
-and decays to zero after release. Across all 31 eligible flights the carry-phase estimate is
-biased toward zero (slope 0.85; median magnitude underestimate 10.8\%, same direction in
+and decays to zero after release. Across the original campaign's 31 eligible flights the carry-phase estimate
+is biased toward zero (slope 0.85; median magnitude underestimate 10.8\%, same direction in
 31/31; largest at \SI{0.30}{kg}, median 15.7\%). The cause of this bias is not identified; the
 moment-gated detector uses the ratio $\|s\|/\|s\|_{\mathrm{ref}}$, which is insensitive to a
 common scale bias.}
@@ -604,18 +610,17 @@ All system-level evidence is presently SITL-only. Hardware migration replaces si
 speeds with ESC telemetry and must re-identify thrust/torque coefficients, noise floors, timing,
 and gripper compliance before free flight.
 
-\emph{Thrust proxy.} In simulation the plant generates rotor thrust with the same square law
-$k\omega^2$ that the estimator uses, and motor speeds are exact. The experiments therefore do
-not test thrust-map error, speed-measurement noise, bias or delay, or induced-inflow mismatch at
-\SI{4}{m/s} \cite{bangura2012}. Such a test must perturb the plant's thrust map independently of
-the estimator's; changing a shared $k$ cannot probe it.
+\emph{Thrust proxy.} In simulation the plant uses the same square law $k\omega^2$ as the
+estimator, and motor speeds are exact. Scaling only the estimator's thrust map by
+\SI{\pm5}{\percent} (\SI{0.15}{kg}, \SI{2}{m/s}, four flights each) caused no pre-command release
+but defeated the interface in both directions: at 0.95 the payload was never recognized (4/4),
+and at 1.05 a phantom \SI{0.09}{kg} persisted after release (3/4 \textsc{unresolved}). Thus $k$
+must be calibrated well within \SI{5}{\percent}; speed noise, delay and induced inflow
+\cite{bangura2012} remain untested.
 
-\emph{Missing baselines.} We have not compared against a command-triggered baseline that also
-requires persistent residual confirmation, a fixed-parameter NMPC, a CUSUM detector
+\emph{Missing baselines.} We have not compared against a fixed-parameter NMPC, a CUSUM detector
 \cite{basseville1993} on the same signals under a matched false-alarm constraint, or L1-NMPC with
-the final estimator. The removed quantity--residual branch is not a substitute for the first:
-a command-triggered detector opens its window only after the command and faces different
-false-alarm exposure. The vertical arm $r_z$ is unobservable from the
+the final estimator. The vertical arm $r_z$ is unobservable from the
 thrust-moment channel and remains a weak prior; the $s_x$/pitch channel is noisier than
 $s_y$/roll. The deployed diagonal inertia approximation also drops the small
 $O(r_{xy}^{2})$ and yaw-inertia terms.
@@ -668,11 +673,13 @@ real drop; this remains a safe miss handled by \textsc{unresolved}, not permissi
 from the controller's command.
 \fi
 The development-stage tests and the three final-batch confirmation paths are reported in
-Sec.~\ref{sec:autorelease}; 31/31 completions do not establish distribution-wide detector
-robustness. In 12/31 flights the healthy, low-dynamic, in-envelope reference window never
-filled after the \textsc{loaded} declaration, so the moment-ratio test never ran.
+Sec.~\ref{sec:autorelease}; 32/36 completions do not establish distribution-wide detector
+robustness. In 13 of the 32 completed flights the healthy, low-dynamic, in-envelope reference
+window never filled after the \textsc{loaded} declaration, so the moment-ratio test never ran.
 Out-of-envelope $\hat s$ samples are excluded from moment votes but still reach the
-controller's $c_{xy}$ through filtering and slew limits. Reliable reference formation
+controller's $c_{xy}$ through filtering and slew limits. The envelope assumed a
+\SI{0.13}{m} grasp offset while the gripper admitted \SI{0.15}{m}; this affected 2 of 13
+\SI{0.30}{kg} flights and does not explain most missing references. Reliable reference formation
 therefore remains necessary for a robust autonomous release detector.
 
 All reported release batches explicitly enable the release-evidence path. Its built-in
@@ -685,32 +692,30 @@ $\lVert\hat s\rVert$ from \SI{0.012}{\kilo\gram\metre} to
 Deceleration restored the vote within \SIrange{3.3}{3.4}{s} in the affected test flights.
 Together with missing-reference cases, this yields the brake-to-hover delays in
 Table~\ref{tab:complete}. An online counter of first-moment envelope exceedances correlates
-with this outcome at \SI{4}{m/s} (in-maneuver confirmation 7/8 for zero exceedances
-versus 1/12 otherwise; Fisher $p<0.001$), but misses all six delayed \SI{2}{m/s} cases.
+with this outcome at \SI{4}{m/s} (in-maneuver confirmation 9/10 for zero exceedances
+versus 2/10 otherwise; Fisher $p=0.006$), but misses all six delayed \SI{2}{m/s} cases.
 Earlier exit from the maneuver remains unimplemented
 and requires validation.
 
-\emph{Pre-release failures.} Of the six arm~B crashes (Sec.~\ref{sec:autorelease}), two occurred before
-the figure-eight at \SI{0.15}{kg}/\SI{2}{m/s}, whereas four were loaded figure-eight
-divergences at \SI{0.30}{kg}/\SI{4}{m/s}, an operating boundary of that condition. Their grasp
-offsets ($\lvert r_y\rvert=$ \SIrange{0.07}{0.14}{m}) and pre-maneuver roll trim reconstructed
-from rotor speeds (\SIrange{0.20}{0.40}{N\,m} against a \SI{0.5}{N\,m} limit) lie within the
-range of the eleven surviving flights at that condition, so attachment-induced torque
-saturation does not explain them; their mechanism remains unidentified. We make no claim about
-grasp, lift, figure-eight stability, or end-to-end mission reliability.
+\emph{Operating limit.} \SI{0.30}{kg} at \SI{4}{m/s} is a stress test at the vehicle's actuator
+limit, not an operating point. Hover needs \SI{74}{\percent} of maximum thrust, but torque binds:
+in the figure-eight, pitch torque saturated within \SI{98}{\percent} of 5-s diagnostic windows
+and yaw within \SI{53}{\percent} (\SI{46}{\percent}/\SI{16}{\percent} at \SI{0.15}{kg},
+$\le\SI{6}{\percent}$ at \SI{2}{m/s}), and body-rate scaling ran at a median 4.39 of its 5.0 cap. Three of the five arm~B
+pre-release crashes (figure-eight divergences) and three of the four incomplete releases occurred
+there, and the legacy arm~A crashed during or just after lift in 11 of 16 attempts because its
+rate scaling starts from the lower-bound mass estimate while the box is still grounded. Every
+eligible \SI{2}{m/s} flight confirmed release. We claim safe release semantics, not reliable
+flight, at this limit; deployment needs torque margin.
 
-\emph{Self-triggered de-weighting.} The residual-triggered $\beta_j$ schedule of \eqref{eq:mhe}
-fired in 19/21 eligible \SI{0.30}{kg} flights and 2/18 at \SI{0.15}{kg}/\SI{4}{m/s}
-(both arms), but in none of the 22 at \SI{2}{m/s}. Its \SI{4.4}{N} threshold exceeds both
-payload weights, so it responds to fast thrust transients rather than discriminating payload
-weight; in these flights it was crossed by grasp and release transients. A
-later repeat of the two \SI{4}{m/s} conditions with it disabled ($\beta_j\equiv1$; not
-interleaved with the original runs) completed 20 of 21 eligible eventless releases. The
-moment-gated detector again declared first in 10 of them, and no load declaration relied on the
-residual trigger (4 in the original runs). The incomplete flight is a failure we report rather
-than exclude: during the loaded figure-eight the MHE re-initialized repeatedly after consecutive
-solver failures, and the vehicle diverged \SI{2.8}{s} after the release command, before the
-\textsc{unresolved} timeout. Re-initialization seeding is under separate investigation.
+\emph{Estimator failures.} In four flights the published mass never left the empty value (in two,
+repeated solver failures re-initialized from a lower-bound seed); the three at \SI{4}{m/s} flew
+without diverging and stayed \textsc{unresolved}. In one \SI{0.30}{kg} flight the estimate was
+unhealthy for \SI{48}{s} before release; because the phase-timed release command is not gated on
+estimator health, the frozen model no longer matched the vehicle after detachment and it diverged.
+A window vertical-force balance now seeds re-initialization (pre-registered A/B at this
+condition: figure-eight re-initializations 29 to 1); the reported cohort predates it, and
+health-gated release remains open.
 
 A sustained vertical up/downdraft remains intrinsically confounded with a payload change on a
 collective-thrust-only residual; wind is not evaluated in the reported cohort.
@@ -724,12 +729,14 @@ are not modeled. Neither affects which signals the estimator consumes.
 We presented an eventless payload-model interface for quadrotor NMPC that estimates composite
 mass and the horizontal first mass moment from odometry and a rotor-speed thrust proxy, and
 that clears its payload model only on persistent estimator evidence, never on its own release
-command. In PX4 SITL the complete interface confirmed release in all 31 eligible flights (31 of
-40 attempts) through three confirmation paths, with median delays of \SI{3.46}{s} in maneuver
-and \SI{16.48}{s} after braking to hover. Under a \SI{4}{s} delayed detachment, a
-command-triggered baseline cleared its model early in 5/5 pairs and the proposed interface in
-0/5. Hardware validation, thrust-map mismatch, reliable moment-reference formation, and
-stronger baselines remain open.
+command. In PX4 SITL the complete interface confirmed release in 32 of 36 eligible flights through
+three confirmation paths, with median delays of \SI{3.46}{s} in maneuver and \SI{16.56}{s} after
+braking to hover; all four failures arose from estimator failure at \SI{4}{m/s}, three of them
+at the vehicle's torque limit. Under a \SI{4}{s} delayed detachment, persistent confirmation, with or without the
+command, avoided the early model clearing of a command-triggered baseline (5/5); the eventless
+interface additionally detected 10 of 18 unsignaled payload losses that a command-armed
+confirmer cannot see. Hardware validation, thrust-map mismatch, reliable moment-reference formation, gating release
+on estimator health, and stronger baselines remain open.
 
 \bibliographystyle{IEEEtran}
 \bibliography{refs}

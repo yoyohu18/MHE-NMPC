@@ -3,6 +3,32 @@
 **目的**:论文里出现的每一个数字,都能指到一个带时间戳的原始日志,并用一条命令重建。
 审稿人问"这个 4× 怎么来的"、面试官问"这个数据可信吗",答案在这张表里。
 
+> **2026-09-14 当前口径：**正文已删除早期残差阶跃触发降权的正面贡献及其 3.8×
+> 质量阶跃表/图、权重调度优化和风扰误触发结果；这些历史记录仅供审计。正文保留
+> 两项透明消融：(1) 最终主线的 23 个有效 external-event/B 配对；(2) 最终一阶矩
+> 接口的 step-on/off 负面结果，用于说明为何部署版本选择 step-off。
+
+> **2026-09-15 口径更新（覆盖上一段中的 23 对 / 31 次）：**
+> 1. **表 I/II 数据源换代**：W3/W4 用 `mainline_ab3d_manifest.csv`（09-14 重跑，两臂
+>    `MHE_RESID_CONFIRM=false` 即固定权重），W5 沿用 `mainline_ab3b_manifest.csv`（慢基线自触发
+>    armed 但 W5 两臂零触发，逻辑等价）。
+> 2. **有效性改按物理 attach 判定**：`check_run_valid.py` 用 m̂ 判"是否挂上"，估计器锁死会被误分为
+>    attach-fail 而剔出分母。汇总时读 `grip_proximity_<stamp>.log` 的 `attach offset` 重分类，
+>    manifest 本身不改；原口径数字并列保留（31/32）。
+> 3. 结果：配对 19 对（8/3/8），B 全样本 **32/36**，CP [73.9%, 96.9%]；in-maneuver 3.46 s，
+>    brake-to-hover 16.56 s。
+>    复算：`RELEASE_VALIDITY=physical RELEASE_MANIFESTS="mainline_ab3d_manifest.csv mainline_ab3b_manifest.csv:W5" python3 scripts/gripper/aggregate_release_table.py`
+>    （在 `src/` 下执行；不设两个变量 = 09-11 历史口径，逐字不变）。
+> 4. **复现 09-15 之前的任何批次**必须显式设 `MHE_SEED_FROM_THRUST=0 MHE_SEED_WINDOW_BALANCE=0`：
+>    这两个开关 09-15 起默认开（窗口力平衡重锚种子）。复现 ab3/ab3b/ab3c 还须
+>    `MHE_RESID_CONFIRM=true`（`run_mainline_ab_valid.sh` 现默认 false）。
+> 5. **正文压缩、仅在此保留的细节**：自触发降权历史（开启时 W4 A 10/10、B 9/11 越阈；原批次物理
+>    attach 口径 33/34）；窗口种子 A/B 全部数字（`seedwindow_ab_manifest.csv`，S0 8/10 有效、
+>    S1 10/10；重锚 29→1、最长串 17→1、种子误差 17.1%→2.8%；预注册
+>    `~/ros2_ws_HJH/重锚推力种子_预注册_20260914.md` 附录 A）与瞬时推力种子 A/B
+>    （`seedthrust_ab_manifest.csv`，S1 drop 前坠机压线）；四箱 4 m/s 的第 3 级误判空载 1/5、
+>    不丢箱对照臂 m̂ 偏差 −30 g（2 m/s −14 g，事后分析，非预注册）。
+
 **一键复现**:
 ```bash
 cd /home/clear/ros2_ws_HJH/src    # Git 仓库根目录
@@ -15,7 +41,7 @@ bash paper/reproduce.sh --check    # 只校验数据源齐全性
 仅为兼容旧工作区才回落到 `../nmpc_test_results/`。
 
 **一条重要前提**:论文数据**不靠重跑仿真复现**。PX4 SITL 没有可注入的随机种子,重跑
-得到的是**另一次实现**,不是同一组数字(这一点本身是论文 §IV-C 负结果的成因之一)。
+得到的是**另一次实现**,不是同一组数字。
 因此复现的定义是:**冻结的原始日志 → 图表 → PDF** 这一段逐次一致。原始日志是数据的
 唯一真源,不可再生,不要删。
 
@@ -57,11 +83,11 @@ artifact 说明中保留，不得把“首个包含提交”简写成“运行 c
 2. **这 19 份 metadata 没有一份是论文表格的冻结数据源**。它们属于 07-02--07-07 的
    `gacados` / `ecc_sweep` 批次；论文的 Fig.4 用的是 `cxy_ecc_sweep_20260714_143710`，
    与 07-07 的 `ecc_sweep` 批次不是同一批。
-3. 它们唯一的论文用途是**对 Fig.3 的锚点提供间接旁证**：`71810ab` 提交于 07-03 02:14，
-   Fig.3 的两份日志为 07-03 03:18 与 16:20，而同日 18:27 的 metadata 记录仍是
-   `71810ab`（更早的 07-02 20:36--07-03 02:07 批次记录的是前一个提交 `67fb11c`）。
-   这把 Fig.3 在时间上**夹**在 `71810ab` 内，提高了锚点的可信度，但因 dirty=17 且无
-   diff，等级仍为 `R`。
+3. ~~它们唯一的论文用途是对 Fig.3 的锚点提供间接旁证~~ —— **2026-09-12 起本条失效**：
+   Fig.3 已改用 07-13 的 `nosignal_ablation_20260713_182612` 批次（原因见下表 Fig.3 行），
+   不再依赖 07-03 的那两份日志。因此这 19 份 metadata **目前不为论文任何图表提供锚点**，
+   本节仅保留作历史记录。（原文：`71810ab` 提交于 07-03 02:14，旧 Fig.3 的两份日志为
+   07-03 03:18 与 16:20，同日 18:27 的 metadata 仍记 `71810ab`，把旧图夹在该提交内。）
 
 ### 对外（artifact / 审稿回复）的标准表述
 
@@ -87,11 +113,19 @@ timing/event/learned/L1/wind 与 Figs.3--5 的证据，因此应保留并诚实�
 | Fig.1 architecture | `paper/figs/fig_gen.py` | S; 09-10 审计时 `src`=`a38ceed` | 当前 deployed 架构，非数据图 | 一致 |
 | Fig.2 window deweight | `paper/figs/fig_gen.py` | S; 机制最早见 `e5c0c32` | 示意图，柱高 0.18 不是实验权重 | 一致；不得把示意值当数据 |
 | Table timing | `grip_nmpc_2026073*.log` 冻结集（141 文件/1009 solve 样本）；`grip_mhe_20260803_144036.log` | R; NMPC 设施首收口 `a7b87f1`，MHE timing 首收口 `196cd9a` | **legacy mass-only MHE**，不是正文的 16-state moment MHE；NMPC 13/4、20 Hz 一致，MHE 当时为 14-state mass-only | **已修正**表注、state dim 和正文 headroom 声明;**16-state MHE 已于 09-11 实测并写入正文**(`grip_mhe_2026091*.log`,n=3740,弃每轮前 20 帧:中位 9.2ms / p90 24.6 / p99 59.2 / max 72.8,周期 100ms)⇒ 比 14-state 慢约 7×、尾部占周期 60%,**正文明确不作 onboard-headroom 声称** |
-| Table event trigger | `nosignal_ablation_20260713_182612.txt` + manifest 所列 36 对 MHE/NMPC 日志 | R; 执行设施首收口 `e5c0c32`，控制指标聚合为 `10efa34` | wrench；mass-only；M0 1.5 N；fixed=不降权，signal=外部事件武装，nosignal=残差自触发 | 一致；与最终 eventless interface 无关 |
-| Fig.3 mass timeline | `mhe_node_20260703_162003.log` (fixed) + `mhe_node_20260703_031851.log` (event) | R; 当日最近已提交快照 `71810ab`，日志无 HEAD；同日 metadata 记 `git_rev=71810ab dirty=17`，仅为间接旁证（见上文例外小节） | wrench；mass-only；外部事件触发 | **已修正** Simulation Setup 曾误将它列入 DetachableJoint |
+| Table event trigger | `nosignal_ablation_20260713_182612.txt` 中 fixed 与 nosignal 两臂的 24 组 MHE/NMPC 日志 | R; 执行设施首收口 `e5c0c32`，控制指标聚合为 `10efa34` | wrench；mass-only；fixed=不降权，nosignal=1.5 N 残差自触发 | 与最终 eventless interface 无关 |
+| Fig.3 mass timeline | `nosignal_ablation_20260713_182612.txt` 的 δm=−0.3 kg 两臂各 6 轮（`fixed` + **`nosignal`**）| R; 与 Table 1 同批同源，执行设施首收口 `e5c0c32` | wrench；mass-only；**纯残差自触发，不消费外部事件** | **2026-09-12 重画**：原图用 07-03 的外部事件武装日志（`mass event [drop] received: armed`），与 eventless 主张冲突，已换到同批 `nosignal` 臂，n=6 中位+min–max 带 |
 | Table learned schedule | `alpha_only_20260730_214611.txt` 及其 64 轮日志；10 Hz 补充用 `alpha_only_10hz_20260731_150621.txt` | R; 首个包含设施 `a7b87f1` | mass-only；外部 event；`geom_source=online`，但 `geom_prior_mode=truth`；M0/alpha/rhythm/$\theta^*$ 四臂如 manifest | 正文已标注 geometry prior at truth；不代表最终 estimate-only 主线 |
 | Fig.4 $c_{xy}$ sweep | `cxy_ecc_sweep_20260714_143710.txt` | R; estimator=`8fa0fd8`，批次脚本首收口=`7afb97b` | mass-only MHE + **窗外慢滤波的 motor-torque inversion precursor**；非 moment-state MHE；0.08 m 格为旧 `grip_geom_mp_floor=.15` 重跑 | 正文已称 precursor；绘图脚本已改为从该文件解析，不再硬编四个点 |
-| autonomous completion/performance/void tables | **已于 2026-09-11 在最终代码上重跑**:`mainline_ab3_manifest.csv`(W3)+ `mainline_ab3b_manifest.csv`(W4/W5),77 架次 / **21 个完整配对**(B 臂有效轮次 29,两者口径不同)。旧数据 `mainline_ab2_manifest.csv`(09-04, 76 架次)保留备查但**不再是表 II 的来源** | **E**;`git_head=483db88`,运行时写入 `mainline_ab3{,b}_manifest.provenance.txt`(含三个源文件 sha256 与 dirty 清单) | 最终默认档(`ESTIMATE_MOMENT=1`/`frozen`、`external_event=false`、`geom=estimate`、brake-to-hover 已实现) | **表 II 已按双峰改写**:in-maneuver 3.76 s vs via brake-to-hover 16.46 s,完成 21/21。⚠️ 旧表的单峰"中位 2.70 s / max 4.54 s"描述的是**没有 UNRESOLVED→brake-to-hover 路径的旧代码**,已作废 |
+| paired external-event baseline + autonomous completion | **09-15 换代**：W3/W4=`mainline_ab3d_manifest.csv`（09-14，`MHE_RESID_CONFIRM=false`），W5=`mainline_ab3b_manifest.csv`；manifest、`grip_{nmpc,mhe,proximity}` 日志均已收入 `paper/data/` 并登记 `SHA256SUMS`（四份 manifest 的全部 proximity 日志一并收入，供物理 attach 判定）。 | **E**；ab3d 运行时源码身份见 `mainline_ab3d_manifest.provenance.txt` | A 将 command 当作 detachment event；B 为最终无事件档；有效性按物理 attach（见文首 09-15 说明） | 配对 19 对（8/3/8），A、B 均 19/19；W4 仅 3 对因 A 臂 16 次中 11 次 LIFT 段坠机。B 全样本 32/36（原 m̂ 口径 31/32），CP [73.9%, 96.9%]；in-maneuver 3.46 s，brake-to-hover 16.56 s。4 次失败：3 次未识别载荷（170625、172347、194014，UNRESOLVED 未坠机）+ 185509 释放后坠机。 |
+| §Limitations operating limit + estimator failures | 同上两份 manifest | 同上 | 执行器占用取 figure-8 切入 10 s 后至 DROP 指令前的 `[flight-diag]` 5 s 窗 | `python3 scripts/gripper/audit_limit_and_estimator_failures.py`：W4 pitch/yaw 饱和窗比例 98%/53%、scale 中位 4.39；悬停推力 74% Tmax；未识别载荷 4 次（含 W5 031845，已完成）；185509 drop 前不健康 48.2 s、释放后 +1.62 s 四通道全饱和。 |
+| command-armed baseline C + unsignaled loss | `paper/data/cmdarm_ab_delayed_20260914_233555.csv`、`..._20260915_024512.csv`（延迟脱离 W5）；`cmdarm_ab_uncommanded_20260915_{001032,025126,063430}.csv`（W5）、`cmdarm_ab_uncommanded_W3_20260915_030417.csv`、`cmdarm_ab_uncommanded_W4_20260915_042341.csv`；`..._000521` 为注入器 bug 作废批，不计入。manifest、provenance、日志均已于 09-15 收入 `paper/data/` 并登记 `SHA256SUMS` | 批次与注入代码见 `夜间实验总结_20260915.md`（ros2-ws-hjh-5f 会话）；预注册 `~/ros2_ws_HJH/推力代理与matched基线_预注册_20260914.md`（含附录 A） | C = B + `release_arm_on_command`（指令开窗 + 推力降到空机 3 s 确认）；有效性按物理 attach | `python3 scripts/gripper/stage_physical_validity.py OUT paper/data/cmdarm_ab_*.csv`，再 `python3 scripts/gripper/aggregate_cmdarm_ab.py OUT/cmdarm_ab_delayed_*.csv OUT/cmdarm_ab_uncommanded_*.csv`：延迟脱离 6 对，提前清 B 0/6、C 0/6，脱离→确认中位 B 7.33 s、C 4.26 s；非计划丢失识别 B 10/18（W5 4/9、W3 4/5、W4 2/4）、C 0/18。（总结文档写的 B 11.5 s 与脚本不符，以脚本为准。）B 的 8 次漏检：2 次从未 LOADED，5 次丢失时一阶矩参考未形成，1 次参考已形成但 ratio=1.83。 |
+| §Limitations thrust proxy (±5% estimator-side thrust map) | `paper/data/cmdarm_ab_thrustmap_20260915_033942.csv` + 日志（09-15 收入） | 注入代码 `thrust_map_fault_gain`（mhe_node，默认 1.0）；预注册同上实验 2 | W5；只改估计器读到的 kω²，Gazebo 与 NMPC 不变；每臂 4 轮；**0.95 臂 4/4 原判 attach-fail，物理上均已挂上** | `stage_physical_validity.py OUT paper/data/cmdarm_ab_thrustmap_*.csv` 后 `aggregate_cmdarm_ab.py OUT/cmdarm_ab_thrustmap_*.csv`：G0.95 drop 前质量偏差 −6.78%（=载荷隐形）、完成 1/4、UNRESOLVED 4/4；G1.00 完成 4/4；G1.05 放下后 m_end 2.15 kg（幽灵 +0.09）、UNRESOLVED 3/4；三臂指令前误释放均 0。 |
+| pre-command false-release audit (text: 209 flights, 3.7 h, ≤1.4%) | ab3/ab3b/ab3c/ab3d、`delayed_detach_w5_{5pairs,pair5_retry}.csv`、`cmdarm_ab_delayed_*`、`cmdarm_ab_uncommanded_*`、`seedthrust_ab_manifest.csv`、`seedwindow_ab_manifest.csv`（均在 `paper/data/`） | 09-05 检测器修复后的全部非故障批次；**不含** thrustmap（故障注入）与四箱（无指令、按设计有丢失） | 暴露 = 首次 LOADED 至指令/注入丢失；计 `LOADED->EMPTY (drop` 与 `载荷释放(` | `python3 scripts/gripper/audit_precommand_false_release.py <上述 manifest>`：B 类 155 次（2.67 h）+ A 臂 54 次（0.99 h）全部 0 次。C 臂被 `release_arm_on_command` 抑制时只打 `[cmd-armed] suppressed`、不产生上述两类行，审计脚本对 C 恒为 0，故 C 臂**改用 suppressed 行判定**：23 次 / 17.6 min 共 273 行 suppressed，全部在指令或注入丢失之后，指令前 0 次。合计 132（B 类，不含 C）+54（A）+23（C）=209 次、3.66 h，单侧 95% 上界 1−0.05^(1/209)=1.42%。另一会话总结写的 0/139、2.1% 是更小的样本集，未注明组成，正文不用。 |
+| §Limitations envelope disclosure | 主线 ab3d/ab3b W5 的 proximity 日志 | `gripper_params.yaml` 的 `r_xy: 0.15` 覆盖了 headless 的 `-p r_xy:=0.13`（ROS 2 按节点名写入参数文件的键优先）；MHE `payload_rxy_envelope` 默认 0.13 → `moment_abs_max`=0.039 偏紧，正确应 0.045 | 真实 \|s\|=m_P·r_xy（attach offset）| W4 13 次中 2 次真实 \|s\|>0.039，两次均未走 moment 路径；其余 11 次中 7 次同样未形成参考 ⇒ 非主因。**代码未修**（改 envelope 会改变检测器行为，需重跑验证）。 |
+| partial payload loss (four-box) | `nmpc_test_results/partial_loss_S2_20260915_{005553,013531}.csv`（2 m/s）、`partial_loss_S4_20260915_{020610,061055}.csv`（4 m/s）；`..._004323/004639` 为冒烟，不计入 | 批次与注入代码见 ros2-ws-hjh-5f 会话的 `夜间实验总结_20260915.md`；四份 manifest 与 84 个 `grip_{nmpc,mhe,proximity}` 日志已于 09-15 收入 `paper/data/` 并登记 `SHA256SUMS` | 4×0.05 kg，45/80/115 s 依次无信号丢 3 个；L/N 两臂 ABBA；有效性按箱数（不经 m̂） | `python3 scripts/gripper/aggregate_partial_loss.py paper/data/partial_loss_S2_*.csv`（S4 同理；两份 manifest 的 level 行相加）：2 m/s 入带 14/15、误判空载 0；4 m/s 入带 12/15（压线）、第 3 级误判 1/5。预注册 `~/ros2_ws_HJH/部分丢失四箱实验_预注册_20260915.md`。 |
+| delayed physical-detachment fault injection | `nmpc_test_results/delayed_detach_w5_5pairs.csv` + `delayed_detach_w5_pair5_retry.csv`; aggregate with `scripts/gripper/aggregate_delayed_detach_ab.py` | **E**；两份同名 provenance 文件记录源码哈希；冻结 manifest 见 `paper/data/delayed_detach_w5_manifest.csv`，原始日志仍在 workspace `nmpc_test_results/` | W5, 0.15 kg, 2 m/s；控制器正常发 release command，夹爪节点将 DetachableJoint 继续保持 4 s；A/B 顺序交替 | 12 个单臂尝试，1 个 PX4 启动失败，1 个有效 B 无法配对，得到 5 个有效配对。A 提前清模 5/5，B 0/5；实际保持 4.01 s；B 4/5 进入 UNRESOLVED。 |
+| final-interface step-on/off ablation | `../nmpc_test_results/stepab_20260912_234849.txt` 与 16 组 `grip_{nmpc,mhe}_<stamp>.log`；每轮 provenance 保存 dirty reconstruction | R；各轮 `VERDICT.txt` 禁止 exact-commit 表述 | W3，8 对；step-on=`resid_step_enable=true`, 0.6 N；step-off=false；两臂 `resid_release_geom=false` | step-on 8/8，step-off 7/8；双方确认的 7 对中延迟差中位 +1.85 s，Wilcoxon p=.578；28 个 on 边沿中 12 个不对应 attach/release。该批尚未收入 `paper/data/`，复现需保留工作区原始日志。 |
 | Table release replay | **已冻结**：`paper/manifests/release_replay_20260905.csv`（73 行有序清单 + 每文件 SHA-256，覆盖 `20260904_032225`–`20260905_000352`） | E（判决代码）=`078b054`；被回放日志的生成代码异质且多数为 R | detector 是 078 口径；输入队列混合历史配置 | **09-10 已恢复并核验**（七项指纹逐位一致，见 `manifests/release_replay_20260905.md`）；顺带修掉表内 48/59→53/59 的串阈值错误 |
 | Table fastA smoke | `20260905_{150124,...,152924}` 九轮 MHE/NMPC 日志 | R; 运行时 HEAD 候选 `d73fe4a`，日志未写 HEAD | moment=1/frozen；external=false；geom=estimate；ratchet=false；floor=.05；tau=command；motor avg=false | 与表述一致；fastA 已否决，不是当前 detector |
 | corrected 12-flight smoke (text) | `20260905_{160013,...,164135}` 十二轮 MHE/NMPC 日志 | R; 最近代码提交 `c43781d` | 同上；fastA 删除 + health gate；尚未加 frozen moment reference | 正文已限定为 fail-safe semantics，不冒充最终 detector 鲁棒验收 |
@@ -171,9 +205,21 @@ PYTHONPATH="$audit_a7/scripts/masschanger:$audit_a7/scripts/gripper" \
   paper/data/geom_grid_20260723_171711.txt
 
 cd /home/clear/ros2_ws_HJH/src
+# 表 II(B-only 31 次)以及正文中依赖样本数的全部统计:
+# 完成率与 CP 区间、延迟双峰、释放路径、状态机转换、自触发声明、ovr Fisher、作废统计
+python3 scripts/gripper/aggregate_release_table.py paper/data
+
+# 09-04 旧批(已不是表 II 来源,仅备查)
 python3 scripts/gripper/aggregate_mainline_ab.py paper/data/mainline_ab2_manifest.csv
 python3 scripts/gripper/verify_mainline_ab2.py
 ```
+
+`aggregate_release_table.py` 的口径写在脚本 docstring 里,要点:
+- 纳入样本 = 三份 manifest 中 `arm=B` 且 `validity=valid` 的全部飞行；A 臂不进入论文统计。
+- IQR 的 p25 用 numpy `method='nearest'`、p75 用 `method='higher'`。这是 21 对表格当初的
+  实际口径(单一 numpy 方法复现不出全部格子),为保持可比沿用;属非标准混合口径。
+- `ovr` = drop 指令之前 `[s-collapse]` WARN 行"本轮累计 N 帧"的最大值,**不是**普通行的
+  `ovr=` 字段(后者只在 moment 基准就绪后才打印)。
 
 上述 `git archive` 会把 parser 和其 helper 从**同一提交**一起恢复；不得与当前
 parser 混用。复算后可删除 `$audit_e5`/`$audit_a7` 临时目录。
@@ -184,9 +230,8 @@ parser 混用。复算后可删除 `$audit_e5`/`$audit_a7` 临时目录。
 
 | 论文位置 | 数字 | 数据源 (`nmpc_test_results/`) | n |
 |---|---|---|---|
-| Table 1 | 事件触发 settling 1.20→0.30 s (−0.3 kg,**4.0×**) | `nosignal_ablation_20260713_182612.txt` + 其所列日志 | 6/格 |
-| Table 1 | 事件触发 settling 1.57→0.56 s (−0.8 kg,**2.8×**) | 同上 | 6/格 |
-| Table 1 | 无信号自触发 0.32 / 0.57 s(与有信号版差 ~0.02 s) | 同上 | 6/格 |
+| Table 1 | 自触发 settling 1.20→0.32 s (−0.3 kg,**3.8×**) | `nosignal_ablation_20260713_182612.txt` 的 fixed/nosignal 两臂 | 6/格 |
+| Table 1 | 自触发 settling 1.57→0.57 s (−0.8 kg,**2.75×**) | 同上 | 6/格 |
 | Table 1 | pos_err 峰 0.200→0.173 m / 0.545→0.482 m | 同上 | 6/格 |
 | §IV-C | **N 版** CEM 训练 loss 11.05→9.74(−12%),96 集 0 失败 | `工作日志_20260710.md` §1 | 96 集 |
 | §IV-C | N 版 θ\*=[−4.58,−1.46,0.34,−1.30] @1.485 N | 同上 | — |
@@ -201,13 +246,15 @@ parser 混用。复算后可删除 `$audit_e5`/`$audit_a7` 临时目录。
 | Table 2 | 功效 97% / 87%(d_z=1.57/1.29) | 由上表配对差 σ=0.407/0.311 s 算得 | — |
 | §VI-B | 10Hz 复现:0.2 kg **+0.70 s**(θ\* 更慢,仅 5/8 收敛) | `alpha_only_10hz_20260731_150621.txt` | 8/格,32 runs |
 | §VI-B | M0 自身 10Hz 回到历史值 3.83 vs 3.89 s(设施可复现铁证) | 同上 | 8 |
+| Table 4 | 暂态峰:逐格 L1 vs online 两格 p=.008/.012(未校正),8 次检验校正后不显著 → 正文改为"不声称暂态优势"并给出依据(原写"statistically indistinguishable"无检验) | 同上 | 5/格 |
 | Table 4 | L1 三方矩阵,60/60 稳定零发散 | `geom_grid_20260723_171711.txt` | 5/格 |
-| Table 4 | L1 恢复慢 15–35%(4.24–4.90 vs 3.56–3.92 s) | 同上 | 5/格 |
+| Table 4 | L1 恢复慢 **8–32%**(逐格配对 vs `online`,中位 +16.1%;4/4 格分别 +15.2/+8.2/+31.7/+16.9%,3 格 p<.05) | 同上 | 5/格 |
+| — | ⚠️ **2026-09-12 勘误**:原记 15–35% 是拿 L1 区间端点除 ours 区间端点(跨格混搭 4.24/3.70、4.90/3.62),非逐格配对,上下界都不成立;正文与摘要已改。摘要原写"我们快 15–35%"与正文"L1 慢 15–35%"方向不等价(慢 16% ⇔ 快 13.8%),一并改掉 | | |
 | Table 5 | 垂直风 FPR 在 1.5 N 阈值锐阶跃(0/3 → 3/3) | `wind_fpr_20260727_150703.txt` | 3/格 |
 | Table 5 | 水平风 2× 阈值(3 N)仍 0/3 误触发 | 同上 | 3/格 |
 | Table 6 | NMPC solve p50 1.3 / p99 2.2 ms @20 Hz | `grip_nmpc_2026073*.log` 池化 | 1009 样本 |
 | Table 6 | MHE solve 均值 1.48 / 单帧峰 5.1 ms @10 Hz | `grip_mhe_20260803_144036.log` | 63 窗口×20 解 |
-| Fig.3 | fixed/event 质量估计时线 | `mhe_node_20260703_162003.log` + `mhe_node_20260703_031851.log` | 1+1 轮 |
+| Fig.3 | fixed/**nosignal** 质量估计时线 (δm=−0.3 kg) | `nosignal_ablation_20260713_182612.txt` 所列 6+6 轮 | 6+6 轮 |
 | Fig.4 | c_xy 在线估计 vs 真值 | `cxy_ecc_sweep_20260714_143710.txt` | 4 格 |
 | Fig.5 | B.5 抓取→8字→投放全流程 | `grip_nmpc_20260715_165245.log` | 1 轮 |
 
@@ -295,7 +342,7 @@ grep -oP "solve=\K[0-9.]+" ../nmpc_test_results/grip_mhe_<stamp>.log    # MHE
 ## 已知的取值口径
 
 - `t = 0` 定义为 **`T_phys` 越过基线**的物理生效时刻,不是指令下发时刻。
-- **入带**定义 ±0.08 kg;主指标是 **settling(驻留收敛)**,不是 first-entry。
+- **入带**定义 ±0.08 kg 或阶跃的 15%（取大者；−0.8 kg 格为 ±0.12 kg）;主指标是 **settling(驻留收敛)**,不是 first-entry。
   first-entry 在本数据上不稳健(估计值可穿带再出),会把 M0 与 θ\* **排反**——
   一个早期的 −28% 结论就是这个指标的伪影,已撤回(§VI-B 末)。
 - 所有学习相关比较一律 **run 内配对差**,绝不跨批次比绝对值:M0 基线本身跨会话
@@ -332,10 +379,10 @@ grep -oP "solve=\K[0-9.]+" ../nmpc_test_results/grip_mhe_<stamp>.log    # MHE
    论文正文也已就此显式声明幸存者偏差。
 
 > ⚠️ **2026-09-11 更新**:以下 09-04 的数字**已被最终代码上的重跑取代**(见审计矩阵该行)。
-> 新结果:**21/21 完成**,CP 双侧 95% 区间 **[83.9%, 100%]**;延迟**双峰**——
-> in-maneuver **3.76 s** [2.86, 7.20](38%)、via brake-to-hover **16.46 s** [16.36, 16.60](62%),max 16.60 s。
-> ⚠️ 口径:表题为 "valid **pairs** only",故 n=21 是**完整配对数**(A/B 两臂都有效),
-> 不是 B 臂有效轮次数(29)。两者不可混用 —— 29 那个数一度被误填进表,已更正。
+> B-only 结果：**31/31 完成**，CP 双侧 95% 区间 **[88.8%, 100%]**；延迟**双峰**——
+> in-maneuver **3.46 s** [2.86, 4.46](42%)、via brake-to-hover **16.48 s** [16.36, 16.60](58%)，max 16.70 s。
+> 释放路径 moment 19/31、质量域 7/31、MHE 未判 5/31；状态机恰两次转换 26/31；
+> ovr：4 m/s 下 ovr=0 时 in-maneuver 7/8 vs ovr>0 时 1/12（Fisher p=0.0008）。
 > **不得把两支合并成单一中位数**。以下保留为历史记录。
 
 **统计**:22/22 的 Clopper--Pearson 双侧 95% 区间 = [84.6%, 100%],论文按此表述,
@@ -538,3 +585,35 @@ load latch 与旧质量武装再次串联。修复方向是仅从统一 detector
 `/gripper/state`：以 drop 前出现 `ATTACHED` 且没有提前 `DETACHED` 作为物理 capture
 成功；同时把 MHE 是否进入 `_load_armed`、是否建立 moment reference 作为另一列。
 论文表中的旧 `attachment not achieved` 已相应改名为 `payload not evidenced by MHE`。
+## Recorded mission illustration (2026-09-11 addition)
+
+`figs/fig_mission.py` generates `fig_mission.pdf` and the separate
+`fig_mission_release_detail.pdf` from the frozen logs in
+`data/mission_20260911_033026/`. The selected flight is the B arm of the
+last complete W5 pair, not a best-tracking-error selection. Its controller log
+contains 1903 dense samples; its MHE log contains 100 published first-moment
+decay samples. Wall timestamps are aligned to the median controller handoff
+epoch inferred from the dense samples. The source manifests and runtime
+provenance accompany the logs; SHA-256 values and event times are recorded in
+`figs/fig_mission_provenance.json`.
+
+The spatial panel is **reference geometry only** (planar Gerono figure-eight,
+radius 10 m), not measured XY, not a reconstruction of the ramp, and not an
+actual-vs-reference comparison. Continuous XY was not stored in these logs.
+The temporal panels plot recorded height, controller-consumed mass estimate,
+and position-error norm from the first to the last dense log sample; they do
+not include the earlier takeoff/approach segment. Confirmation occurs 4.456 s
+after the release command. The separate detail figure shows only the logged
+release-decay interval, without fabricating earlier confidence samples.
+## Shared equation and figure typography
+
+The manuscript preserves IEEEtran conference column dimensions and equation
+numbering. Display equations use aligned relations and semantic line breaks;
+the state-vector transpose is upright and payload-frame continuation lines
+remain inside the column. No display is scaled down as an image.
+
+`figs/paper_style.py` supplies the common Times-compatible font, STIX math,
+blue/orange/green palette, axis styling, and embedded TrueType PDF fonts for
+`figs/fig_gen.py` and `figs/fig_mission.py`. This palette is an editorial choice,
+not a conference requirement. Regenerate both scripts from `paper/`, then run
+`latexmk -pdf -interaction=nonstopmode -halt-on-error main.tex`.
