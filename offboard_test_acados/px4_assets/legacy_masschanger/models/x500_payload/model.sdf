@@ -1,0 +1,115 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!--
+  跟 Tools/simulation/gz/models/x500/model.sdf 完全一样的机身/电机配置
+  (同样 include x500_base + 4 个 MulticopterMotorModel 插件,数值原样照抄,
+  不是重新调的)。
+
+  方案A(投放,不是抓取),第一版:payload 作为一个远处独立 spawn 的 dynamic
+  模型,飞到起点后用 DetachableJoint 焊上去——实测这条路会让飞机剧烈姿态
+  失控飞不起来,根因后来钉死了:只要 world 里存在一个独立于机体之外的
+  dynamic 刚体,无论距离多远、是否经历下落瞬态,都会触发这个问题。
+
+  第二版:把 payload_link 直接定义在本模型内部、紧贴 base_link,靠
+  DetachableJoint 在仿真启动时 attach、运行中 detach——结果发现
+  DetachableJoint 的设计前提是连接两个独立的 model,parent/child 都在
+  同一个 model 内(child_model 填自身名字)这种用法被插件静默忽略,约束
+  从未真正建立。用带仿真时间戳的世界坐标时间序列实测验证:静止状态下
+  payload_link 相对 base_link 的位置看似稳定不变,但那只是因为没有外力
+  试图分开两者；一旦飞机起飞需要克服重力加速,base_link 和 payload_link
+  立刻分道扬镳、方向相反地自由运动——约束从未传递过任何力。这也顺带说明
+  了一个方法论教训:验证刚体约束是否生效,必须看受力时的响应,不能只看
+  静态相对位置是否共位。
+
+  第三版(当前):彻底放弃"额外刚体 + 约束"这条路,改用一个自定义的
+  gz-sim C++ 系统插件(见 ../../../../../../ros2_ws_HJH/src/
+  offboard_test_acados/gz_plugins/mass_changer/),直接在仿真运行时
+  用 EntityComponentManager::SetComponentData<components::Inertial>
+  改写 base_link 自身的质量/惯量分量——物理引擎下一步就会用新值积分,
+  IMU/推力的响应是真实的,质量从来没有以任何形式表现为一个独立刚体,
+  彻底规避了前两版踩过的所有坑。插件在 Configure 阶段把 base_link 设成
+  满载(2.0kg 空机 + 1.5kg payload,质心假设重合、不做平行轴偏移——
+  MHE 目前只估质量这一个自由度,偏移只会引入无意义的力矩噪声),收到
+  /payload/drop_mass 消息后切回空载,只切一次。质量做减法而不是加法——
+  对 MHE 在线收敛能力的测试价值是等价的,阶跃方向不影响验证目的。
+-->
+<sdf version='1.9'>
+  <model name='x500_payload'>
+    <include merge='true'>
+      <uri>model://x500_base</uri>
+    </include>
+
+    <plugin filename="mass_changer" name="mass_changer::MassChanger">
+    </plugin>
+    <plugin filename="gz-sim-multicopter-motor-model-system"
+      name="gz::sim::systems::MulticopterMotorModel">
+      <jointName>rotor_0_joint</jointName>
+      <linkName>rotor_0</linkName>
+      <turningDirection>ccw</turningDirection>
+      <timeConstantUp>0.0125</timeConstantUp>
+      <timeConstantDown>0.025</timeConstantDown>
+      <maxRotVelocity>1000.0</maxRotVelocity>
+      <motorConstant>8.54858e-06</motorConstant>
+      <momentConstant>0.016</momentConstant>
+      <commandSubTopic>command/motor_speed</commandSubTopic>
+      <motorNumber>0</motorNumber>
+      <rotorDragCoefficient>8.06428e-05</rotorDragCoefficient>
+      <rollingMomentCoefficient>1e-06</rollingMomentCoefficient>
+      <rotorVelocitySlowdownSim>10</rotorVelocitySlowdownSim>
+      <motorType>velocity</motorType>
+    </plugin>
+    <plugin filename="gz-sim-multicopter-motor-model-system"
+      name="gz::sim::systems::MulticopterMotorModel">
+      <jointName>rotor_1_joint</jointName>
+      <linkName>rotor_1</linkName>
+      <turningDirection>ccw</turningDirection>
+      <timeConstantUp>0.0125</timeConstantUp>
+      <timeConstantDown>0.025</timeConstantDown>
+      <maxRotVelocity>1000.0</maxRotVelocity>
+      <motorConstant>8.54858e-06</motorConstant>
+      <momentConstant>0.016</momentConstant>
+      <commandSubTopic>command/motor_speed</commandSubTopic>
+      <motorNumber>1</motorNumber>
+      <rotorDragCoefficient>8.06428e-05</rotorDragCoefficient>
+      <rollingMomentCoefficient>1e-06</rollingMomentCoefficient>
+      <rotorVelocitySlowdownSim>10</rotorVelocitySlowdownSim>
+      <motorType>velocity</motorType>
+    </plugin>
+    <plugin filename="gz-sim-multicopter-motor-model-system"
+      name="gz::sim::systems::MulticopterMotorModel">
+      <jointName>rotor_2_joint</jointName>
+      <linkName>rotor_2</linkName>
+      <turningDirection>cw</turningDirection>
+      <timeConstantUp>0.0125</timeConstantUp>
+      <timeConstantDown>0.025</timeConstantDown>
+      <maxRotVelocity>1000.0</maxRotVelocity>
+      <motorConstant>8.54858e-06</motorConstant>
+      <momentConstant>0.016</momentConstant>
+      <commandSubTopic>command/motor_speed</commandSubTopic>
+      <motorNumber>2</motorNumber>
+      <rotorDragCoefficient>8.06428e-05</rotorDragCoefficient>
+      <rollingMomentCoefficient>1e-06</rollingMomentCoefficient>
+      <rotorVelocitySlowdownSim>10</rotorVelocitySlowdownSim>
+      <motorType>velocity</motorType>
+    </plugin>
+    <plugin filename="gz-sim-multicopter-motor-model-system"
+      name="gz::sim::systems::MulticopterMotorModel">
+      <jointName>rotor_3_joint</jointName>
+      <linkName>rotor_3</linkName>
+      <turningDirection>cw</turningDirection>
+      <timeConstantUp>0.0125</timeConstantUp>
+      <timeConstantDown>0.025</timeConstantDown>
+      <maxRotVelocity>1000.0</maxRotVelocity>
+      <motorConstant>8.54858e-06</motorConstant>
+      <momentConstant>0.016</momentConstant>
+      <commandSubTopic>command/motor_speed</commandSubTopic>
+      <motorNumber>3</motorNumber>
+      <rotorDragCoefficient>8.06428e-05</rotorDragCoefficient>
+      <rollingMomentCoefficient>1e-06</rollingMomentCoefficient>
+      <rotorVelocitySlowdownSim>10</rotorVelocitySlowdownSim>
+      <motorType>velocity</motorType>
+    </plugin>
+    <plugin filename="MotorFailurePlugin"
+      name="gz::sim::systems::MotorFailureSystem">
+    </plugin>
+  </model>
+</sdf>
