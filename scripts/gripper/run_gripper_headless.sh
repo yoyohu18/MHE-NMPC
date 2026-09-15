@@ -301,23 +301,27 @@ sed -e "s|<mass>[0-9.]*</mass>|<mass>$GRIP_PAYLOAD_KG</mass>|" \
     -e "s|<iyy>[0-9.]*</iyy>|<iyy>$BOX_I</iyy>|" \
     -e "s|<izz>[0-9.]*</izz>|<izz>$BOX_I</izz>|" \
     "$WORLD_SRC" > "$PX4_WORLDS/gripper_test.sdf"
+# proximity 覆盖参数文件。⚠️ 必须走第二个 --params-file:gripper_params.yaml 里
+# 按节点名写的键优先级高于全局 -p,-p 覆盖会被静默忽略。
+# ★ 2026-09-16:r_xy 此前只在四箱实验里走这条路,单箱批次的 `-p r_xy:=$R_XY`
+#   一直被 YAML 的 0.15 盖掉(9 月 ECC_Y=0.10 共 163 次 attach,33% 偏心 >0.13,
+#   正落在 408 轮回归坠机率 15.5%~38.5% 档)。现在无条件写入,设计上限生效。
+#   复现 09-16 之前的批次须显式 GRIP_ATTACH_TOL=0.05(0.10+0.05=0.15)。
+#   同样被 YAML 盖掉的还有 h_min/h_max(实际 0.3/1.5,非 -p 的 0.35/0.60),未改。
+PROX_OVERRIDE_YAML="$RUNDIR/grip_prox_override_$STAMP.yaml"
+{
+  echo "proximity_gripper_node:"
+  echo "  ros__parameters:"
+  echo "    r_xy: $R_XY"
+} > "$PROX_OVERRIDE_YAML"
 # 部分丢失实验(2026-09-15):GRIP_NBOX=4 时把单箱换成 4 个 GRIP_BOX_KG 小箱(2x2 排布),
 # 并把 proximity 的目标列表扩成 4 个。默认不设 = 历史单箱世界逐字不变。
-PROX_TARGETS_ARG=""
 if [ "${GRIP_NBOX:-1}" = "4" ]; then
   python3 "$WS/src/scripts/gripper/make_multibox_world.py" "$WORLD_SRC" \
       "$PX4_WORLDS/gripper_test.sdf" 4 "${GRIP_BOX_KG:-0.05}" || exit 1
-  # ⚠️ 必须走第二个 --params-file:gripper_params.yaml 里按节点名写的 targets/r_xy
-  # 优先级高于全局 -p,-p 覆盖会被静默忽略(09-15 冒烟轮实测 targets 仍为 ['box'])。
-  PROX_OVERRIDE_YAML="$RUNDIR/grip_prox_override_$STAMP.yaml"
-  cat > "$PROX_OVERRIDE_YAML" <<YAML
-proximity_gripper_node:
-  ros__parameters:
-    targets: ["box", "box2", "box3", "box4"]
-    r_xy: $(python3 -c "print(f'{$GRIP_ECC_Y + $GRIP_ATTACH_TOL:.3f}')")
-YAML
-  PROX_TARGETS_ARG="--params-file $PROX_OVERRIDE_YAML"
+  echo '    targets: ["box", "box2", "box3", "box4"]' >> "$PROX_OVERRIDE_YAML"
 fi
+PROX_TARGETS_ARG="--params-file $PROX_OVERRIDE_YAML"
 PROX_SCHED_ARG=()
 if [ -n "${GRIP_PARTIAL_LOSS_SCHEDULE:-}" ]; then
   PROX_SCHED_ARG=(-p "partial_loss_schedule:='${GRIP_PARTIAL_LOSS_SCHEDULE}'")
