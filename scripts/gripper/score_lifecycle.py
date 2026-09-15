@@ -20,11 +20,21 @@ Definitions (plan §2.1/§2.2/§3):
   t_cmd        first release command after ATTACH
   t_declare    first estimator EMPTY declaration after it declared LOADED
   t_confirm    controller persistence met (after ATTACH)
-  t_accept     controller switched to the empty target (after ATTACH)
+  t_accept     first accept WITH control consequence (after ATTACH): pending=1
+               (a release command was outstanding: DROP complete / UNRESOLVED
+               cancelled), or a legacy command-clears accept (no pending field)
   t_empty      model parameters actually used by NMPC stay inside the empty band
                for --empty-hold seconds, after they had been outside it post-ATTACH
-  premature    t_accept < t_sep (t_sep=+inf -> any accept)
-  timely       t_sep < t_accept <= t_sep + tau_mission and not premature
+  t_clear      min(t_accept, t_empty): the controller actually flies an empty model
+               or acts on "payload gone" (plan §4.1 primary endpoint, 2026-09-16)
+  premature    t_clear < t_sep (t_sep=+inf -> any clear)
+  timely       t_sep <= t_clear <= t_sep + tau_mission  ([EVT] walls are ms-rounded,
+               so an Oracle accept can share t_sep's millisecond)
+Secondary (not in outcome):
+  confirm_false_accepts  pending=0 accepts in (ATTACH, t_sep): the confirmation chain
+               believed "empty" while loaded, with no control consequence in the
+               continuous mainline (also catches the take-off latch residue)
+  premature_accept_any   old definition: first accept of any kind < t_sep
 All reported latencies are seconds relative to t_sep unless named otherwise.
 """
 import argparse
@@ -121,6 +131,12 @@ def first(ev, name, after=-INF, pred=None):
     return None, None
 
 
+def controlling(f):
+    """accept 是否有控制后果:有待确认指令(pending=1),或 legacy 指令即清(无 pending 字段)。"""
+    p = f.get('pending')
+    return p is None or p in ('1', 'True', 'true')
+
+
 def parse_model_used(lines):
     rows = []
     for l in lines:
@@ -196,7 +212,8 @@ def score_run(root, stamp, a, meta):
     t_decl, fdecl = first(ev, 'declare', after=t_loaded if t_loaded else INF,
                           pred=lambda f: f.get('state') == 'EMPTY')
     t_conf, _ = first(ev, 'confirm', after=base)
-    t_acc, facc = first(ev, 'accept', after=base)
+    t_acc, facc = first(ev, 'accept', after=base, pred=controlling)
+    t_acc_any, _ = first(ev, 'accept', after=base)
     t_unres, _ = first(ev, 'unresolved', after=base)
     t_brake, fbr = first(ev, 'brake', after=base)
     t_mref, fmr = first(ev, 'moment_ref', after=base)
@@ -219,15 +236,25 @@ def score_run(root, stamp, a, meta):
         r['t_empty_na_reason'] = 'legacy-log'
 
     rel = lambda t: (t - t_sep) if (t is not None and t_sep is not None) else None
+    cands = [(t, k) for t, k in ((t_acc, 'accept'), (t_emp, 'model_empty')) if t is not None]
+    t_clear, clear_src = min(cands) if cands else (None, None)
+    r['t_clear'] = t_clear
+    r['clear_src'] = clear_src
     r['declare_minus_sep'] = rel(t_decl)
     r['accept_minus_sep'] = rel(t_acc)
     r['empty_minus_sep'] = rel(t_emp)
+    r['clear_minus_sep'] = rel(t_clear)
     r['accept_minus_cmd'] = (t_acc - t_cmd) if None not in (t_acc, t_cmd) else None
     r['sep_minus_cmd'] = (t_sep - t_cmd) if None not in (t_sep, t_cmd) else None
 
-    r['premature_clear'] = t_acc is not None and t_acc < t_sep_eff
-    r['timely'] = (t_sep is not None and t_acc is not None
-                   and t_sep < t_acc <= t_sep + a.tau_mission)
+    r['premature_clear'] = t_clear is not None and t_clear < t_sep_eff
+    r['timely'] = (t_sep is not None and t_clear is not None
+                   and t_sep <= t_clear <= t_sep + a.tau_mission)
+    false_acc = [t for t, nm, f in ev if nm == 'accept' and base < t < t_sep_eff
+                 and not controlling(f)]
+    r['confirm_false_accepts'] = len(false_acc)
+    r['t_first_false_accept'] = false_acc[0] if false_acc else None
+    r['premature_accept_any'] = t_acc_any is not None and t_acc_any < t_sep_eff
 
     # 模型—物理不一致时长(右删失标记:日志先结束)
     wrong_empty = ghost_loaded = None
@@ -267,22 +294,22 @@ def score_run(root, stamp, a, meta):
     ref = t_sep if t_sep is not None else t_cmd
     if not n:
         outcome = 'no-log'
-    elif src != 'evt' and t_inj is not None and t_acc is None and not r['excursion']:
+    elif src != 'evt' and t_inj is not None and t_clear is None and not r['excursion']:
         # 旧日志只在"有待确认指令"时打 DROP complete,无指令时的 accept 不可见
         outcome = 'unscorable-legacy'
     elif r['premature_clear'] or r['excursion']:
         outcome = 'safe_failure'
     elif ref is None:
         outcome = 'negative_ok'                       # 无事件无指令:无误声明且未坠
-    elif t_sep is not None and r['timely'] and (t_unres is None or t_unres > t_acc):
+    elif t_sep is not None and r['timely'] and (t_unres is None or t_unres > t_clear):
         outcome = 'task_success'
     else:
-        handled = [t for t in (t_acc, t_unres) if t is not None and t >= ref]
+        handled = [t for t in (t_clear, t_unres) if t is not None and t >= ref]
         if handled and min(handled) <= ref + a.tau_safe:
             outcome = 'safe_success'
         elif t_end is not None and t_end < ref + a.tau_safe:
             outcome = 'censored'
-        elif t_sep is None and t_acc is None and t_cmd is None:
+        elif t_sep is None and t_clear is None and t_cmd is None:
             outcome = 'negative_ok'
         else:
             outcome = 'safe_failure'
