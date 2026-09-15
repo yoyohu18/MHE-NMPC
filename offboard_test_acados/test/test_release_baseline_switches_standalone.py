@@ -265,3 +265,75 @@ def test_nmpc_confidence_accept_log_unchanged():
         node._confirm_no_payload_if_persistent()
     assert any(m.startswith('DROP complete: MHE no-payload confidence 1.000 '
                             'persisted for ') for m in node._log.msgs)
+
+
+# ------------------------------------------------ P_NOMOMENT 确认链置信度
+import math  # noqa: E402
+
+from offboard_test_acados.payload_estimate import (  # noqa: E402
+    PayloadEstimate, inertia_from_mass_moment, no_payload_confidence)
+
+_TAU = 0.25
+_ARGS = dict(mass_full=0.015, mass_zero=0.060, moment_full=0.0015,
+             moment_zero=0.0060, inertia_full=0.0020, inertia_zero=0.0100)
+
+
+class _CbStub(_NMPCStub):
+    payload_estimate_cb = mn_nmpc.AcadosNMPCNode.payload_estimate_cb
+    _update_accept_confidence = mn_nmpc.AcadosNMPCNode._update_accept_confidence
+
+    def __init__(self, baseline):
+        super().__init__()
+        self.release_baseline = baseline
+        self.accept_confidence = 1.0
+        self._nomoment_conf_alpha = 1.0 - math.exp(-mhe_p.dt / _TAU)
+        self._nomoment_conf_args = {k: _ARGS[k] for k in (
+            'mass_full', 'mass_zero', 'inertia_full', 'inertia_zero')}
+
+
+def _frames(m_payload_seq, s_xy):
+    """模拟 MHE 发布:m/s 已低通,conf 按 MHE 原式低通(含 moment 分)。"""
+    alpha = 1.0 - math.exp(-mhe_p.dt / _TAU)
+    conf = 1.0
+    out = []
+    for mp in m_payload_seq:
+        m = mhe_p.m_B + mp
+        c, dJ, J = inertia_from_mass_moment(m, s_xy, mhe_p.m_B,
+                                            [mhe_p.Jxx, mhe_p.Jyy, mhe_p.Jzz],
+                                            mhe_p.rz_prior, payload_ki=mhe_p.payload_ki)
+        conf += alpha * (no_payload_confidence(mp, s_xy, dJ, **_ARGS) - conf)
+        est = PayloadEstimate(m_total=m, s_xy=np.asarray(s_xy, float), c_xy=c,
+                              dJ_diag=dJ, J_diag=J, no_payload_confidence=conf,
+                              healthy=True, solution_age_sec=0.0)
+        out.append(_Msg(est.as_array().tolist()))
+    return out
+
+
+def test_accept_confidence_is_mhe_value_for_p():
+    node = _CbStub('P')
+    for msg in _frames(np.linspace(0.15, 0.0, 40), [0.0, 0.02]):
+        node.payload_estimate_cb(msg)
+        assert node.accept_confidence == node.no_payload_confidence
+
+
+def test_nomoment_confidence_matches_mhe_formula_without_moment():
+    node = _CbStub('P_NOMOMENT')
+    seq = np.linspace(0.15, 0.0, 40)
+    ref = _frames(seq, [0.0, 0.0])          # 同一 m 序列、moment 置零时 MHE 会发的 conf
+    for msg, rmsg in zip(_frames(seq, [0.0, 0.02]), ref):
+        node.payload_estimate_cb(msg)
+        expect = PayloadEstimate.from_array(rmsg.data).no_payload_confidence
+        assert node.accept_confidence == pytest.approx(expect, abs=1e-12)
+
+
+def test_nomoment_accepts_while_moment_still_says_loaded():
+    """m 已空、s 仍是带载值:P 被 moment 一票否决,P_NOMOMENT 照样 accept。"""
+    for baseline, accepted in (('P', False), ('P_NOMOMENT', True)):
+        node = _CbStub(baseline)
+        node.grip_drop_pending = True
+        node._drop_cmd_wall = node.now_sec
+        for msg in _frames([0.0] * 80, [0.0, 0.02]):
+            node.payload_estimate_cb(msg)
+            node._confirm_no_payload_if_persistent()
+        assert node.no_payload_confidence < 0.1
+        assert node.grip_dropped is accepted

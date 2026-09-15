@@ -51,7 +51,8 @@ from .acados_solver_builder import ensure_acados_ocp_solver
 from .l1_adaptive import L1Augmentation
 from .lifecycle_trace import evt_line
 from .payload_estimate import (
-    RELEASE_BASELINES, PayloadEstimate, headroom_limited_scale, slew)
+    RELEASE_BASELINES, PayloadEstimate, empty_evidence_scores,
+    headroom_limited_scale, slew)
 
 # 转子标定常数。**必须与 mhe_node.py 顶部的同名常数保持一致**——两处各自硬编码
 # 是沿用既有风格(避免 nmpc_node import mhe_node 拖进整个节点类),改一处必须改另
@@ -259,6 +260,21 @@ class AcadosNMPCNode(Node):
             no_payload_confidence=1.0)
         self.s_est = np.zeros(2)
         self.no_payload_confidence = 1.0
+        # 确认链(1 s 持续计数 + 重新武装)读的置信度。P_NOMOMENT 下由本节点从估计帧
+        # 复算"质量分 × 惯量分"(去掉 moment 分),公式、阈值与低通必须与 mhe_node
+        # _publish_payload_estimate 逐项一致;其余取值恒等于 MHE 发布值。attach J
+        # bootstrap 仍读 no_payload_confidence —— 只让"清除逻辑"这一个因素变。
+        self.declare_parameter('payload_output_tau_sec', 0.25)
+        self.declare_parameter('no_payload_mass_full', 0.015)
+        self.declare_parameter('no_payload_mass_zero', 0.060)
+        self.declare_parameter('no_payload_inertia_full', 0.0020)
+        self.declare_parameter('no_payload_inertia_zero', 0.0100)
+        self._nomoment_conf_alpha = 1.0 - math.exp(-mhe_p.dt / max(
+            float(self.get_parameter('payload_output_tau_sec').value), 1e-3))
+        self._nomoment_conf_args = {
+            k: float(self.get_parameter(f'no_payload_{k}').value)
+            for k in ('mass_full', 'mass_zero', 'inertia_full', 'inertia_zero')}
+        self.accept_confidence = 1.0
         self.m_est = p.m
         # 吊挂载荷惯量增量(model.p 的第 15 维,见 acados_model.py dJ_sym 注释)。
         # mass_changer 场景是 wrench 模拟的纯平动质量变化、无惯量变化,恒 0;
@@ -1365,14 +1381,30 @@ class AcadosNMPCNode(Node):
         self._payload_estimate_rx_sec = (
             self.get_clock().now().nanoseconds * 1e-9)
         self.no_payload_confidence = estimate.no_payload_confidence
+        self._update_accept_confidence(estimate)
         # Re-arm empty detection only after positive multi-state payload evidence.
         # A mass-bound hit alone cannot do this because confidence also contains s/J.
         if (estimate.healthy and estimate.solution_age_sec
                 <= self.payload_estimate_fresh_sec
-                and estimate.no_payload_confidence < max(
+                and self.accept_confidence < max(
                     0.0, self.no_payload_conf_threshold - 0.15)):
             self._no_payload_latched = False
             self._no_payload_conf_frames = 0
+
+    def _update_accept_confidence(self, estimate):
+        """确认链置信度。P_NOMOMENT:质量分 × 惯量分(无 moment 分),与 MHE 同式
+        同低通,只在健康帧更新(MHE 不健康帧保持置信度,这里同样保持)。"""
+        if getattr(self, 'release_baseline', 'P') != 'P_NOMOMENT':
+            self.accept_confidence = estimate.no_payload_confidence
+            return
+        if not estimate.healthy:
+            return
+        mass_s, _moment_s, inertia_s = empty_evidence_scores(
+            max(float(estimate.m_total) - mhe_p.m_B, 0.0), np.zeros(2),
+            estimate.dJ_diag, **self._nomoment_conf_args)
+        target = float(np.clip(mass_s * inertia_s, 0.0, 1.0))
+        self.accept_confidence += self._nomoment_conf_alpha * (
+            target - self.accept_confidence)
 
     def _payload_estimate_is_fresh(self):
         """True only for a healthy MHE solution and a fresh ROS delivery."""
@@ -1632,7 +1664,8 @@ class AcadosNMPCNode(Node):
             # time*.  A stale or failed frame breaks, rather than pauses, it.
             self._no_payload_conf_frames = 0
             return
-        if self.no_payload_confidence >= self.no_payload_conf_threshold:
+        if (getattr(self, 'accept_confidence', self.no_payload_confidence)
+                >= self.no_payload_conf_threshold):
             self._no_payload_conf_frames += 1
         else:
             self._no_payload_conf_frames = 0
@@ -1646,7 +1679,8 @@ class AcadosNMPCNode(Node):
         # 起飞后 attach 前的空机 latch 也会打这两行,评分脚本只取 attach 之后的。
         _pending = bool(getattr(self, 'grip_drop_pending', False))
         self.get_logger().info(evt_line(
-            'confirm', conf=float(self.no_payload_confidence),
+            'confirm', conf=float(getattr(
+                self, 'accept_confidence', self.no_payload_confidence)),
             hold_s=self.no_payload_conf_hold_frames * p.dt, pending=_pending))
         self._accept_empty('confidence')
 
@@ -1696,7 +1730,7 @@ class AcadosNMPCNode(Node):
             if src == 'confidence':
                 self.get_logger().info(
                     f'DROP complete: MHE no-payload confidence '
-                    f'{self.no_payload_confidence:.3f} persisted for '
+                    f'{getattr(self, "accept_confidence", self.no_payload_confidence):.3f} persisted for '
                     f'{self.no_payload_conf_hold_frames * p.dt:.2f}s; '
                     'adaptive states reset')
             else:
