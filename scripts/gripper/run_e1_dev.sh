@@ -229,6 +229,10 @@ while IFS=, read -r -u 3 idx block arm cond; do
   if grep -q "^$idx," "$MAN"; then
     continue
   fi
+  if [ -n "${MAX_RUNS:-}" ] && [ "$idx" -gt "$MAX_RUNS" ]; then
+    echo "[e1-dev] MAX_RUNS=$MAX_RUNS reached, stopping"
+    break
+  fi
   echo "[e1-dev] progress $idx/$total ($(date +%T))"
   run_one "$idx" "$block" "$arm" "$cond" < /dev/null
 done 3< "$BDIR/schedule.csv"
