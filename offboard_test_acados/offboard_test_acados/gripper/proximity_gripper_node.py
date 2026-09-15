@@ -31,6 +31,8 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from std_msgs.msg import Bool, Float64MultiArray
 
+from ..lifecycle_trace import evt_line
+
 import gz.transport13 as gztransport
 from gz.msgs10.pose_v_pb2 import Pose_V
 from gz.msgs10.stringmsg_pb2 import StringMsg
@@ -327,6 +329,8 @@ class ProximityGripperNode(Node):
         self.get_logger().info(
             f'-> attach offset (box - drone) = '
             f'[{msg.data[0]:+.3f}, {msg.data[1]:+.3f}, {msg.data[2]:+.3f}] m')
+        self.get_logger().info(evt_line(
+            'attach_offset', rx=msg.data[0], ry=msg.data[1], rz=msg.data[2]))
 
     # --- 发命令(gz-transport)---
     def send_attach(self, tgt):
@@ -337,6 +341,7 @@ class ProximityGripperNode(Node):
         self.attach_pub.publish(msg)
         self.attached.add(tgt)
         self.get_logger().info(f'-> ATTACH "{payload}"')
+        self.get_logger().info(evt_line('attach', target=tgt, n_attached=len(self.attached)))
         if self._first_attach_mono is None:
             self._first_attach_mono = time.monotonic()
 
@@ -349,6 +354,7 @@ class ProximityGripperNode(Node):
         self._pending_detach.pop(tgt, None)
         self.attached.discard(tgt)
         self.get_logger().info(f'-> DETACH "{payload}"')
+        self.get_logger().info(evt_line('sep', target=tgt, n_attached=len(self.attached)))
 
 
 def main(args=None):

@@ -49,6 +49,7 @@ from .acados_params import (
 )
 from .acados_solver_builder import ensure_acados_ocp_solver
 from .l1_adaptive import L1Augmentation
+from .lifecycle_trace import evt_line
 from .payload_estimate import PayloadEstimate, headroom_limited_scale, slew
 
 # 转子标定常数。**必须与 mhe_node.py 顶部的同名常数保持一致**——两处各自硬编码
@@ -1509,6 +1510,11 @@ class AcadosNMPCNode(Node):
             f'**不清模型、不切 s_target、不复位 L1**,{action}。'
             f'(conf={self.no_payload_confidence:.3f}) '
             f'—— 载荷是否仍在机上未知,需上层介入/降落中止')
+        self.get_logger().info(evt_line(
+            'unresolved', conf=float(self.no_payload_confidence),
+            timeout_s=self.drop_unresolved_timeout_sec))
+        self.get_logger().info(evt_line(
+            'brake', armed=bool(hover_armed), stop_s=self.drop_unresolved_stop_sec))
 
     def _begin_unresolved_hover(self):
         """Replace the dynamic reference with a continuous stop-to-hover path.
@@ -1606,10 +1612,21 @@ class AcadosNMPCNode(Node):
             return
         self._no_payload_latched = True
         self._no_payload_conf_frames = 0
+        # confirm 与 accept 在本架构里同帧发生(持续确认满足即切空载目标);
+        # 分开记录是为了与 A'(无 confirm 直接 accept)用同一评分口径。
+        # 起飞后 attach 前的空机 latch 也会打这两行,评分脚本只取 attach 之后的。
+        _pending = bool(getattr(self, 'grip_drop_pending', False))
+        self.get_logger().info(evt_line(
+            'confirm', conf=float(self.no_payload_confidence),
+            hold_s=self.no_payload_conf_hold_frames * p.dt, pending=_pending))
+        self.get_logger().info(evt_line(
+            'accept', src='confidence', pending=_pending,
+            unresolved=bool(self.payload_unresolved)))
         if self.payload_unresolved:
             self.payload_unresolved = False
             self.get_logger().info(
                 'PAYLOAD STATE RESOLVED: 迟到的 moment 证据到达,恢复正常卸载流程')
+            self.get_logger().info(evt_line('resolved'))
         if self.control_mode == 'l1':
             self.l1.reset()
             self.d_lumped = np.zeros(3)
@@ -2772,9 +2789,12 @@ class AcadosNMPCNode(Node):
             self.get_logger().warn(
                 f't={nmpc_time:.1f}s | UNCOMMANDED LOSS injected: physical release '
                 'via /gripper/release; no release command issued')
+            self.get_logger().info(evt_line('inject_loss', t=nmpc_time))
             return
         self.drop_time = nmpc_time                 # 指令兑现检查的起点
         self.enable_pub.publish(Bool(data=False))  # 拉低 → proximity 释放 box
+        self.get_logger().info(evt_line(
+            'cmd', t=nmpc_time, continuous=self.continuous_payload_estimates))
         if self.continuous_payload_estimates:
             # The release command changes the plant, not the controller model.
             # Keep consuming the decaying MHE estimates; completion and L1 reset
@@ -2836,6 +2856,8 @@ class AcadosNMPCNode(Node):
         self.get_logger().info(
             f't={nmpc_time:.1f}s | DROP: released gripper (enable=false), '
             'payload detached; geometry -> empty, rate gains reset')
+        # 非连续(legacy)路径:指令即清模型,没有 confirm 这一步。
+        self.get_logger().info(evt_line('accept', t=nmpc_time, src='command'))
 
     def timer_cb(self):
         if self.counter < 100:
@@ -3028,6 +3050,25 @@ class AcadosNMPCNode(Node):
                     f'[drop-window] t={nmpc_time:.2f}s pos_err={pos_err:.3f}m '
                     f'T={u_opt[0]:.2f}N z={self.x_cur[2]:.3f} '
                     f'm_est={self.m_est:.3f}')
+
+        # [model-used] 10Hz 逐帧记录 NMPC **本周期实际装进 model.p** 的载荷参数与
+        # 生命周期标志(实验计划 §13.2/13.3),供评分脚本算 t_empty 与模型—物理
+        # 不一致时长。纯只读:_geom_slot() 无副作用;fresh 取上次判定的缓存值,
+        # 不调用 _payload_estimate_is_fresh()(它会改状态并打转换日志)。
+        if self.gripper_mode and self.counter % max(1, round(0.1 / p.dt)) == 0:
+            _g = self._geom_slot()
+            _mode = ('cont' if self.continuous_payload_estimates
+                     else ('coupled' if p.geom_coupled else 'legacy'))
+            self.get_logger().info(
+                f'[model-used] t={nmpc_time:.2f} pos_err={pos_err:.3f} '
+                f'm={self.m_est:.4f} g0={_g[0]:.5f} g1={_g[1]:.5f} g2={_g[2]:.5f} '
+                f'mode={_mode} conf={self.no_payload_confidence:.3f} '
+                f'fresh={int(bool(self._payload_estimate_health_prev))} '
+                f'pending={int(bool(getattr(self, "grip_drop_pending", False)))} '
+                f'latched={int(bool(self._no_payload_latched))} '
+                f'dropped={int(bool(getattr(self, "grip_dropped", False)))} '
+                f'unresolved={int(bool(self.payload_unresolved))} '
+                f'T={u_opt[0]:.2f} tr={u_opt[1]:.3f} tp={u_opt[2]:.3f}')
 
         # gripper 版事件段逐帧记录:门槛用 self.attach_time(_grip_mass_step 记
         # 下的 nmpc_time 浮点秒,不是 ROS Time,不用转纳秒)。字段与 [drop-window]

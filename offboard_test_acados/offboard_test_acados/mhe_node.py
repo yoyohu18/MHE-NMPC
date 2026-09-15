@@ -23,6 +23,7 @@ from std_msgs.msg import Bool, Empty, Float64, Float64MultiArray
 from actuator_msgs.msg import Actuators
 
 from .common import quat_to_rotmat
+from .lifecycle_trace import evt_line
 
 from .mhe_params import p as mhe_p
 from .mhe_solver_builder import ensure_mhe_ocp_solver
@@ -1381,6 +1382,9 @@ class MHENode(Node):
             self.get_logger().info(
                 f'[payload-state] {"EMPTY->LOADED" if self._payload_present else "LOADED->EMPTY"}'
                 f' ({src}, m_p={float(self.m_est) - mhe_p.m_B:+.3f}kg)')
+            self.get_logger().info(evt_line(
+                'declare', state='LOADED' if self._payload_present else 'EMPTY',
+                src=src, m_p=float(self.m_est) - mhe_p.m_B))
             if self._payload_present:
                 self._load_armed = True       # 本轮确实带上过载荷
                 self._s_release_latched = False
@@ -1400,6 +1404,8 @@ class MHENode(Node):
         是同构缺陷,只是漏在这条支路上。
         清 _c_xy_inited 而不只是清值:下次进稳态窗口时用 c_inst 直接重播种,
         不必从带载旧值慢慢 EMA 爬回来。"""
+        self.get_logger().info(evt_line(
+            'release_geom', src=src, was_attached=bool(self._payload_attached)))
         self._payload_attached = False
         self.attach_offset = None
         # s 的目标切零(见 __init__ 里 _s_release_latched)。清的是**发布目标**,
@@ -1531,6 +1537,8 @@ class MHENode(Node):
                 f'{int(self._load_armed)} m_est={float(self.m_est):.3f} '
                 f'solve_ok={int(self._last_solve_ok)} '
                 f'reanchored={int(self._s_reanchored)}) — confirmation window open')
+            self.get_logger().info(evt_line(
+                'cmd_armed_open', load_armed=bool(self._load_armed)))
         self._cmd_enable_prev = cur
 
     def _command_armed_confirm(self):
@@ -1561,6 +1569,7 @@ class MHENode(Node):
                 f'{self.pl_hold_frames * mhe_p.dt:.1f}s)')
             self.get_logger().warn(
                 f'[cmd-armed] RELEASE confirmed: m_implied={m_implied:.3f}kg')
+            self.get_logger().info(evt_line('cmd_armed_confirm', m_implied=m_implied))
 
     def mass_event_cb(self, msg):
         """质量突变事件 = **卸载**(wrench drop / gripper drop——nmpc_node 释放
@@ -2037,6 +2046,7 @@ class MHENode(Node):
             f'离散 {1.4826*mad/max(med,1e-9):.2f}, 方向一致度 '
             f'{float(np.linalg.norm(mean_dir)):.2f}, 越界剔除 '
             f'{self._moment_ref_reject} 帧) — 此后不再更新')
+        self.get_logger().info(evt_line('moment_ref', s_ref=trimmed))
 
     def _update_release_residual(self):
         """独立的 release-residual 投票(见 __init__ 里 release_resid_* 注释)。

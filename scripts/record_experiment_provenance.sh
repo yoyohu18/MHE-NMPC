@@ -15,7 +15,7 @@ mkdir -p "$OUT_DIR"
 
 # 只记录实验配置白名单，严禁把 token/凭据随整份 env 写进日志。
 env | LC_ALL=C sort | awk -F= '
-  $1 ~ /^(GRIP|MHE|NMPC|DROP|RELEASE|DJ|TRAJ|L1|XI|OMEGA|ATTACH|EVAL|CONTINUOUS|USE_MHE|PUBLISH|GEOM|RESID)_/ {
+  $1 ~ /^(GRIP|MHE|NMPC|DROP|RELEASE|DJ|TRAJ|L1|XI|OMEGA|ATTACH|EVAL|CONTINUOUS|USE_MHE|PUBLISH|GEOM|RESID|EXP)_/ {
     print
   }
 ' > "$OUT_DIR/experiment.env"
@@ -38,14 +38,14 @@ capture_repo() {
     return
   fi
 
-  git -C "$repo" status --porcelain=v1 --untracked-files=all \
+  git -C "$repo" -c core.quotepath=off status --porcelain=v1 --untracked-files=all \
     > "$OUT_DIR/$name.status"
   git -C "$repo" diff --binary --submodule=diff HEAD -- \
     > "$OUT_DIR/$name.tracked.patch"
 
   # paper/data 是论文 artifact，不参与仿真执行；尚未提交时不应在
   # 每轮溯源包里重复复制约 48 MiB。该排除会明记在 repo metadata 中。
-  git -C "$repo" ls-files --others --exclude-standard -- \
+  git -C "$repo" -c core.quotepath=off ls-files --others --exclude-standard -- \
     | awk '$0 !~ /^paper\/data\//' \
     > "$OUT_DIR/$name.untracked.files"
   : > "$OUT_DIR/$name.untracked.sha256"
