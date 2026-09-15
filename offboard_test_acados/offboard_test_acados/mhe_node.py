@@ -30,6 +30,7 @@ from .mhe_solver_builder import ensure_mhe_ocp_solver
 from .mhe_weight_learning import M0_THETA, ParametricWeightSchedule
 from .payload_estimate import (
     PayloadEstimate,
+    RELEASE_BASELINES,
     RELEASE_RATIO_THR,
     empty_evidence_scores,
     inertia_from_mass_moment,
@@ -1030,9 +1031,43 @@ class MHENode(Node):
         self._cmd_enable_prev = None
         self._release_cmd_armed = False
         self._cmd_hold = 0
-        if self.release_arm_on_command:
+        # ---- 实验计划 §4 baseline 开关(2026-09-15,默认 'P' = 主线,逐位不变)----
+        # 每个取值只改"模型清除逻辑"这一个因素,其余 MHE/NMPC 配置与 P 逐字相同:
+        #   A_PRIME    命令即清:eventless 两条放行路径照算不放行;/gripper/enable
+        #              True->False 边沿到达时立即 _release_payload(无确认)。
+        #   C_SAME     命令后才启动 P 的检测器:指令前照算不放行;边沿到达时把
+        #              持续计数清零,之后与 P 完全相同(持续帧必须在指令后攒满)。
+        #   P_NOMOMENT 统一 moment 判据照算不放行(含 fastB),只剩质量域判据。
+        #   ORACLE     真值上界:eventless 照算不放行;proximity 真实分离时刻
+        #              (/gripper/sep_truth)立即 _release_payload。不可部署。
+        # 与 C-thrust(release_arm_on_command)互斥 —— 两者都是"清除逻辑"的取值。
+        self.declare_parameter('release_baseline', 'P')
+        self.release_baseline = str(
+            self.get_parameter('release_baseline').value).strip().upper()
+        if self.release_baseline not in RELEASE_BASELINES:
+            raise ValueError(
+                f'release_baseline={self.release_baseline!r} not in '
+                f'{sorted(RELEASE_BASELINES)}')
+        if self.release_baseline != 'P' and self.release_arm_on_command:
+            raise ValueError(
+                f'release_baseline={self.release_baseline} is mutually exclusive '
+                'with release_arm_on_command (C-thrust)')
+        self._release_cmd_seen = False
+        if self.release_baseline != 'P':
+            self.get_logger().warn(
+                f'[baseline] release_baseline={self.release_baseline}: '
+                + RELEASE_BASELINES[self.release_baseline])
+        if self.release_baseline == 'ORACLE':
+            self.get_logger().error(
+                '[ORACLE] ⚠️ 真实分离时刻(/gripper/sep_truth)进入释放逻辑 —— '
+                '性能上界,不可部署,不得与可部署方法混报')
+            self.create_subscription(
+                Empty, '/gripper/sep_truth', self._release_oracle_sep_cb, 10)
+        if (self.release_arm_on_command
+                or self.release_baseline in ('A_PRIME', 'C_SAME')):
             self.create_subscription(
                 Bool, '/gripper/enable', self._release_cmd_enable_cb, 10)
+        if self.release_arm_on_command:
             self.get_logger().warn(
                 '[cmd-armed] matched command-armed baseline ON: eventless release '
                 'paths suppressed; release window opens on /gripper/enable '
@@ -1532,10 +1567,58 @@ class MHENode(Node):
         self._pl_hold = 0
         self._pl_hist.clear()
 
+    def _eventless_release_suppressed(self, moment_path):
+        """eventless 放行是否被当前清除逻辑挡住(照算、记日志、不放行)。
+        moment_path=True 为统一 moment 判据,False 为质量域判据。"""
+        if self.release_arm_on_command:
+            return True
+        b = getattr(self, 'release_baseline', 'P')   # 单测桩可能没有该属性
+        if b in ('A_PRIME', 'ORACLE'):
+            return True
+        if b == 'C_SAME':
+            return not self._release_cmd_seen
+        if b == 'P_NOMOMENT':
+            return moment_path
+        return False
+
+    def _suppressed_release_tag(self):
+        return ('[cmd-armed]' if self.release_arm_on_command
+                else f'[baseline {self.release_baseline}]')
+
+    def _release_oracle_sep_cb(self, msg):
+        """ORACLE:proximity 报告真实分离(全部载荷已脱开)即清除。"""
+        self.get_logger().warn(
+            f'[baseline ORACLE] true separation received (load_armed='
+            f'{int(self._load_armed)} m_est={float(self.m_est):.3f}) — releasing')
+        self.get_logger().info(evt_line(
+            'baseline_release', baseline='ORACLE', load_armed=bool(self._load_armed)))
+        self._update_payload_presence('drop')
+        self._release_payload('oracle true separation')
+
     def _release_cmd_enable_cb(self, msg):
-        """matched 基线:只认 enable 的 True->False 边沿为释放指令。"""
+        """释放指令 = enable 的 True->False 边沿。C-thrust 开确认窗;
+        C_SAME 从此刻起放行 P 的检测器;A_PRIME 立即清除。"""
         cur = bool(msg.data)
-        if self._cmd_enable_prev is True and not cur and not self._release_cmd_armed:
+        edge = self._cmd_enable_prev is True and not cur
+        if (edge and self.release_baseline in ('A_PRIME', 'C_SAME')
+                and not self._release_cmd_seen):
+            self._release_cmd_seen = True
+            self.get_logger().warn(
+                f'[baseline {self.release_baseline}] release command received '
+                f'(load_armed={int(self._load_armed)} m_est={float(self.m_est):.3f} '
+                f'slow={self._s_low} strong={self._s_strong} '
+                f'mass_low={self._c_xy_mass_low})')
+            self.get_logger().info(evt_line(
+                'baseline_cmd', baseline=self.release_baseline,
+                load_armed=bool(self._load_armed)))
+            if self.release_baseline == 'C_SAME':
+                # 检测器"从指令起启动":指令前照算攒下的持续帧不算数。
+                self._s_low = self._s_fast = self._s_strong = 0
+                self._c_xy_mass_low = 0
+            else:
+                self._update_payload_presence('drop')
+                self._release_payload('command immediate')
+        if edge and self.release_arm_on_command and not self._release_cmd_armed:
             self._release_cmd_armed = True
             self._cmd_hold = 0
             self.get_logger().warn(
@@ -2420,11 +2503,12 @@ class MHENode(Node):
             elif _m_p < self.c_xy_mass_release_mp:
                 self._c_xy_mass_low += 1
                 if (self._c_xy_mass_low >= self.c_xy_mass_release_persist
-                        and self.release_arm_on_command):
+                        and self._eventless_release_suppressed(moment_path=False)):
                     # matched 基线:eventless 放行被抑制(只记一次/秒)
                     if self._c_xy_mass_low % 10 == 0:
                         self.get_logger().info(
-                            '[cmd-armed] suppressed eventless mass-based release')
+                            f'{self._suppressed_release_tag()} suppressed '
+                            'eventless mass-based release')
                 elif self._c_xy_mass_low >= self.c_xy_mass_release_persist:
                     self._c_xy_mass_low = 0
                     self._c_xy_mass_high = 0
@@ -2538,10 +2622,11 @@ class MHENode(Node):
                     f'reanch={int(self._s_reanchored)} '
                     f'm_p={float(self.m_est) - mhe_p.m_B:+.4f} '
                     f'slow={self._s_low}/{self.s_release_persist}')
-            if fire and self.release_arm_on_command:
+            if fire and self._eventless_release_suppressed(moment_path=True):
                 if self._s_ratio_log_n % 10 == 1:
                     self.get_logger().info(
-                        f'[cmd-armed] suppressed eventless release ({why})')
+                        f'{self._suppressed_release_tag()} suppressed '
+                        f'eventless release ({why})')
             elif fire:
                 self._update_payload_presence('drop')
                 self._release_payload(why)

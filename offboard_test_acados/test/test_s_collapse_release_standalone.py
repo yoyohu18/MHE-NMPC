@@ -59,6 +59,8 @@ class _Stub:
     _release_payload = mn.MHENode._release_payload
     _update_payload_presence = mn.MHENode._update_payload_presence
     _mass_observable = mn.MHENode._mass_observable
+    _eventless_release_suppressed = mn.MHENode._eventless_release_suppressed
+    _suppressed_release_tag = mn.MHENode._suppressed_release_tag
 
     def __init__(self, ratio=0.30, persist=5):
         self.m_est = mhe_p.m_B + 0.15

@@ -163,6 +163,9 @@ class _NMPCStub:
         mn_nmpc.AcadosNMPCNode._grip_unresolved_ref_window)
     _payload_estimate_is_fresh = (
         mn_nmpc.AcadosNMPCNode._payload_estimate_is_fresh)
+    _confidence_accept_allowed = (
+        mn_nmpc.AcadosNMPCNode._confidence_accept_allowed)
+    _accept_empty = mn_nmpc.AcadosNMPCNode._accept_empty
 
     def __init__(self):
         self._payload_estimate_received = True

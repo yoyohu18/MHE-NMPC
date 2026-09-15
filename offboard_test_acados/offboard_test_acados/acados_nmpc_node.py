@@ -50,7 +50,8 @@ from .acados_params import (
 from .acados_solver_builder import ensure_acados_ocp_solver
 from .l1_adaptive import L1Augmentation
 from .lifecycle_trace import evt_line
-from .payload_estimate import PayloadEstimate, headroom_limited_scale, slew
+from .payload_estimate import (
+    RELEASE_BASELINES, PayloadEstimate, headroom_limited_scale, slew)
 
 # 转子标定常数。**必须与 mhe_node.py 顶部的同名常数保持一致**——两处各自硬编码
 # 是沿用既有风格(避免 nmpc_node import mhe_node 拖进整个节点类),改一处必须改另
@@ -211,6 +212,21 @@ class AcadosNMPCNode(Node):
             raise RuntimeError(
                 'continuous_payload_estimates requires NMPC_GEOM_COUPLED=0: '
                 'the atomic estimate supplies [dJ,c_xy], not attach geometry')
+        # 实验计划 §4 清除逻辑(与 mhe_node 同名参数,取值见 RELEASE_BASELINES)。
+        # NMPC 这一半:A_PRIME 在发释放指令同帧 accept、ORACLE 在真实分离时 accept,
+        # 两者都不走 confidence 确认;C_SAME 的 confidence 确认只在指令之后计数。
+        # P / P_NOMOMENT 在 NMPC 侧与主线逐位相同。
+        self.declare_parameter('release_baseline', 'P')
+        self.release_baseline = str(
+            self.get_parameter('release_baseline').value).strip().upper()
+        if self.release_baseline not in RELEASE_BASELINES:
+            raise ValueError(
+                f'release_baseline={self.release_baseline!r} not in '
+                f'{sorted(RELEASE_BASELINES)}')
+        if self.release_baseline != 'P' and not self.continuous_payload_estimates:
+            raise RuntimeError(
+                'release_baseline requires continuous_payload_estimates=true '
+                '(legacy path already clears on command)')
         self.declare_parameter('payload_model_tau_sec', 0.20)
         self.declare_parameter('payload_mass_slew_kg_s', 0.60)
         self.declare_parameter('payload_moment_slew_kgm_s', 0.080)
@@ -998,6 +1014,16 @@ class AcadosNMPCNode(Node):
             self.payload_estimate_sub = self.create_subscription(
                 Float64MultiArray, '/mhe/payload_estimate',
                 self.payload_estimate_cb, 10)
+            if self.release_baseline != 'P':
+                self.get_logger().warn(
+                    f'[baseline] release_baseline={self.release_baseline}: '
+                    + RELEASE_BASELINES[self.release_baseline])
+            if self.release_baseline == 'ORACLE':
+                self.get_logger().error(
+                    '[ORACLE] ⚠️ 真实分离时刻(/gripper/sep_truth)进入 accept 逻辑 '
+                    '—— 性能上界,不可部署')
+                self.oracle_sep_sub = self.create_subscription(
+                    Empty, '/gripper/sep_truth', self._release_oracle_sep_cb, 10)
         else:
             # 旧实验接口,仅供显式回放/消融。
             self.mhe_mass_sub = self.create_subscription(
@@ -1598,6 +1624,9 @@ class AcadosNMPCNode(Node):
         self._check_drop_unresolved()
         if getattr(self, '_no_payload_latched', True):
             return
+        if not self._confidence_accept_allowed():
+            self._no_payload_conf_frames = 0
+            return
         if not self._payload_estimate_is_fresh():
             # Confidence persistence must be contiguous in *valid estimator
             # time*.  A stale or failed frame breaks, rather than pauses, it.
@@ -1619,8 +1648,33 @@ class AcadosNMPCNode(Node):
         self.get_logger().info(evt_line(
             'confirm', conf=float(self.no_payload_confidence),
             hold_s=self.no_payload_conf_hold_frames * p.dt, pending=_pending))
+        self._accept_empty('confidence')
+
+    def _confidence_accept_allowed(self):
+        """清除逻辑是否允许走 MHE 置信度持续确认这条 accept(见 release_baseline)。"""
+        b = getattr(self, 'release_baseline', 'P')
+        if b in ('A_PRIME', 'ORACLE'):
+            return False            # 只由指令 / 真实分离 accept
+        if b == 'C_SAME':
+            return bool(getattr(self, 'grip_drop_pending', False))
+        return True
+
+    def _release_oracle_sep_cb(self, msg):
+        """ORACLE:proximity 报告真实分离即 accept(不经 confidence 确认)。"""
+        if not self.gripper_mode or self.attach_time is None:
+            return
+        self.get_logger().error(
+            '[ORACLE] true separation received — accepting empty target '
+            '(upper-bound baseline, not deployable)')
+        self._accept_empty('oracle')
+
+    def _accept_empty(self, src):
+        """控制器接受"载荷已脱离":所有 accept 来源共用的状态动作。"""
+        _pending = bool(getattr(self, 'grip_drop_pending', False))
+        self._no_payload_latched = True
+        self._no_payload_conf_frames = 0
         self.get_logger().info(evt_line(
-            'accept', src='confidence', pending=_pending,
+            'accept', src=src, pending=_pending,
             unresolved=bool(self.payload_unresolved)))
         if self.payload_unresolved:
             self.payload_unresolved = False
@@ -1639,11 +1693,17 @@ class AcadosNMPCNode(Node):
             self.grip_drop_pending = False
             self.grip_drop_done = True
             self.grip_dropped = True
-            self.get_logger().info(
-                f'DROP complete: MHE no-payload confidence '
-                f'{self.no_payload_confidence:.3f} persisted for '
-                f'{self.no_payload_conf_hold_frames * p.dt:.2f}s; '
-                'adaptive states reset')
+            if src == 'confidence':
+                self.get_logger().info(
+                    f'DROP complete: MHE no-payload confidence '
+                    f'{self.no_payload_confidence:.3f} persisted for '
+                    f'{self.no_payload_conf_hold_frames * p.dt:.2f}s; '
+                    'adaptive states reset')
+            else:
+                self.get_logger().info(
+                    f'DROP complete: accepted by {src} (release_baseline='
+                    f'{self.release_baseline}, conf={self.no_payload_confidence:.3f}); '
+                    'adaptive states reset')
         if getattr(self, 'drop_pending_confirmation', False):
             self.drop_pending_confirmation = False
             self.drop_done = True
@@ -2814,6 +2874,8 @@ class AcadosNMPCNode(Node):
                 f't={nmpc_time:.1f}s | DROP command issued; waiting for MHE '
                 f'no-payload confidence >= {self.no_payload_conf_threshold:.2f} '
                 f'for {self.no_payload_conf_hold_frames * p.dt:.2f}s')
+            if getattr(self, 'release_baseline', 'P') == 'A_PRIME':
+                self._accept_empty('command')
             return
         self.grip_drop_done = True
         self.grip_dropped = True

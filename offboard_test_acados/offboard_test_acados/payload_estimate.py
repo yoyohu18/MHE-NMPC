@@ -20,6 +20,16 @@ FIELDS = (
 SIZE = len(FIELDS)
 LEGACY_SIZE = 12
 
+# 实验计划 §4 的"模型清除逻辑"取值。MHE 与 NMPC 读同名参数 release_baseline,
+# 各自实现自己那一半;'P' 是主线,其余取值只在该因素上与 P 不同。
+RELEASE_BASELINES = {
+    'P': 'Eventless-Full (mainline)',
+    'A_PRIME': 'CMD-Immediate: clear on release command, no confirmation',
+    'C_SAME': "CMD-Evidence: P's detector, persistence counted only after command",
+    'P_NOMOMENT': 'P without the moment-gated release path (mass-domain only)',
+    'ORACLE': 'clear at true separation time (upper bound, not deployable)',
+}
+
 
 def _smooth_zero_score(value, full, zero):
     """Return 1 below ``full`` and 0 above ``zero`` with a C1 transition."""

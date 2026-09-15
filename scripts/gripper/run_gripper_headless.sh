@@ -224,6 +224,23 @@ GRIP_LIFT_HOLD_DZ_D=$(_f2d "${GRIP_LIFT_HOLD_DZ:-0.35}")
 GRIP_LIFT_HOLD_SEC_D=$(_f2d "${GRIP_LIFT_HOLD_SEC:-3.0}")
 GRIP_MP_CAP_D=$(_f2d "${GRIP_MP_CAP:-0.6}")
 GRIP_DJ_FLOOR_MP_D=$(_f2d "${GRIP_DJ_FLOOR_MP:-0.05}")
+# 实验计划 §4 清除逻辑 baseline(2026-09-15)。一个变量同时喂 MHE 与 NMPC 的
+# release_baseline;默认 P = 主线逐位不变。取值见 payload_estimate.RELEASE_BASELINES。
+# 在起栈前校验:节点里的 ValueError 会崩在 nohup 日志里,脚本照样打印 "stack up"。
+RELEASE_BASELINE_D=$(echo "${RELEASE_BASELINE:-P}" | tr 'a-z' 'A-Z')
+case "$RELEASE_BASELINE_D" in
+  P|A_PRIME|C_SAME|P_NOMOMENT|ORACLE) ;;
+  *) echo "RELEASE_BASELINE=$RELEASE_BASELINE_D 非法(P|A_PRIME|C_SAME|P_NOMOMENT|ORACLE)" >&2
+     exit 1 ;;
+esac
+if [ "$RELEASE_BASELINE_D" != "P" ] && [ "$(_b "${MHE_RELEASE_ARM_ON_COMMAND:-false}")" = "true" ]; then
+  echo "RELEASE_BASELINE=$RELEASE_BASELINE_D 与 MHE_RELEASE_ARM_ON_COMMAND(C-thrust)互斥" >&2
+  exit 1
+fi
+if [ "$RELEASE_BASELINE_D" != "P" ] && [ "$(_b "${CONTINUOUS_PAYLOAD_ESTIMATES:-true}")" != "true" ]; then
+  echo "RELEASE_BASELINE=$RELEASE_BASELINE_D 需要 CONTINUOUS_PAYLOAD_ESTIMATES=true" >&2
+  exit 1
+fi
 
 WS="/home/clear/ros2_ws_HJH"
 PX4_DIR="/home/clear/PX4-Autopilot"
@@ -340,6 +357,7 @@ nohup ros2 run offboard_test_acados proximity_gripper_node --ros-args \
     --params-file "$PKG/config/gripper/gripper_params.yaml" \
     -p drone_model:=x500_0 -p r_xy:=$R_XY -p h_min:=0.35 -p h_max:=0.60 \
     -p detach_delay_sec:=$GRIP_DETACH_DELAY_D \
+    -p detach_jam:=$(_b "${GRIP_DETACH_JAM:-false}") \
     $PROX_TARGETS_ARG "${PROX_SCHED_ARG[@]}" \
     > "$RUNDIR/grip_proximity_$STAMP.log" 2>&1 &
 
@@ -374,6 +392,7 @@ nohup ros2 run offboard_test_acados acados_nmpc_node --ros-args \
     -p dj_ratchet_enable:=$(_b "${DJ_RATCHET:-false}") \
     -p use_mhe:=$USE_MHE \
     -p continuous_payload_estimates:=${CONTINUOUS_PAYLOAD_ESTIMATES:-true} \
+    -p release_baseline:=$RELEASE_BASELINE_D \
     -p decouple_publish:=${DECOUPLE_PUB:-true} -p publish_hz:=$PUBLISH_HZ_D \
     -p geom_source:=${NMPC_GEOM_SOURCE:-estimate} \
     -p geom_release_mode:=${NMPC_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-event}} \
@@ -511,6 +530,7 @@ nohup ros2 run offboard_test_acados mhe_node --ros-args \
     -p resid_release_geom:=$(_b "${MHE_RESID_RELEASE_GEOM:-true}") \
     -p resid_confirm_enable:=$(_b "${MHE_RESID_CONFIRM:-true}") \
     -p release_arm_on_command:=$(_b "${MHE_RELEASE_ARM_ON_COMMAND:-false}") \
+    -p release_baseline:=$RELEASE_BASELINE_D \
     -p thrust_map_fault_gain:=$(_f2d "${MHE_THRUST_FAULT_GAIN:-1.0}") \
     -p motor_speed_noise_frac:=$(_f2d "${MHE_MOTOR_NOISE:-0.0}") \
     -p resid_step_enable:=$(_b "${MHE_RESID_STEP:-false}") \
@@ -540,6 +560,7 @@ nohup ros2 run offboard_test_acados mhe_node --ros-args \
 echo "gripper headless stack up: nmpc=$NODE_LOG mhe=$MHE_LOG"
 echo "  provenance=$RUNDIR/provenance_$STAMP"
 echo "  payload=${GRIP_PAYLOAD_KG}kg ecc_y=${GRIP_ECC_Y}m r_xy=$R_XY"
+echo "  release_baseline=$RELEASE_BASELINE_D (P=主线)"
 echo "  event_trigger=${MHE_EVENT_TRIGGER:-true} signal=${MHE_SIGNAL_MODE:-residual} drop_publish=${DROP_PUBLISH_MASS_EVENT:-false}"
 echo "  geom_release: NMPC=${NMPC_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-event}} MHE=${MHE_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-self}} cxy_release_mp=${MHE_CXY_MASS_RELEASE_MP:-0.03}"
 echo "  theta=${MHE_SCHEDULE_THETA:-M0} confirm_alpha=$MHE_CONFIRM_ALPHA_D (alpha>=0 => thresh=alpha*g*envelope; <0 => fixed ${MHE_CONFIRM_THRESH:-1.5}N)"

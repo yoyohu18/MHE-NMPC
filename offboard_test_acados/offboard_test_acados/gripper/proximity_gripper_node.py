@@ -29,7 +29,7 @@ import time
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
-from std_msgs.msg import Bool, Float64MultiArray
+from std_msgs.msg import Bool, Empty, Float64MultiArray
 
 from ..lifecycle_trace import evt_line
 
@@ -96,6 +96,9 @@ class ProximityGripperNode(Node):
         self.declare_parameter('enable_topic', '/gripper/enable')
         self.declare_parameter('release_topic', '/gripper/release')
         self.declare_parameter('detach_delay_sec', 0.0)
+        # 永久卡死故障注入(2026-09-15,默认关):释放请求(enable=false 或 release)
+        # 到达时关节保持吸附、永不脱开,t_sep=+inf。与 detach_delay_sec 互斥。
+        self.declare_parameter('detach_jam', False)
         # 部分丢失故障注入(2026-09-15,默认空=关):"box4:45,box3:80,box2:115" 表示首次
         # ATTACH 后 45 s 松开 box4 ……;前缀 "dry:" 只打标记不松开(对照臂)。被松开的
         # 目标永久拉黑、不再重吸(否则 ~40 ms 就被吸回,见 on_release 注释)。
@@ -116,6 +119,10 @@ class ProximityGripperNode(Node):
         self.attach_timeout_warn = float(g('attach_timeout_warn').value)
         self.detach_delay_sec = max(
             0.0, float(g('detach_delay_sec').value))
+        self.detach_jam = bool(g('detach_jam').value)
+        if self.detach_jam and self.detach_delay_sec > 0.0:
+            raise ValueError('detach_jam and detach_delay_sec>0 are mutually exclusive')
+        self._jam_logged = set()
         sched = str(g('partial_loss_schedule').value).strip()
         self.partial_dry = sched.startswith('dry:')
         if self.partial_dry:
@@ -157,6 +164,9 @@ class ProximityGripperNode(Node):
             Float64MultiArray, '/gripper/attach_offset',
             QoSProfile(depth=1,
                        durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        # ROS:全部载荷真实脱开的时刻。只供 release_baseline=ORACLE(性能上界)
+        # 订阅;主线 MHE/NMPC 不订阅,不构成外部事件信号。
+        self.sep_truth_pub = self.create_publisher(Empty, '/gripper/sep_truth', 10)
 
         # ROS:只收使能/释放。
         self.create_subscription(Bool, g('enable_topic').value,
@@ -170,7 +180,7 @@ class ProximityGripperNode(Node):
             f'targets={self.targets} pose_topic={self.pose_topic} '
             f'r_xy={self.r_xy} h=[{self.h_min},{self.h_max}] '
             f'v_rel_max={self.v_rel_max} '
-            f'detach_delay={self.detach_delay_sec:.2f}s '
+            f'detach_delay={self.detach_delay_sec:.2f}s jam={self.detach_jam} '
             f'partial_loss={"dry:" if self.partial_dry else ""}{self.partial_schedule}')
 
     # --- gz-transport 回调(gz 线程)---
@@ -255,6 +265,14 @@ class ProximityGripperNode(Node):
         attached until the deadline. Repeated commands do not extend the delay.
         """
         if tgt not in self.attached or tgt in self._pending_detach:
+            return
+        if self.detach_jam:
+            if tgt not in self._jam_logged:
+                self._jam_logged.add(tgt)
+                self.get_logger().warn(
+                    f'DETACH JAM injected for "{tgt}": source={source}, '
+                    'physical joint held permanently')
+                self.get_logger().info(evt_line('inject_jam', target=tgt, source=source))
             return
         if self.detach_delay_sec <= 0.0:
             self.send_detach(tgt)
@@ -355,6 +373,8 @@ class ProximityGripperNode(Node):
         self.attached.discard(tgt)
         self.get_logger().info(f'-> DETACH "{payload}"')
         self.get_logger().info(evt_line('sep', target=tgt, n_attached=len(self.attached)))
+        if not self.attached:
+            self.sep_truth_pub.publish(Empty())
 
 
 def main(args=None):
