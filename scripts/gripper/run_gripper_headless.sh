@@ -81,17 +81,21 @@ BOX_I=$(python3 -c "print(f'{$GRIP_PAYLOAD_KG * 0.00375:.6f}')")
 # 实际 d_xy 中位 0.096、p90 0.139,本来就在设计值附近抖(跟踪误差 + 旋翼下洗
 # 吹动 box)。超限只是**这一 tick 不 attach**,drone 继续跟踪悬停点等它收敛;
 # proximity 侧有节流日志 + 8s 未 attach 的 WARN。
-# ★ 2026-09-16 起默认 TOL=0.02 + 持续判据 + 偏心下限(实验计划 E1 开发集断代点):
-#   上限只拦瞬时值时,偏心在 0.13~0.16 间摆动会在"掠过"上限那一 tick 吸附,吸附点
-#   堆在边界(E1 冒烟 5/6 轮 d_xy∈[0.123,0.130]),吸附后力矩饱和振荡坠机都在这档。
-#   GRIP_ATTACH_DWELL_SEC:判据须连续满足这么久才吸(0 = 旧的首 tick 行为)。
-#   GRIP_ATTACH_RMIN:偏心下限,默认 ECC_Y−TOL;偏心过小时 s_ref 小、释放判据
-#   绝对门槛低,检测显著变慢(冒烟 d_xy=0.058 → 脱离后 15.1 s)。设 0 关闭。
-#   复现 09-16 之前批次:GRIP_ATTACH_TOL=0.05 GRIP_ATTACH_DWELL_SEC=0 GRIP_ATTACH_RMIN=0。
-GRIP_ATTACH_TOL="${GRIP_ATTACH_TOL:-0.02}"
+# ★ 2026-09-16:TOL 保持 0.03(上限 0.13),持续判据与偏心下限默认**关闭**。
+#   当天曾默认 TOL=0.02 + DWELL=1.0s + RMIN=0.08,180 架次实测判负并回退:
+#     吸附失败(物理从未 attach):r_xy=0.15 档 1/360=0.3%、0.13 档 6/307=2.0%,
+#       而 0.12+dwell 档 93/185=50.3% —— 飞机下降到位只停留 grip_lift_after_sec
+#       (实测 3.0s)就起吊,偏心本就在 0.12 附近抖,凑不满连续 1s 就空载飞走。
+#       93 个失败轮归因:68 卡上限 0.12、25 卡下限 0.08、2 只因持续未凑满。
+#     吸上之后的发散率:0.15 档 49/359=13.6% → 0.13 档 29/301=9.6%(显著改善,
+#       这条保留)→ 0.12+dwell 档 7/92=7.6%(再降 2pp,n=92 不显著)。
+#     "一轮可用"合成:0.13 档 ≈88.6%,0.12+dwell 档 ≈45.9% —— 净损失。
+#   两个开关保留但默认 0,将来要测必须同时放宽吸附窗口(grip_lift_after_sec
+#   3→8s)并作为独立 A/B 跑够样本,不要顺手塞进别的批次。
+GRIP_ATTACH_TOL="${GRIP_ATTACH_TOL:-0.03}"
 R_XY=$(python3 -c "print(f'{$GRIP_ECC_Y + $GRIP_ATTACH_TOL:.3f}')")
-GRIP_ATTACH_DWELL_SEC="${GRIP_ATTACH_DWELL_SEC:-1.0}"
-GRIP_ATTACH_RMIN="${GRIP_ATTACH_RMIN:-$(python3 -c "print(f'{max($GRIP_ECC_Y - $GRIP_ATTACH_TOL, 0.0):.3f}')")}"
+GRIP_ATTACH_DWELL_SEC="${GRIP_ATTACH_DWELL_SEC:-0.0}"
+GRIP_ATTACH_RMIN="${GRIP_ATTACH_RMIN:-0.0}"
 USE_MHE="${USE_MHE:-true}"
 
 # ⚠️ ROS2 参数是强类型的:`-p grip_dyn_r:=5` / `grip_drop_after_sec:=40` 会被解析
