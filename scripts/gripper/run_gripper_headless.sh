@@ -417,6 +417,11 @@ nohup ros2 run offboard_test_acados acados_nmpc_node --ros-args \
     -p geom_release_mode:=${NMPC_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-event}} \
     -p grip_payload_envelope:=$GRIP_PAYLOAD_ENVELOPE_D \
     -p attach_j_bootstrap_enable:=${ATTACH_J_BOOTSTRAP:-true} \
+    -p attach_j_bootstrap_on_liftoff:=${BOOTSTRAP_ON_LIFTOFF:-false} \
+    -p cxy_freeze_in_maneuver:=${NMPC_CXY_FREEZE:-false} \
+    -p cxy_freeze_window_sec:=${NMPC_CXY_FREEZE_WINDOW:-3.0} \
+    -p liftoff_detect_dz:=${LIFTOFF_DZ:-0.03} \
+    -p liftoff_arm_timeout_sec:=${LIFTOFF_TIMEOUT:-6.0} \
     -p control_mode:=${NMPC_CONTROL_MODE:-mhe} \
     -p l1_a_gain:=$L1_A_GAIN_D \
     -p l1_omega_c:=$L1_OMEGA_C_D \
@@ -438,6 +443,19 @@ nohup ros2 run offboard_test_acados acados_nmpc_node --ros-args \
     -p omega_scale_tau:=$OMEGA_SCALE_TAU_D -p omega_scale_cap:=$OMEGA_SCALE_CAP_D \
     > "$NODE_LOG" 2>&1 &
 
+# ★★ 2026-09-17 晚:MHE 力矩来源默认翻为 phys_full + 区间平均 + 越界重锚(用户拍板)。
+#   依据 = 预注册配对 A/B pfovr_ab_20260917_193153(command vs 本组合,w2/w4 各 16 对,
+#   吊起 + 8 字一圈、**无投放**):吊起段 m 贴下界 1.961 的帧占比 24.5%→3.2%,
+#   配对差 +21.3pp 95%CI[+8.7,+33.9] Wilcoxon p=5.7e-5;一票否决未触发(发散 A1/B1,
+#   B 那轮是与臂无关的爬升途中晚吸附);求解失败中位 4→0。机理见记忆
+#   liftoff-lb-stuck-mechanisms(离地振荡时点采样的电机推力/力矩严重混叠,把 m 压到
+#   下界 → J bootstrap 永不交接 → 内环 5× 过增益)。
+#   ⚠️ sensor-only 主线(external_event_inputs=false)下 MHE 从不使用 NMPC 指令:
+#   u_known 始终是电机反算值,mhe_tau_source 只决定 motor_window_avg 开时哪些力矩分量做
+#   区间平均。所以 A/B 两臂的真实差别是"点采样 vs 区间平均"(+越界重锚),不是"指令 vs 实测"。
+#   ⚠️ 未验证:投放/释放段(09-05 判负 phys_full 的那批是带投放的)。越界重锚在该批
+#   32 轮里 0 次触发,效果只有开环回放证据。复现 09-17 晚之前的批次须显式
+#   MHE_TAU_SOURCE=command MHE_MOTOR_AVG=0 MHE_REANCHOR_OVR=0。
 # 8. MHE(dJ/c_xy + 棘轮修复已内建在 mhe_node.py,attach_offset 一到就自动生效)
 # 载荷几何标度 = grip_payload_envelope(包线上界,见文件顶部)。2026-08-26 去先验
 # 改造前这里还有 GRIP_TRUE_PAYLOAD_MASS(真值直灌)/GRIP_GEOM_MP_FLOOR(0.15kg 永久
@@ -568,8 +586,9 @@ nohup ros2 run offboard_test_acados mhe_node --ros-args \
     -p maneuver_vel_thresh:=$MHE_MG_VEL_D \
     -p maneuver_q0_cap:=$MHE_MG_CAP_D \
     -p maneuver_exponent:=$MHE_MG_EXP_D \
-    -p mhe_tau_source:=${MHE_TAU_SOURCE:-command} \
-    -p motor_window_avg:=$(_b "${MHE_MOTOR_AVG:-false}") \
+    -p mhe_tau_source:=${MHE_TAU_SOURCE:-phys_full} \
+    -p motor_window_avg:=$(_b "${MHE_MOTOR_AVG:-true}") \
+    -p reanchor_on_moment_overrange:=$(_b "${MHE_REANCHOR_OVR:-true}") \
     -p pre_offboard_estimate:=$(_b "${MHE_PRE_OFFBOARD:-false}") \
     -p pre_offboard_min_z:=${MHE_PRE_OFF_MIN_Z_D:-0.5} \
     -p pre_offboard_conv_std:=${MHE_PRE_OFF_CONV_STD_D:-0.02} \

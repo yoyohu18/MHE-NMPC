@@ -286,6 +286,17 @@ def run(args):
     ros_params, node_env = launch_config(src_root, exp_env)
     # 回放不写原始流(否则会往批次目录里再写一份)。
     ros_params = [p for p in ros_params if not p.startswith('residual_log_dir:=')]
+    # 2026-09-17 晚 headless 默认从 command/false/false 翻成 phys_full/true/true。
+    # 旧批次的 experiment.env 没记这三个变量 → 用**当前**源码树回放会静默套上新默认。
+    # 用批次重建树回放不受影响;其它情况必须显式 --param 钉回批次当时的值。
+    _unset = [k for k in ('MHE_TAU_SOURCE', 'MHE_MOTOR_AVG', 'MHE_REANCHOR_OVR')
+              if k not in exp_env]
+    if _unset:
+        _eff = [p for p in ros_params if p.split(':=', 1)[0] in (
+            'mhe_tau_source', 'motor_window_avg', 'reanchor_on_moment_overrange')]
+        print(f'⚠️ [e0_replay] 批次 env 未记录 {_unset},按 {src_root} 脚本默认展开为 {_eff};'
+              ' 09-17 晚之前的批次应为 command/false/false,用当前树回放时请显式 --param 覆盖',
+              file=sys.stderr)
     arm_env = ARMS[args.arm]
     node_env.update(arm_env)
     for k, v in (kv.split('=', 1) for kv in args.env):
