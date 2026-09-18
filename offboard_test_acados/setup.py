@@ -26,6 +26,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'px4_pid_benchmark = offboard_test_acados.px4_pid_benchmark:main',
             'acados_nmpc_node = offboard_test_acados.acados_nmpc_node:main',
             'plot_logger_acados = offboard_test_acados.plot_logger_acados:main',
             'mhe_node = offboard_test_acados.mhe_node:main',
