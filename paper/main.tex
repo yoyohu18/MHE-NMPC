@@ -165,9 +165,45 @@ continuous rate-command scheduling. No attach/drop notification enters this path
 \label{fig:arch}
 \end{figure*}
 
-\textbf{Dynamics and parameterization.} The NMPC model carries the runtime parameter vector
-$p = [x_{\text{ref}}, m, \Delta J, c_{xy}]$. Thrust acting at the geometric center about the composite CoM produces
-$\tau_{\text{com}} = [-c_y T, +c_x T, 0]$. The NMPC solves
+\textbf{Rigid-body model.} Both optimizers integrate the same 13-state rigid-body model.
+Stacking position $p$, velocity $v$, attitude quaternion $q$ and body rate $\omega$ into
+$x=[p^{\mathsf T},v^{\mathsf T},q^{\mathsf T},\omega^{\mathsf T}]^{\mathsf T}\in\mathbb R^{13}$,
+with input $u=[T,\tau^{\mathsf T}]^{\mathsf T}$ (collective thrust and body torque),
+\begin{equation}
+\begin{aligned}
+\dot p &= v, \qquad \dot q = \tfrac12\,q\otimes[\,0,\;\omega^{\mathsf T}]^{\mathsf T},\\
+\dot v &= \tfrac{1}{m}\bigl(R(q)\,e_3T-k_d v\bigr)-g\,e_3,\\
+\dot \omega &= J^{-1}\bigl(\tau+\tau_{\mathrm{com}}-\omega\times J\omega\bigr),
+\end{aligned}
+\label{eq:rigid}
+\end{equation}
+where $\otimes$ is the Hamilton product, $R(q)$ the body-to-world rotation, $e_3$ the vertical
+unit vector (ENU, $z$ up), and $k_d$ a linear drag coefficient. The first line is kinematics and
+is independent of the payload; the payload enters the second and third lines only through the
+inertial parameters. Those are the composite mass $m$, the horizontal first mass moment $s$, and
+the inertia $J$. Thrust acts at the geometric center, so a composite CoM displaced by $c_{xy}$
+produces a trim torque, and the payload adds a parallel-axis inertia increment:
+\begin{equation}
+\begin{aligned}
+c_{xy} &= \frac{s}{m},\qquad
+\mu = \frac{m_B\max\{m-m_B,0\}}{m},\\
+\tau_{\mathrm{com}} &= T\,[-c_y,\;c_x,\;0]^{\mathsf T}
+                     = \frac{T}{m}\,[-s_y,\;s_x,\;0]^{\mathsf T},\\
+J &= \mathrm{diag}\bigl(J_{B,xx}+\Delta J,\;J_{B,yy}+\Delta J,\;J_{B,zz}\bigr),\\
+\Delta J &= \mu r_z^2,
+\end{aligned}
+\label{eq:inertia}
+\end{equation}
+where $m_B$ is the known bare-airframe mass and $r_z$ a weak vertical-arm prior from the payload
+rack. The small $O(r_{xy}^2)$ diagonal terms and the yaw increment are omitted in the deployed
+interface. Equations \eqref{eq:rigid}--\eqref{eq:inertia} are what the NMPC integrates; the MHE
+integrates the same equations with one addition given below. The two optimizers differ only in
+how $(m,s)$ reach them: the NMPC receives them as parameters refreshed before every solve, the
+MHE carries them as states.
+
+\textbf{Predictive controller.} The NMPC model carries the runtime parameter vector
+$p = [x_{\text{ref}}, m, \Delta J, c_{xy}]$, i.e.\ the reference plus the inertial parameters of
+\eqref{eq:inertia}. The NMPC solves
 \begin{equation}
 \begin{aligned}
 \min_{u_{0:N-1}}\;& \textstyle\sum_{k=0}^{N-1}\bigl(\lVert e_k\rVert_{Q}^2
@@ -176,9 +212,9 @@ $\tau_{\text{com}} = [-c_y T, +c_x T, 0]$. The NMPC solves
 \end{aligned}
 \label{eq:nmpc}
 \end{equation}
-where $x\in\mathbb R^{13}$ stacks position, velocity, attitude quaternion and body rate,
-$u=[T,\tau^{\mathsf T}]^{\mathsf T}$, $e_k$ stacks the position, velocity, quaternion-vector and
-rate errors to the reference, and $F$ is one RK4 step ($\Delta t=\SI{0.05}{s}$, $N=20$). The
+where $x$ and $u$ are those of \eqref{eq:rigid}, $e_k$ stacks the position, velocity, quaternion-vector and
+rate errors to the reference, and $F$ is one RK4 step of \eqref{eq:rigid}
+($\Delta t=\SI{0.05}{s}$, $N=20$). The
 input reference $\bar u(p)=[mg,\,c_y mg,\,-c_x mg,\,0]^{\mathsf T}$ is the live hover input
 including the eccentric trim torque. $Q$ and $R$ follow Bryson's rule with tolerances
 \SI{0.1}{m}, \SI{0.3}{m/s}, 0.05, \SI{0.3}{rad/s}, \SI{2}{N} and the torque bounds; $Q_N$
@@ -204,30 +240,22 @@ $s=m_P r_{xy}$, for whatever grasp offset $r_{xy}$ the gripper happens to realiz
 standard linear parameterization of rigid-body inertial parameters \cite{atkeson1986}: the
 rotational dynamics contains the product $m_P r_{xy}$, never the two factors separately, which
 is why the product---not the offset---is the state we augment. The two augmented states then
-enter $F_{\mathrm M}$ through different channels,
+enter $F_{\mathrm M}$---the same \eqref{eq:rigid} driven by $u^{\mathrm{phys}}$---through
+different channels. The MHE is the one place where the off-diagonal inertia is retained,
 \begin{equation}
-\begin{aligned}
-\dot v &= \tfrac{1}{m}\bigl(R(q)\,[0,0,T_{\text{phys}}]^{\mathsf T}-k_d v\bigr)-g e_3,\\
-\dot \omega &= J^{-1}\Bigl(\tau_{\text{phys}}
-   +\underbrace{\tfrac{T_{\text{phys}}}{m}[-s_y,\,s_x,\,0]^{\mathsf T}}_{\tau_{\text{com}}(s)}
-   -\,\omega\times J\omega\Bigr),\\
-J(m,s) &= J_B+\begin{bmatrix} A & 0 & -B_x\\ 0 & A & -B_y\\ -B_x & -B_y & 0\end{bmatrix},\\
-A &= \mu r_z^{2},\qquad B_i=\tfrac{m_B}{m}\,s_i\,r_z,
-\end{aligned}
-\label{eq:mhe-dynamics}
+J_{xz}=-\frac{m_B}{m}s_x r_z,\qquad J_{yz}=-\frac{m_B}{m}s_y r_z,
+\label{eq:mhe-offdiag}
 \end{equation}
-with $R(q)$ the body-to-world rotation, $k_d$ a linear drag coefficient, $e_3$ the vertical
-unit vector, and $\mu$ as in \eqref{eq:continuous-geometry}. So $s$ acts in exactly two places:
-the trim torque produced by thrust acting at the geometric center about the displaced composite
-CoM, and the off-diagonal inertia $B_{x,y}$. It appears nowhere in the translational equation,
-which carries $m$ alone. Mass is therefore identified predominantly through the translational
+added to the $J$ of \eqref{eq:inertia}. So $s$ acts in exactly two places: the trim torque
+$\tau_{\mathrm{com}}$, and \eqref{eq:mhe-offdiag}. It appears nowhere in the translational
+equation, which carries $m$ alone. Mass is therefore identified predominantly through the translational
 residual and the moment exclusively through the angular-rate residual; both are components of
 the same odometry measurement $y_j$, so the second state costs no additional sensing. Neither
 quantity is measured: both are recovered as the window-constant values that reconcile the
 reconstructed input $u^{\mathrm{phys}}$ with the observed $v$ and $\omega$ trajectories.
-The geometry in \eqref{eq:continuous-geometry} is not a second estimator but a
+The geometry of \eqref{eq:inertia} is not a second estimator but a
 reparameterization of this same state for the controller, whose model keeps its 13 states and
-receives $m$, $c_{xy}=s/m$ and $\Delta J$ as the parameters $p$ of \eqref{eq:nmpc}. The MHE
+receives $m$, $c_{xy}$ and $\Delta J$ as the parameters $p$ of \eqref{eq:nmpc}. The MHE
 solves
 \begin{equation}
 \begin{aligned}
@@ -251,21 +279,25 @@ centred on the previous window's shifted solution and is nearly uninformative in
 schedule, which scaled stages preceding a self-detected $T_{\text{phys}}$ step (\SI{4.4}{N} from
 a slow baseline) by $10^{-4}$, remained armed in the \SI{2}{m/s} flights but never fired there; it was
 disabled at \SI{4}{m/s} because grasp and release transients crossed its threshold. No external
-event enters $\beta_j$. The published geometry is reconstructed as
-\begin{equation}
-\begin{aligned}
-c_{xy} &= \frac{s}{m},\\
-\mu &= \frac{m_B\max\{m-m_B,0\}}{m},\\
-\Delta J_{xx} &= \Delta J_{yy}=\mu r_z^2,
-\end{aligned}
-\label{eq:continuous-geometry}
-\end{equation}
-where $r_z$ is a weak prior from the payload rack. The small $O(r_{xy}^2)$ diagonal terms and yaw increment are
-omitted in the deployed interface.
+event enters $\beta_j$. The geometry published to the controller is reconstructed from the
+solved $(m,s)$ by \eqref{eq:inertia}.
 
-\textbf{Estimate-independent thrust proxy.} We reconstruct the collective thrust
-$T_{\text{phys}} = k \sum_i \omega_i^2$ and the body torques from rotor speeds and arm
-geometry. The quadratic coefficient $k$ is a static-thrust constant; it is known to lose
+\textbf{Estimate-independent thrust proxy.} Each rotor produces $F_i=k\omega_i^2$ with
+$k=\SI{8.55e-6}{N.s^2}$, and the full wrench follows from the rotor positions $(x_i,y_i)$ and
+spin directions $d_i\in\{\pm1\}$,
+\begin{equation}
+T_{\text{phys}}=\sum_i F_i,\qquad
+\tau_{\text{phys}}=\begin{bmatrix}
+ \sum_i y_i F_i\\[-1pt] -\sum_i x_i F_i\\[-1pt] -k_m\sum_i d_i F_i
+\end{bmatrix},
+\label{eq:wrench}
+\end{equation}
+with $|x_i|=|y_i|=\SI{0.174}{m}$ and yaw-reaction coefficient $k_m=\SI{0.016}{m}$. This is the
+\emph{actuator-generated} wrench: it excludes $J\dot\omega$ and rotor gyroscopic terms, which is
+what makes it usable as the known input $u^{\mathrm{phys}}$ of \eqref{eq:mhe} rather than as a
+second estimate of the state. Rotor speeds arrive at \SI{250}{Hz} and are averaged over each
+\SI{10}{Hz} MHE interval, the zero-order-hold-consistent discretization of
+\eqref{eq:rigid}. The quadratic coefficient $k$ is a static-thrust constant; it is known to lose
 validity under large induced inflow during fast translation \cite{bangura2012}, which we do
 not model. Feeding the NMPC's \emph{commanded} thrust back into the estimator would instead
 close an estimator--controller loop: that command is computed from $\hat m$ itself (its cost
@@ -291,6 +323,21 @@ bootstrap, and the drop path remains estimate-only.
 
 \section{Online Estimation and Eventless Adaptation}\label{sec:method}
 \subsection{Continuous payload interface and autonomous lifecycle}
+
+\begin{figure}[tb]
+\centering
+\includegraphics[width=\linewidth]{figs/fig_lifecycle_fsm.pdf}
+\caption{The payload lifecycle as two state machines. The estimator owns payload
+\emph{presence} and may declare release from the evidence of
+\eqref{eq:release-evidence}; the controller owns the \emph{model} and clears it only on
+confirmation, $\gamma>0.90$ held for \SI{1.0}{s}. The gripper release command enters neither
+machine. An unhealthy or stale frame freezes the last accepted model and resets the persistence
+timer, so a degraded estimate can delay a confirmation but never cause one.
+\textsc{unresolved} is a hold, not a clearing: the model stays loaded while the vehicle brakes
+to hover and keeps waiting for evidence.}
+\label{fig:fsm}
+\end{figure}
+
 The MHE publishes one atomic frame
 \begin{equation}
 \begin{aligned}
@@ -314,9 +361,49 @@ fast path, and a separate latch records that the present flight reliably entered
 drop confirmation and prevents a transient mass dip during a figure-eight from disarming the
 true release path.
 
-No-payload confidence is the product of smooth empty scores for payload quantity, first moment,
-and inertia. A nonzero moment therefore vetoes a false empty decision even if the mass estimate
-touches its lower bound. On accepted release evidence, the estimator switches only the
+\textbf{Decision variables.} Every lifecycle decision is a function of the published frame
+\eqref{eq:payload-frame} alone. Writing $\sigma(v;a,b)$ for the smooth indicator that is 1 for
+$|v|\le a$, 0 for $|v|\ge b$, and $1-3x^2+2x^3$ with $x=(|v|-a)/(b-a)$ in between, the
+no-payload confidence fuses three empty indications multiplicatively,
+\begin{equation}
+\begin{aligned}
+\gamma=\;&\sigma(m_P;0.015,0.060)\;\sigma(\lVert s\rVert;0.0015,0.0060)\\
+         &\times\,\sigma(\Delta J_{xy};0.0020,0.0100),
+\end{aligned}
+\label{eq:gamma}
+\end{equation}
+with thresholds in \si{kg}, \si{kg.m} and \si{kg.m^2} and
+$\Delta J_{xy}=\max(|\Delta J_{xx}|,|\Delta J_{yy}|)$. The product is deliberate: any single
+payload indication vetoes \textsc{empty}, so a nonzero moment keeps $\gamma$ low even when
+$\hat m$ touches its lower bound. Release evidence uses two binary indications,
+\begin{equation}
+\begin{aligned}
+\text{quantity-empty}&:\; m_P<\SI{0.030}{kg},\\
+\text{moment-collapse}&:\; \rho=\frac{\lVert s\rVert}{\lVert s\rVert_{\mathrm{ref}}}<0.30
+   \;\wedge\; \lVert s\rVert<\SI{0.008}{kg.m}.
+\end{aligned}
+\label{eq:release-evidence}
+\end{equation}
+The absolute bound is a sanity limit, not a discriminator: over five development flights the
+loaded and released $\lVert s\rVert$ distributions overlapped (loaded minimum \SI{0.0039}{kg.m}
+below released maximum \SI{0.0049}{kg.m}), so only the ratio separates them.
+
+\textbf{The loaded reference.} $\rho$ presumes a reference the estimator must form by itself.
+After the \textsc{loaded} declaration, a healthy frame is admitted to a candidate window only if
+$\lVert s\rVert\le\SI{0.039}{kg.m}$---the platform envelope $m_{P,\max}r_{xy,\max}$, beyond
+which a sample is physically impossible, discarded, and counted as an estimator-quality
+diagnostic---and the vehicle is low-dynamic, $\lVert\omega\rVert\le\SI{0.15}{rad/s}$ and
+$\lVert v_{xy}\rVert\le\SI{0.20}{m/s}$; any maneuver clears the window. Once 20 consecutive
+frames (\SI{2}{s}) accumulate, they must further be stable in magnitude
+($1.4826\,\mathrm{MAD}/\mathrm{median}\le0.25$) and consistent in direction
+($\lVert\frac1{20}\sum_j s_j/\lVert s_j\rVert\rVert\ge0.90$, i.e.\ the mean unit moment
+direction over the window is near unit length). The reference is then the 20\%-trimmed mean
+of the window magnitudes, and is \emph{frozen} for the remainder of the flight: a running
+maximum would absorb the figure-eight estimation errors it is meant to detect. If no window
+qualifies before the aggressive segment, $\rho$ never becomes available and the moment-gated
+path cannot fire---the dominant miss mechanism in \S\ref{sec:limits}.
+
+On accepted release evidence, the estimator switches only the
 \emph{published target} of $s$ to zero; the optimization state is not overwritten. The output
 filter consequently produces a continuous decay rather than a geometric step. The controller
 marks a planned drop complete, resets its adaptive state, and finishes recovery only after healthy
@@ -340,16 +427,16 @@ model through one route only: confirmation, i.e.\ $\gamma>0.90$ held for \SI{1.0
 fresh frames. The estimator may additionally \emph{declare} release, which switches the
 published target of $s$ to zero and so speeds the rise of $\gamma$; a declaration is neither
 necessary nor sufficient for confirmation. The final code has two declaration routes.
-(a)~A \emph{moment-gated detector} requires collapse of
-$\rho=\lVert s\rVert/\lVert s\rVert_{\mathrm{ref}}$ below 0.30, where the loaded reference is
-formed from a healthy, low-dynamic, in-envelope interval and frozen before aggressive flight. It
-fires on quantity-empty plus moment-collapse evidence for five frames (slow path), or on moment
-collapse accompanied by a persistent signed thrust-residual step
+(a)~A \emph{moment-gated detector} fires on the two indications of
+\eqref{eq:release-evidence} jointly for five frames (slow path), or on moment collapse
+accompanied by a persistent signed thrust-residual step
 $\Delta T=\overline{T}_{\mathrm{post}}-\overline{T}_{\mathrm{pre}}$ over \SI{0.3}{s}
-half-windows (moment--residual path). (b)~A \emph{mass-domain route} declares release after
-$m_P<\SI{0.030}{kg}$ for 20 frames, accumulated only in low-dynamic flight. Confirmation can
-also occur without any declaration; because the confidence's moment score uses an absolute
-bound on $\lVert s\rVert$, a nonzero moment still vetoes it. Neither (b) nor confidence alone
+half-windows, below \SI{-0.9}{N} and significant against a rolling robust $\sigma$ of past
+$\Delta T$, for four frames (moment--residual path). Moment collapse is mandatory in both.
+(b)~A \emph{mass-domain route} declares release on the quantity-empty indication alone, held
+for 20 frames and accumulated only in low-dynamic flight. Confirmation can
+also occur without any declaration; the moment factor of \eqref{eq:gamma} still vetoes it while
+$\lVert s\rVert$ is nonzero. Neither (b) nor confidence alone
 uses the frozen-reference ratio, so confirmations through them are not evidence for (a);
 Sec.~\ref{sec:autorelease} reports how often each occurred. Moment evidence must come from a
 fresh, successful solve: re-anchoring after five consecutive solver failures initializes $s$
