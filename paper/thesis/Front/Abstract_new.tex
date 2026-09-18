@@ -1,0 +1,78 @@
+%=== ABSTRACT ===
+\newpage
+\chapter*{\centering Abstract}
+\markboth{Abstract}{}
+\addcontentsline{toc}{chapter}{Abstract}
+
+\begin{spacing}{1.5}
+\setlength{\parskip}{0.18in}
+
+Delivery quadrotors experience abrupt and coupled changes in mass, inertia and
+centre of mass when a payload is grasped or released. A nonlinear model
+predictive controller (NMPC) that retains the unloaded model applies an incorrect
+hover thrust, underestimates the moment demanded by an eccentric load, and loses
+the intended constraint margin. This dissertation develops a
+moving-horizon-estimation-enabled NMPC architecture that adapts the predictive
+model online from ordinary flight signals alone, and --- the central claim ---
+that never treats an attach or release command as evidence that the payload has
+changed.
+
+The controller issues the gripper release command itself and still does not use
+it to clear its payload model. The motivation is that a release command is a
+request while the model must describe the vehicle: a gripper can be slow, can
+jam, can release part of a load, and a load can be lost with no command at all.
+A command-triggered controller then flies a loaded vehicle with an empty model,
+silently.
+
+Making that refusal affordable requires a payload parameterisation that remains
+well posed through release. The conventional pair --- payload mass and grasp
+offset --- is singular in the limit that matters: as the payload mass tends to
+zero the offset becomes undefined, and an estimator holding it fixed can cancel
+the resulting phantom trim moment only by corrupting its mass estimate, which was
+observed as 14 of 55 post-release samples resting on the mass lower bound. The
+estimator developed here augments the composite mass together with the horizontal
+\emph{first mass moment} $s=m_P r_{xy}$, the product that the equations of motion
+actually contain, giving a 16-state moving horizon estimator over a
+\SI{2.0}{\second} window at \SI{10}{\hertz}. The centre-of-mass offset then
+follows as $c=s/m$ with no division by the payload mass and no knowledge of the
+grasp geometry; the off-diagonal inertia terms follow with the payload mass
+cancelling exactly; and the dominant roll/pitch increment follows from the
+composite mass and a weak vertical-arm prior. Two reductions are derived and
+quantified: the second-order horizontal inertia terms carry a factor $1/m_P$ in
+these coordinates and are discarded for a \SI{2.6}{\percent} bias, and the
+remaining mass-dependent inertia coefficient, which otherwise lets the optimiser
+dilute a phantom moment by inflating the mass, is frozen within each window.
+
+The physical wrench driving the estimator --- collective thrust, roll and pitch
+moments, and the yaw reaction --- is reconstructed from rotor speeds, so the
+estimator is never driven by a signal computed from its own output. A window
+vertical-force balance supplies a prior-free re-initialisation that uses only the
+two velocity endpoints of the window. One atomic, health-gated estimate frame
+feeds both the 13-state NMPC (20 stages at \SI{0.05}{\second}, \SI{20}{\hertz})
+and a continuous body-rate command scaling with explicit headroom limiting. The
+lifecycle is split between two state machines: the estimator owns payload
+presence and may declare release on a collapse of the first moment relative to a
+self-formed, frozen reference; the controller owns the model and clears it only
+on persistent confidence. An unconfirmed release becomes \textsc{unresolved} --- a
+hold with a smooth brake to hover --- never an assumption of completion.
+
+The system is implemented in ROS~2 around PX4 software-in-the-loop, Gazebo and
+acados. In the frozen campaign the interface confirmed release in 32 of 36
+eligible flights through three confirmation paths, with median delays of
+\SI{3.46}{\second} in manoeuvre and \SI{16.56}{\second} after braking to hover.
+Under a \SI{4}{\second} delayed detachment a command-triggered baseline cleared
+its model early in 5 of 5 pairs while the proposed interface did so in none of
+six runs. Against a variant armed only by the command, eventlessness detected 10
+of 18 unsignaled payload losses that the command-armed variant cannot see, with
+no false declaration in 209 loaded flights. The costs are reported as plainly as
+the benefits: confirmation is delayed and the delay is bimodal, roughly
+\SI{40}{\percent} of flights never form the moment reference the detector needs,
+and a \SI{\pm5}{\percent} error in the estimator's thrust coefficient defeats
+payload recognition in both directions.
+
+\textbf{Keywords:} quadrotor; nonlinear model predictive control; moving horizon
+estimation; first mass moment; inertial parameter identification; eventless
+payload adaptation; autonomous release detection; acados; PX4 SITL.
+\end{spacing}
+\newpage
+%=== END OF ABSTRACT ===

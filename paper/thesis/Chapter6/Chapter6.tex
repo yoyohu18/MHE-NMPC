@@ -1,0 +1,95 @@
+%=== CHAPTER SIX ===
+\chapter{Conclusion and Future Work}
+\label{ch:conclusion}
+\begin{spacing}{1.5}
+\setlength{\parskip}{0.22in}
+
+\section{Summary}
+
+This dissertation has structured the quadrotor payload problem as a coupled estimation-and-control task. The predictive model changes at grasp and release in three ways: mass changes translational acceleration and hover thrust, attachment geometry changes inertia, and horizontal CoM offset creates a trim moment. Treating these effects as one undifferentiated disturbance obscures their different physical channels.
+
+The proposed architecture estimates composite mass as a fourteenth MHE
+state over a \SI{2}{s} sliding window without inserting the
+empty-airframe or parcel mass into its initialisation, arrival weight or
+lower bound. Physical thrust and torque are reconstructed from rotor
+speed to avoid self-confirming use of the NMPC's intended input. A
+pre-offboard hover establishes an unloaded estimate; after pickup the
+parcel prediction is $\hat m_p=(\hat m_t-m_b)^+$. When a
+discontinuity is confirmed, pre-event stages are deweighted instead of
+forcing one constant mass to compromise between two physical regimes. A
+signed thrust-step detector identifies pickup and drop. At drop it
+releases obsolete geometry but never resets mass, leaving the MHE to
+regress from the loaded estimate to the unloaded solution. Rigid-body
+relations provide the payload-induced inertia increment, while horizontal
+CoM can be inferred from steady torque balance. Revision \texttt{f2264b3}
+adds a bounded online-$\dJ$ tracker so that the published mass prediction
+is actually propagated into the NMPC inertia model. NMPC then consumes one
+consistent parameter set in both its dynamics and hover-input baseline.
+
+The complete pipeline is implemented around ROS~2, PX4 SITL, Gazebo,
+MAVROS and acados. The MHE operates at \SI{10}{Hz}, while the 20-stage
+NMPC solves at \SI{20}{Hz} over a \SI{1}{s} preview. A
+three-dimensional figure-eight trajectory, direct mass-step plugin and
+detachable magnetic gripper provide increasingly coupled validation
+conditions. The repository-aligned experiment matrix includes prior-free
+cold-start observability, unknown parcel-mass prediction, drop regression,
+a residual-only trigger and an L1-adaptive baseline.
+
+\section{Principal Findings}
+
+At revision \texttt{f2264b3}, the defensible algorithmic findings are:
+\begin{enumerate}
+    \item removing a mass label requires deleting all three information paths: the mass-derived lower bound, the mass arrival weight and the nominal-mass fallback;
+    \item rotor thrust supplies a model-independent initial iterate and measurement channel, whereas intended thrust is self-confirming;
+    \item parcel mass can be reported as the optimised total-mass increment without becoming a separate estimator state or an input prior;
+    \item pickup/drop direction is observable from the sign of a persistent physical-thrust step, although trajectory switches remain a known ambiguity;
+    \item geometry release and mass-state reset are different operations: only the former is permitted at drop, so unloaded recovery remains an estimation result;
+    \item the NMPC-side inertia estimate can follow the predicted payload mass through a bounded ratchet or a two-way tracker, but the floor, cap and gain-envelope settings must be reported as safety assumptions;
+    \item payload adaptation must update the equilibrium-input penalty as well as the state equation;
+    \item predecessor revision \texttt{e003d339} reports event-settling and NMPC timing improvements, but those values require repetition under the new prior-free configuration.
+\end{enumerate}
+
+\draftnote{Replace the prior-free acceptance criteria with the frozen
+cold-start and drop-regression results, including run identifiers,
+confidence intervals and failed-run counts. Keep predecessor revision
+e003d339 statistics visually separate.}
+
+\section{Limitations}
+
+The present model assumes rigid attachment and known contact geometry.
+The reusable airframe model still contains calibrated $m_b$, inertia and
+rotor coefficients; \emph{no prior mass} refers to the MHE state and
+unknown parcel, not to removal of all vehicle calibration. Moreover, the
+current stage-D controller retains a \SI{0.15}{kg} inertia-map floor and
+a \SI{0.5}{kg} platform envelope for attach-time rate-gain scaling. These
+values do not enter the MHE or reveal the selected parcel's truth, but
+they are still prior information about the admissible payload scale.
+Accordingly, strict ``no payload-mass prior anywhere in the closed loop''
+has not yet been demonstrated. Thrust-only
+event detection cannot fundamentally distinguish a payload step from
+every possible sustained vertical-force or trajectory transition, so
+the higher geometry-release threshold is a safety separation rather than
+a proof of unique attribution. The model also neglects flexible,
+swinging and sloshing payload modes, uses a static quadratic thrust map
+and omits the yaw inertia increment. Finally, SITL cannot reproduce every
+latency, vibration and calibration error of a physical airframe.
+
+\section{Future Work}
+
+Immediate future work is to freeze and archive the evidence package for
+the no-task-mass cold-start, pickup prediction, online-inertia and drop-regression grid,
+regenerate every table from retained logs and report run-level confidence
+intervals. The actuator limits must remain fixed independently of the
+estimate. The next modelling step is to include the yaw inertia
+increment, propagate uncertainty from rotor-speed calibration into the
+MHE weights, run zero-floor/envelope-free controller ablations and replace the simplified arrival cost with a
+covariance-consistent update.
+
+Hardware transfer should proceed in stages: motor stand calibration, tethered hover, centred payload pickup, eccentric payload pickup and only then dynamic figure-eight flight. A safety supervisor should monitor solve status, state-estimation quality and input margin. Longer-term extensions include explicit flexible-load dynamics, multi-rate MHE, chance-constrained NMPC under wind and joint estimation of slowly varying aerodynamic coefficients.
+
+\section{Closing Remark}
+
+The main lesson is that online estimation is useful only when the estimated quantity enters the controller in a physically and numerically consistent way. By aligning measurements, parameter structure, equilibrium input and constraints, the MHE--NMPC architecture provides a clear route from payload detection to continued constrained flight.
+
+\end{spacing}
+\newpage

@@ -1,0 +1,168 @@
+%=== CHAPTER TWO ===
+%% Rewritten 2026-09-18: adds inertial-parameter identification, aerial
+%% manipulation and change detection, and restates the gap in eventless terms.
+
+\chapter{Background and Related Work}
+\label{ch:literature}
+\begin{spacing}{1.5}
+\setlength{\parskip}{0.22in}
+
+\section{Model Predictive Control}
+
+MPC repeatedly solves a finite-horizon optimal control problem, applies the first
+input and shifts the horizon forward. Its practical value comes from combining
+prediction, multivariable coordination and explicit constraints within one
+optimisation \cite{rawlings2017mpc,mayne2014mpc}. Linear MPC is mature and
+computationally efficient, but a single linear model is poorly suited to the
+large attitude changes and thrust-direction coupling of a quadrotor. NMPC retains
+the nonlinear dynamics and nonlinear tracking errors directly
+\cite{grune2017nmpc}.
+
+The price is computation. Multiple shooting, sequential quadratic programming,
+Gauss--Newton Hessian approximations and real-time iteration schemes are widely
+used to make NMPC practical \cite{diehl2005rti}. CasADi provides symbolic
+differentiation and a high-level optimisation interface
+\cite{andersson2019casadi}; acados generates efficient optimal-control solvers
+around tailored SQP and QP components \cite{acados,verschueren2022acados}, with
+HPIPM \cite{hpipm} as the quadratic subproblem solver. The present work uses full
+SQP with merit-function backtracking, because the real-time iteration variant was
+observed to diverge silently on this problem.
+
+\section{Quadrotor NMPC}
+
+A quadrotor is differentially flat under common assumptions \cite{mellinger2011},
+and many successful controllers exploit position and yaw references with a
+cascaded inner attitude loop \cite{lee2010}. NMPC can instead optimise collective
+thrust and body torque against the complete nonlinear rigid-body model, and this
+formulation becomes advantageous as trajectory curvature and operating envelope
+increase \cite{kamel2017linear,foehn2021}.
+
+The controller in this dissertation predicts position, velocity, unit quaternion
+and body rate. The attitude residual is the vector part of the relative
+quaternion, which avoids treating the four quaternion components as independent
+Euclidean coordinates. Input limits represent collective thrust and body-torque
+authority. This formulation is nominally standard; the distinguishing issue is
+that the equilibrium input and the plant parameters change at payload attachment
+and again at release.
+
+\section{Uncertainty and Adaptation in MPC}
+
+Robust MPC protects against bounded uncertainty, while stochastic MPC describes
+uncertainty probabilistically. Both can preserve margins without identifying the
+current plant, but conservatism grows when the uncertainty set must cover both an
+empty and a loaded vehicle. Adaptive MPC instead updates a parameterised model
+online: certainty-equivalent schemes use the current estimate directly,
+set-membership schemes maintain a feasible parameter set, and dual-control
+schemes excite the plant to learn \cite{aswani2013learning,hewing2020learning}.
+
+Learning-based MPC extends this using Gaussian processes, neural networks or
+learned residual models. Data-driven MPC for quadrotors can compensate complex
+aerodynamic effects \cite{torrente2021datadriven,torrente2021}, and neural
+approximations can reduce online computation \cite{salzmann2023neural}; broader
+surveys of learning for control under safety constraints are available
+\cite{brunke}. Those methods are valuable when the uncertainty is poorly
+structured. Payload pickup has stronger prior structure: rigid-body mechanics
+already specifies how mass and attachment geometry enter the equations. The
+present work therefore estimates a small physical parameter set rather than
+learning a general residual map.
+
+A distinct and influential alternative is to decline to identify the payload at
+all, and to absorb its effect as a lumped matched disturbance. The
+$\mathcal{L}_1$-adaptive augmentation of a quadrotor NMPC \cite{hanover2021} is
+the representative of this family, and incremental nonlinear dynamic inversion
+\cite{smeur} is its inner-loop counterpart. Such schemes are robust and require
+no payload model, but their internal quantity is a force or an acceleration, not
+a mass and a moment. They therefore cannot answer the question this dissertation
+poses --- whether a payload is still attached --- because that question is not
+represented in their state. The comparison is implemented here (an additive
+lumped translational and rotational disturbance in the prediction model) but is
+not among the frozen results.
+
+\section{State and Parameter Estimation}
+
+Recursive filters such as the extended Kalman filter propagate a local Gaussian
+approximation. They are efficient and central to flight-state estimation, but
+inequality constraints are not naturally hard constraints and abrupt parameter
+changes violate the local linearisation assumption. MHE estimates a window of
+past states and disturbances by solving a constrained optimisation; it can impose
+bounds such as a physically admissible mass interval and can attribute residuals
+using the same nonlinear model as the controller
+\cite{rawlings2017mpc,rao2003mhe,rao2003}. Recent work learns the MHE weights
+themselves \cite{neuromhe}, which is the principled version of the stage-weight
+question that Chapter~\ref{ch:framework} settles negatively for this problem.
+
+A moving window introduces a trade-off that this work encounters directly. A
+longer horizon improves noise rejection, but the constraint that makes an
+augmented parameter identifiable --- that it is constant across the window ---
+becomes less defensible as the window spans more of the trajectory. The
+implemented estimator uses 20 stages at \SI{0.1}{\second}.
+
+\section{Inertial-Parameter Identification}
+
+That the rigid-body equations are \emph{linear} in a particular set of inertial
+parameters --- mass, first mass moment and the six inertia elements --- is a
+classical result in manipulator identification \cite{atkeson1986}. The first mass
+moment $\svec = \mP\bm r_{xy}$ used throughout this dissertation is a member of
+that set, and the argument of Chapter~\ref{ch:model} is essentially an
+application of the classical observation to a case where it has not usually been
+applied: an aerial vehicle whose payload can \emph{leave}, so that the factored
+parameterisation becomes singular while the product does not.
+
+Payload-aware estimation for multirotors has previously used force--torque
+sensing, external observers or explicit mass estimators \cite{tomic2017,
+svacha2020, wuest2019, bohm2021}, and slung-load and aerial-manipulation work
+treats the payload as a dynamic subsystem of its own \cite{sreenath2013,
+thomas2014, ollero2022}. Both families assume that whether a payload is present
+is known. That assumption is what this dissertation removes.
+
+\section{Change Detection and Event-Triggered Estimation}
+
+Deciding that a plant has changed, from a residual, is the subject of classical
+change-detection theory \cite{basseville1993}, and event-triggered estimation is
+an established response to it \cite{heemels2012}. The predecessor of the present
+system used exactly this structure: a persistent step in the reconstructed
+collective thrust triggered a de-weighting of the pre-event stages of the window.
+
+Chapter~\ref{ch:framework} reports why that structure was retired for this
+problem. A collective-thrust residual cannot distinguish a payload change from a
+trajectory-mode change, a sustained vertical gust, or an aggressive manoeuvre,
+because all of them move the same scalar. Any decision resting on that signal
+alone inherits the ambiguity. The deployed design instead requires evidence from
+the \emph{rotational} channel --- a collapse of the first moment relative to a
+self-formed reference --- which is the one channel that measured cleanly in the
+development data. A formal comparison against a CUSUM detector on the same
+signals, under a matched false-alarm constraint, is not performed and is listed
+among the gaps.
+
+\section{Research Gap}
+
+The literature contains strong results on quadrotor NMPC, on learned residual
+dynamics, on inertial-parameter identification and on payload-aware aerial
+control. Three things are missing at their intersection, and this dissertation
+addresses them.
+
+First, \textbf{a payload parameterisation that survives release.} Existing
+payload-adaptive formulations assume attachment and estimate parameters
+conditioned on it. None of them is well posed in the limit $\mP\to0$ with a
+non-zero assumed lever arm, which is the regime in which every release occurs.
+
+Second, \textbf{a model-update rule that does not consult the event.} Systems
+that grasp and release overwhelmingly treat the gripper command, or a contact
+sensor, as ground truth for the model. The mismatch between command and physical
+detachment is not usually measured, and the failure it produces --- a loaded
+vehicle flown with an empty model --- is silent.
+
+Third, \textbf{an honest account of what such a design costs.} Refusing the
+command delays confirmation, and the delay is bimodal rather than merely larger.
+Estimating an absolute mass from an absolute thrust makes the whole interface
+sensitive to a calibration constant. Both are quantified in
+Chapter~\ref{ch:evaluation} rather than asserted to be small.
+
+The dissertation consequently treats estimation and control as one architecture
+rather than two algorithms. Estimation is judged by whether its outputs are
+identifiable and useful for control; control is judged by whether it remains
+consistent with the quantities being estimated, and by whether it knows when it
+does not know.
+
+\end{spacing}
+\newpage

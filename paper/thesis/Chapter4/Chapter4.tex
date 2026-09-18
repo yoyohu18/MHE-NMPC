@@ -1,0 +1,280 @@
+%=== CHAPTER FOUR ===
+\chapter{MHE--NMPC Framework}
+\label{ch:framework}
+\begin{spacing}{1.5}
+\setlength{\parskip}{0.22in}
+
+\section{Closed-Loop Architecture}
+
+Figure~\ref{fig:architecture} shows the information flow adopted from repository revision \texttt{f2264b3} on branch \texttt{feature/noInitialMass} \cite{yoyo2026mhenmpc}. Gazebo and PX4 SITL produce vehicle motion, odometry and rotor-speed signals. The MHE receives the measured physical state together with thrust and torque reconstructed from rotor speed. It estimates composite mass over a sliding window without receiving an empty-airframe initial answer or a task-specific parcel mass. A pre-offboard phase establishes the unloaded operating point; pickup and drop are then identified as signed changes in physical rotor thrust. The predicted parcel mass and contact geometry determine the inertia increment. Revision \texttt{f2264b3} adds bounded online $\Delta J$ tracking, a selectable ratchet and diagnostic logging, while steady torque balance provides an independent horizontal CoM estimate. The live parameter set is passed to the NMPC, which predicts a reference window and returns collective thrust and body torque to PX4.
+
+\begin{figure}[ht]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+    node distance=1.1cm and 1.25cm,
+    block/.style={draw, rounded corners, align=center, minimum height=1.25cm, text width=3.0cm, fill=gray!8},
+    signal/.style={-{Latex[length=3mm]}, thick},
+    feedback/.style={-{Latex[length=3mm]}, thick, teal!70!black}
+]
+\node[block] (plant) {Gazebo + PX4 SITL\\quadrotor and payload};
+\node[block, right=of plant] (measure) {Odometry, attitude,\\body rate and motor speed};
+\node[block, right=of measure, fill=teal!8] (mhe) {prior-free, event-triggered MHE\\$[x;m_t]$, $N_e=20$};
+\node[block, below=of mhe, fill=teal!8] (map) {Mass--inertia map\\$\hat m_p=(\hat m_t-m_b)^+$};
+\node[block, left=of map, fill=blue!7] (nmpc) {NMPC\\$x\in\mathbb{R}^{13}$, $N_c=20$};
+\node[block, left=of nmpc] (px4) {PX4 attitude/rate loop\\actuator allocation};
+\draw[signal] (plant) -- (measure);
+\draw[signal] (measure) -- node[above,font=\scriptsize]{history} (mhe);
+\draw[feedback] (mhe) -- node[right]{$\hat m_t$} (map);
+\draw[feedback] (map) -- node[above]{$\hat m_t,\hat m_p,\Delta\hat J,\hat{\bm c}$} (nmpc);
+\draw[signal] (nmpc) -- node[above]{$T,\bm{\tau}$} (px4);
+\draw[signal] (px4) -- (plant);
+\draw[feedback] (measure.south) |- node[pos=0.25,left]{$x_k$} (nmpc.north);
+\end{tikzpicture}}
+\caption{No-task-mass MHE--NMPC architecture. Parcel mass is predicted from the MHE total-mass state; the controller-side inertia map is bounded for lift safety, and payload truth is used only for offline scoring.}
+\label{fig:architecture}
+\end{figure}
+
+\section{Moving Horizon Estimator}
+
+The estimator uses the augmented state
+\begin{equation}
+x_e=[\bm p;\bm v;\bm q;\bm\omega;m]\in\mathbb{R}^{14},
+\qquad \dot m=0,
+\end{equation}
+with process noise on the 13 physical states only. At time $k$, the measurement window contains the state estimates $y_{k-N_e:k}$ and the reconstructed physical inputs $u^{\mathrm{phys}}_{k-N_e:k-1}$. The optimisation is
+\begin{align}
+\min_{\{x_i,w_i\},m}\quad&
+\|x_0-\bar x_0\|_{Q_0}^2+
+\sum_{i=0}^{N_e-1}\left(
+\|y_i-h(x_i)\|_{R_y}^2+\|w_i\|_{Q_w}^2\right) \\
+\text{s.t.}\quad&
+x_{i+1}=F_e(x_i,u_i^{\mathrm{phys}},w_i),\qquad
+m_{\min}\le m\le m_{\max}.
+\label{eq:mhe-framework}
+\end{align}
+The implemented values are $N_e=20$, $\Delta t_e=\SI{0.1}{s}$ and hence a \SI{2.0}{s} horizon. For the dissertation baseline,
+\[
+m_{\min}=\SI{0.2}{kg},\qquad m_{\max}=\SI{5.0}{kg},
+\qquad Q_{0,m}=10^{-6}.
+\]
+The lower bound is only a division-by-zero guard and contains no airframe mass. The arrival mean is shifted from the previous solution, but its mass component has effectively zero information weight. The estimator and controller are multi-rate: the MHE solves at \SI{10}{Hz}, while the NMPC consumes the newest accepted estimate at \SI{20}{Hz}.
+
+Measurement weights are scaled by representative measurement standard deviations. The process-noise penalty is stronger than the measurement penalty for the translational channel; the estimator is thereby encouraged to explain a persistent acceleration mismatch using mass rather than arbitrary process noise.
+
+\subsection{Physical-input reconstruction}
+
+For rotor $i$ with speed $\omega_i$ and thrust coefficient $k_f$,
+\begin{equation}
+F_i=k_f\omega_i^2,\qquad
+T_{\mathrm{phys}}=\sum_i F_i.
+\end{equation}
+Roll and pitch moments follow from the rotor arms,
+\begin{equation}
+\tau_x^{\mathrm{phys}}=\sum_i y_iF_i,\qquad
+\tau_y^{\mathrm{phys}}=-\sum_i x_iF_i.
+\end{equation}
+This signal is independent of the current mass estimate. By contrast, using the NMPC's intended hover thrust $T=\hat m g$ would return $\hat m$ by construction and would make the estimator self-confirming.
+
+\subsection{Cold start and payload-mass prediction}
+
+The dissertation profile is enabled explicitly with
+\texttt{MHE\_NO\_MASS\_PRIOR=1} and
+\texttt{MHE\_PRE\_OFFBOARD=1}; these mechanisms remain opt-in in the
+repository so that predecessor experiments are reproducible. While PX4 holds the vehicle above
+\SI{0.5}{m} and before the first NMPC input arrives, the MHE is driven by
+the reconstructed physical input. Its first iterate is
+\begin{equation}
+m^{(0)}=\operatorname{clip}(T_{\mathrm{phys}}/g,\,0.2,\,5.0),
+\end{equation}
+or the numerical-box midpoint if the thrust gate is unavailable. The
+estimate is released to NMPC after a 20-frame convergence test with
+standard deviation below \SI{0.02}{kg}; a \SI{30}{s} timeout is logged
+as a degraded start. Neither path inserts $m_b$ into the MHE.
+
+After pickup, the same decision state gives the parcel prediction
+\begin{equation}
+\hat m_p=\max(\hat m_t-m_b,0).
+\label{eq:framework-payload}
+\end{equation}
+The distinction is important: $m_b$ is a calibrated vehicle-model
+constant used to interpret the total-mass estimate, whereas no value for
+the current parcel is provided. In the coupled MHE configuration the
+geometry slots contain $[r_x,r_y,r_z]$, so inertia and CoM terms are
+differentiated functions of the mass decision rather than constants
+computed from a guessed parcel mass.
+
+\subsection{Bounded online inertia tracking}
+
+Revision \texttt{f2264b3} supplies the NMPC-side update that had been
+missing from the earlier no-initial-mass implementation. Define the
+clipped instantaneous parcel prediction
+\begin{equation}
+m^{\mathrm{raw}}_{p,k}=\operatorname{clip}
+\bigl(\hat m_{t,k}-m_b,\,0,\,m_{p,\max}\bigr),
+\qquad m_{p,\max}=\SI{0.6}{kg}.
+\label{eq:dj-raw}
+\end{equation}
+With the default ratchet enabled,
+\begin{equation}
+m^{\mathrm{rat}}_{p,k}=\max
+\bigl(m^{\mathrm{rat}}_{p,k-1},m^{\mathrm{raw}}_{p,k}\bigr),
+\qquad
+m^J_{p,k}=\max\bigl(m^{\mathrm{rat}}_{p,k},m_{p,\mathrm{floor}}\bigr),
+\label{eq:dj-ratchet}
+\end{equation}
+where $m_{p,\mathrm{floor}}=\SI{0.15}{kg}$. Setting
+\texttt{DJ\_RATCHET=false} replaces $m^{\mathrm{rat}}_{p,k}$ by the
+instantaneous value in \eqref{eq:dj-ratchet}, allowing two-way tracking.
+The model then evaluates $\dJ_k$ from $m^J_{p,k}$ and the known contact
+geometry using \eqref{eq:dj}. The floor covers the approximately
+sub-second interval after lift in which the parcel is airborne but the
+mass estimate has not yet converged; the cap prevents an erroneous mass
+peak from producing unbounded inertia.
+
+This conditioning is not part of the MHE objective and does not provide
+the optimiser with the parcel answer. It is nevertheless mass-valued
+information. The attach-time PX4 rate-gain scaling is initialised from a
+\SI{0.5}{kg} certified platform load envelope, and the online ratchet may
+only increase that gain baseline. The commit also fixes a baseline-
+synchronisation defect that could incorrectly reduce the applied gain
+ratio from 5.00 to 1.76 as the estimate first rose. A strict
+mass-scale-free controller therefore requires the zero-floor and
+envelope-free ablations defined in Chapter~\ref{ch:evaluation}; the
+present claim of no task-specific mass applies directly to the MHE.
+
+\subsection{Event-triggered stage weighting}
+
+The constant-mass model is valid on either side of a payload event but not across it. If the event occurs inside the current window, the fixed-weight MHE returns a compromise until the old regime leaves the horizon. Let $j_e$ denote the first post-event stage. The hand-designed M0 rule applies
+\begin{equation}
+\alpha_j=
+\begin{cases}
+10^{-4}, & j<j_e,\\
+1, & j\ge j_e,
+\end{cases}
+\qquad
+W_j^{\mathrm{event}}=\alpha_j\,\mathrm{blkdiag}(R_y,Q_w),
+\label{eq:event-weights}
+\end{equation}
+while the arrival block $Q_0$ remains active. The old stages therefore retain a numerically regular but negligible influence, and the physical-state trajectory remains available as a warm start. Nominal weights are restored when the event has left the window.
+
+The adopted sensing-minimal trigger uses two adjacent
+three-sample means at \SI{10}{Hz}. With
+\[
+\Delta T_k=\operatorname{mean}(T_{k-2:k})
+-\operatorname{mean}(T_{k-5:k-3}),
+\]
+two consecutive values satisfying $|\Delta T_k|>\SI{1.0}{N}$ trigger
+the scheduler. The sign distinguishes pickup from drop. Because a false
+geometry release is more dangerous than unnecessary stage deweighting,
+drop geometry is released only when
+$\Delta T_k<-\SI{2.0}{N}$. A parallel slow-EMA residual retains the
+quiet-baseline and warm-up safeguards. Neither path reads a payload mass
+or detachable-joint truth. A parameterised extension of
+\eqref{eq:event-weights} was optimised by simulation-in-the-loop
+cross-entropy search, but the earlier paired ablation found no measurable
+benefit over $[-4,0,0,0]$, the coordinates of the M0 rule.
+
+\subsection{Geometry and event handling}
+
+The attachment command may be logged for sequence coordination but does
+not set the mass estimate or supply parcel mass. A horizontal CoM
+estimate can be obtained during gated near-hover samples from
+\begin{equation}
+\hat c_x=-\frac{\tau_y^{\mathrm{phys}}}{T_{\mathrm{phys}}},
+\qquad
+\hat c_y=\frac{\tau_x^{\mathrm{phys}}}{T_{\mathrm{phys}}},
+\end{equation}
+followed by low-pass filtering. For the dissertation baseline, a negative
+physical-thrust step marks drop and releases the now-invalid attachment
+geometry. Crucially, this operation does not assign $m_b$ to the MHE
+state and does not set $\hat m_p$ to zero. The current loaded estimate
+remains the warm start; post-drop measurements and event-deweighted
+stages must make it regress to the unloaded solution. External event
+messages are retained solely for offline time alignment. The
+configuration uses \texttt{MHE\_GEOM\_COUPLED=1},
+\texttt{NMPC\_GEOM\_SOURCE=online} and
+\texttt{MHE\_RESID\_RELEASE\_GEOM=1}. The NMPC-side comparison profile
+enables online inertia tracking with the following settings:
+\begin{center}
+\small
+\texttt{DJ\_TRACK\_MEST=1}, \texttt{DJ\_RATCHET=true},\\
+\texttt{GRIP\_DJ\_FLOOR\_MP=0.15}, \texttt{GRIP\_MP\_CAP=0.6}.
+\end{center}
+Payload mass and geometry truth from the detachable joint are excluded
+from the adaptive path.
+
+\section{Adaptive NMPC}
+
+For the 13-state prediction model, the controller solves
+\begin{align}
+\min_{\{x_i,u_i\}}\quad&
+\sum_{i=0}^{N_c-1}\left(
+\|e(x_i,x_i^{\mathrm{ref}})\|_Q^2+
+\|u_i-u_{\mathrm{hover}}(\hat\theta)\|_R^2
+\right)+
+\|e(x_{N_c},x_{N_c}^{\mathrm{ref}})\|_P^2\\
+\text{s.t.}\quad&
+x_{i+1}=F_c(x_i,u_i;\hat\theta),\\
+& T_{\min}\le T_i\le T_{\max},\quad
+|\tau_{x,i}|,|\tau_{y,i}|\le\tau_{\max},\quad
+|\tau_{z,i}|\le\tau_{\psi},
+\label{eq:nmpc-framework}
+\end{align}
+where $\hat\theta=[\hat m,\Delta\hat J,\hat{\bm c}]$. The quaternion component of $e$ is the vector part of the relative quaternion. Only the first input is applied.
+
+The equilibrium baseline is updated with the same parameter set:
+\begin{equation}
+u_{\mathrm{hover}}(\hat\theta)=
+[\hat m g,\;\hat c_y\hat m g,\;-\hat c_x\hat m g,\;0]^\top .
+\end{equation}
+This detail is essential. Updating the dynamics while leaving the input penalty centred on the empty-airframe equilibrium still biases the optimiser toward insufficient thrust and zero trim torque.
+
+\section{Weights, Constraints and Solver}
+
+Bryson scaling sets each diagonal weight to the inverse square of a representative allowed error. The implemented scales are
+\[
+L_p=\SI{0.1}{m},\quad
+L_v=\SI{0.3}{m/s},\quad
+L_q=0.05,\quad
+L_\omega=\SI{0.3}{rad/s},
+\]
+and
+\[
+L_T=\SI{2.0}{N},\quad
+L_{\tau,xy}=\SI{0.5}{N.m},\quad
+L_{\tau,z}=\SI{0.2}{N.m}.
+\]
+This nondimensionalisation avoids the Hessian imbalance observed when position and torque weights were chosen only by visual tuning.
+
+The current controller uses $N_c=20$ and $\Delta t_c=\SI{0.05}{s}$, preserving a \SI{1.0}{s} prediction horizon while solving at \SI{20}{Hz}. Both OCPs use explicit fourth-order Runge--Kutta integration, Gauss--Newton Hessian approximation, partial-condensing HPIPM QP solution, full SQP and merit backtracking. Although an earlier project summary refers to SQP--RTI, the executable solver builder explicitly selects full SQP because RTI was observed to diverge silently in this configuration. Generated C code is reused until a model or OCP configuration changes.
+
+\section{Three-Dimensional Figure-Eight Reference}
+
+The main tracking reference is a Gerono lemniscate
+\begin{align}
+x_r &= r\sin a, &
+y_r &= \frac{r}{2}\sin(2a), &
+z_r &= z_h+d_z\sin a,\qquad a=\omega_rt .
+\end{align}
+A fifth-order smooth step grows the amplitude from zero after an initial hover. The reference remains differentiable at the central crossing and its velocity does not reverse there. The vertical term gives the two lobes different heights, increasing coupling while preserving a compact workspace.
+
+\section{Online Execution Sequence}
+
+At every control instant the implementation performs the following sequence:
+\begin{enumerate}
+    \item receive and frame-convert the latest PX4/MAVROS state estimate;
+    \item reconstruct physical thrust and torque from rotor speed;
+    \item before NMPC takeover, run the prior-free MHE in gated hover and release its output only after the convergence test;
+    \item append the state and input to the \SI{10}{Hz} MHE window;
+    \item apply the signed short-window thrust detector, classify pickup/drop and schedule the pre-event weights;
+    \item solve for total mass and compute $\hat m_p=(\hat m_t-m_b)^+$;
+    \item on drop, release geometry without resetting mass; otherwise gate/filter the CoM inversion and compute the coupled payload parameters;
+    \item update all \SI{20}{Hz} NMPC stage parameters and the hover-input baseline;
+    \item shift the previous NMPC solution, solve the OCP and send the first command;
+    \item log estimates, residuals, constraints, solver statistics and event flags.
+\end{enumerate}
+Estimator and controller failures are handled separately: an invalid MHE solve retains the last accepted parameter set, while an invalid NMPC solve triggers the configured safe fallback rather than publishing an unconstrained command.
+
+\end{spacing}
+\newpage

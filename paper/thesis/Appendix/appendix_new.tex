@@ -1,0 +1,146 @@
+%=== APPENDICES ===
+\begin{appendices}
+\label{cha:appendices}
+
+\chapter{Implemented Optimal Control Problem Configuration}
+\markboth{Appendix A}{}
+
+\begin{spacing}{1.5}
+
+\begin{table}[ht]
+\centering
+\caption{NMPC configuration (deployed default).}
+\begin{tabular}{@{}ll@{}}
+\toprule
+State dimension & 13 \\
+Input dimension & 4 \\
+Runtime parameter dimension & 23 \\
+Prediction stages & $N=20$ \\
+Sampling interval & $\Delta t=\SI{0.05}{\second}$ \\
+Prediction horizon & \SI{1.0}{\second} \\
+Solve rate & \SI{20}{\hertz}; setpoints published at \SI{50}{\hertz} \\
+Integrator & Explicit RK4 \\
+NLP method & Full SQP with merit backtracking \\
+QP solver & Partial-condensing HPIPM \\
+Hessian & Gauss--Newton \\
+Thrust box & $[\SI{1.27}{\newton},\ \SI{31.35}{\newton}]$ (actuator envelope) \\
+Torque box & $\pm\SI{0.5}{\newton\meter}$ roll/pitch, $\pm\SI{0.2}{\newton\meter}$ yaw \\
+Bryson tolerances (state) & $0.1$\,m, $0.3$\,m/s, $0.05$, $0.3$\,rad/s \\
+Bryson tolerances (input) & $2.0$\,N, $0.5$\,N\,m, $0.2$\,N\,m \\
+Terminal scaling & $20\times$ position, $1\times$ velocity, $2\times$ attitude, $0.2\times$ rate \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\caption{MHE configuration (deployed default). The prior-free column lists the
+values taken by the ablation of Section~\ref{sec:frame:weights}.}
+\small
+\begin{tabularx}{\textwidth}{@{}p{0.34\textwidth} X X@{}}
+\toprule
+ & \textbf{Deployed} & \textbf{Prior-free ablation} \\
+\midrule
+Augmented state dimension & 16 ($x$, $\mT$, $s_x$, $s_y$) & same \\
+Process-noise dimension & 13 (physical states only) & same \\
+Runtime parameter dimension & 7 (wrench, previous $\hat m$, $r_z$) & same \\
+Estimation stages / interval & $N=20$ / \SI{0.1}{\second} & same \\
+Moving horizon & \SI{2.0}{\second} & same \\
+Mass box & $[0.95\,\mB,\ \SI{5.0}{\kg}]$ & $[\SI{0.2}{\kg},\ \SI{5.0}{\kg}]$ \\
+Mass arrival $\sigma$ & \SI{3.16}{\kg} & \SI{1000}{\kg} \\
+First-moment box & $|s_i|\le\SI{1.5}{\kg\meter}$ & same \\
+First-moment arrival $\sigma$ & \SI{0.1}{\kg\meter} & same \\
+Initial iterate & window force balance \eqref{eq:winbal} & same \\
+Inertia coefficient mode & frozen, \eqref{eq:Afrozen} & same \\
+Vertical-arm prior $r_z$ & \SI{-0.47}{\meter} & same \\
+Stage weighting $\beta_j$ & $\equiv 1$ (event logic retired) & same \\
+Re-anchor trigger & 5 consecutive solver failures & same \\
+Output filter & first order, $\tau=\SI{0.25}{\second}$ & same \\
+NLP / QP method & Full SQP / partial-condensing HPIPM & same \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\caption{Payload interface and lifecycle settings.}
+\small
+\begin{tabularx}{\textwidth}{@{}p{0.40\textwidth} X@{}}
+\toprule
+Frame fields & $\mT$, $\svec$, $\cvec$, $\dJ_{\mathrm{diag}}$, $J_{\mathrm{diag}}$, $\gamma$, health, solution age \\
+Input freshness / solution freshness & \SI{0.30}{\second} / \SI{0.30}{\second} \\
+Consumer receive-age limit & \SI{0.35}{\second} \\
+Controller-side filter $\tau$ & \SI{0.20}{\second} \\
+Slew limits ($\mT$ / $\svec$ / $\dJ$) & $0.60$\,kg/s / $0.080$\,kg\,m/s / $0.080$\,kg\,m$^2$/s \\
+Confidence thresholds ($\mP$, $\lVert\svec\rVert$, $\dJ_{xy}$) & $(0.015,0.060)$, $(0.0015,0.0060)$, $(0.0020,0.0100)$ \\
+Confirmation & $\gamma>0.90$ held \SI{1.0}{\second} \\
+Moment-collapse ratio / sanity bound & $\rho<0.30$ / $\lVert\svec\rVert<\SI{0.008}{\kg\meter}$ \\
+Quantity-empty threshold / persistence & $\mP<\SI{0.030}{\kg}$ / 5 frames (slow path) \\
+Residual half-window / floor / persistence & \SI{0.3}{\second} / \SI{0.9}{\newton} / 2 (normal), 4 (strong) \\
+Residual evidence validity & \SI{3.0}{\second} \\
+Reference window & 20 frames; $\lVert\bm\omega\rVert\le0.15$, $\lVert\bm v_{xy}\rVert\le0.20$ \\
+Reference admissibility & $\lVert\svec\rVert\le\SI{0.039}{\kg\meter}$ \\
+Reference statistics & CV $\le0.25$; direction $\ge0.90$; \SI{20}{\percent}-trimmed mean \\
+\textsc{unresolved} timeout / brake duration & \SI{12}{\second} / \SI{3}{\second} \\
+Body-rate scale cap / dead band & $5.0$ / $0.08$ \\
+Body-rate scale $\tau$ / rise / recover & \SI{0.5}{\second} / $4.0$\,s$^{-1}$ / $1.5$\,s$^{-1}$ \\
+Body-rate headroom fraction / hard limit & $0.95$ / \SI{2.0}{\radian\per\second} \\
+Attach inertia bootstrap & envelope \SI{0.30}{\kg}; confirm \SI{0.5}{\second}; fade \SI{0.5}{\second} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+\end{spacing}
+
+\clearpage
+\chapter{Experiment Record Template}
+\markboth{Appendix B}{}
+
+\begin{spacing}{1.5}
+Each run stores the following metadata with its log, so that any reported figure
+can be regenerated from retained data:
+\begin{enumerate}
+\item repository revision, build timestamp and generated-solver identity;
+\item the \emph{resolved value} of every environment switch that affects
+behaviour --- not only those explicitly set, since a default that is never
+written to disk is the commonest way for a batch to become unattributable;
+\item airframe mass and inertia calibration, rotor coefficients and the fixed
+actuator limits;
+\item payload mass and attachment geometry for offline scoring, together with
+evidence that neither reached the adaptive path;
+\item trajectory parameters, grasp and release phase, and random seed;
+\item both horizons, weights, bounds and solver options;
+\item topic rates and measured end-to-end latency;
+\item the complete lifecycle event trace, with timestamps for every state
+transition and every release vote;
+\item termination reason, solver status sequence and constraint activity.
+\end{enumerate}
+
+Results tables carry one row per run in the retained data, not only an aggregate,
+so that failed runs cannot disappear during manual selection. Runs terminated by
+numerical failure remain in the denominator; any manual exclusion must name a
+pre-declared logging or infrastructure fault.
+\end{spacing}
+
+\clearpage
+\chapter{Pre-Submission Checklist}
+\markboth{Appendix C}{}
+
+\begin{spacing}{1.5}
+\begin{enumerate}
+\item Replace the candidate, programme, supervisor and acknowledgement
+placeholders in \texttt{main.tex} and the front matter.
+\item Confirm the declaration statements against the current NTU MAE wording.
+\item Set \texttt{\string\showdraftnotesfalse} in \texttt{main.tex}.
+\item Verify every numerical claim in Chapter~\ref{ch:evaluation} against a
+retained log or analysis script, and confirm that no reported batch mixes
+configurations.
+\item Confirm that no run in any reported batch passes payload truth, a
+task-specific payload mass, or an attach/release notification into the adaptive
+path, and that the platform envelope is the only mass-valued constant remaining.
+\item State, for each reported arm, which release baseline setting was active.
+\item Run BibTeX and recompile until all cross-references resolve.
+\item Check the final PDF against the current NTU MAE formatting checklist.
+\end{enumerate}
+\end{spacing}
+
+\end{appendices}

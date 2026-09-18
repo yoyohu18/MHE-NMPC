@@ -1,0 +1,23 @@
+%=== ABSTRACT ===
+\newpage
+\chapter*{\centering Abstract}
+\markboth{Abstract}{}
+\addcontentsline{toc}{chapter}{Abstract}
+
+\begin{spacing}{1.5}
+\setlength{\parskip}{0.18in}
+
+Delivery quadrotors experience abrupt and coupled changes in mass, inertia and centre of mass when a payload is grasped or released. A nonlinear model predictive controller (NMPC) that retains the unloaded model can consequently apply an incorrect hover thrust, underestimate the moment required by an eccentric load and lose the intended constraint margin. This dissertation develops a moving-horizon-estimation-enabled NMPC (MHE--NMPC) architecture that adapts the predictive model online using only signals available on the aircraft.
+
+The flight model uses a 13-state rigid-body representation comprising position, velocity, unit quaternion and body angular rate. Composite vehicle mass is introduced as the fourteenth state of a 20-stage moving horizon estimator operating at \SI{10}{Hz} over a \SI{2.0}{s} window. The dissertation baseline supplies no task-specific parcel-mass value to the MHE: the mass arrival weight is reduced to $10^{-6}$, the lower bound is a purely numerical \SI{0.2}{kg}, and the initial guess is formed from measured rotor thrust rather than the calibrated empty-airframe mass. A pre-offboard hover interval lets the estimator establish the unloaded mass before NMPC takeover. After pickup, the parcel prediction is \(\hat m_p=\max(\hat m_t-m_b,0)\), where $m_b$ is an airframe model parameter rather than information about the parcel. Revision \texttt{f2264b3} additionally implements a bounded online inertia map in which the NMPC-side $\Delta J$ follows this prediction through a selectable ratchet, cap and temporary lift-safety floor. The current implementation still uses a platform load-envelope setting to initialise the inner-loop gain schedule; this mass-valued safety information is disclosed rather than counted as an estimated parcel mass.
+
+Physical thrust is reconstructed from rotor-speed measurements so that the estimator is not driven by a thrust command already computed from its own mass estimate. When a payload discontinuity is detected, the measurement and process-noise weights of pre-event stages are reduced by four orders of magnitude. A two-short-window thrust test supplies an algorithmic attach/drop decision without payload mass or joint-state truth. A confirmed negative step releases the obsolete payload-geometry mode but does not reset the mass state; the MHE must regress continuously from the loaded estimate to the unloaded value using subsequent measurements. The estimated mass and geometry update both the NMPC dynamics and its equilibrium-input baseline. The 13-state NMPC uses 20 stages at \SI{0.05}{s}, giving a \SI{1.0}{s} preview at \SI{20}{Hz}.
+
+The controller is implemented in ROS~2 around PX4 software-in-the-loop, Gazebo and MAVROS. Both optimal control problems are generated and solved with acados. The evaluation uses paired no-task-mass/warm-start comparisons, fixed-weight/event-triggered comparisons, residual-only triggering, inertia-map ablations, an L1-adaptive NMPC baseline, abrupt mass steps and eccentric-gripper attach--transport--release trials on a three-dimensional Gerono figure-eight. Repository revision \texttt{f2264b3} contains the no-initial-mass implementation, cold-start tests, a recorded physical-thrust replay, explicit drop-regression acceptance checks, online-$\Delta J$ diagnostics and geometry-source/envelope A/B facilities \cite{yoyo2026mhenmpc}. Results inherited from the preceding main revision report a reduction in event settling time from \SI{1.20}{s} to \SI{0.30}{s}, a median/p99 NMPC solution time of \SI{1.3}{ms}/\SI{2.2}{ms}, and no divergence in a 60-run matrix; these inherited figures are not treated as proof of the new configuration.
+
+\draftnote{Freeze a new run matrix with MHE\_NO\_MASS\_PRIOR, pre-offboard estimation, residual drop detection and DJ\_TRACK\_MEST enabled. Report payload-mass prediction error, the online-$\Delta J$ trace and the time for the total-mass estimate to return to the unloaded band after drop. Include zero-floor and envelope-free ablations; do not reuse predecessor statistics as evidence for the new configuration.}
+
+\textbf{Keywords:} quadrotor; nonlinear model predictive control; moving horizon estimation; event-triggered estimation; payload adaptation; online mass estimation; acados; PX4 SITL.
+\end{spacing}
+\newpage
+%=== END OF ABSTRACT ===

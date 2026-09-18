@@ -1,0 +1,194 @@
+%=== CHAPTER ONE ===
+%% Rewritten 2026-09-18 for the eventless first-moment interface.
+
+\chapter{Introduction}
+\label{ch:introduction}
+\begin{spacing}{1.5}
+\setlength{\parskip}{0.22in}
+
+\section{Background}
+
+Quadrotors are increasingly used for inspection, transport and delivery because
+they can hover and manoeuvre in confined three-dimensional environments. Their
+agility, however, is obtained from a light airframe with limited thrust and
+torque margins. A package pickup can therefore change the vehicle dynamics on the
+same time scale as the control loop. The total mass changes the
+thrust-to-acceleration map, an offset load produces a persistent moment about the
+composite centre of mass, and the payload lever arm changes the rotational
+inertia.
+
+Model predictive control is attractive for this problem because it predicts
+future motion while handling actuator limits and coupled dynamics explicitly
+\cite{rawlings2017mpc,mayne2014mpc}. For a quadrotor the relevant equations are
+nonlinear and the attitude evolves on the unit-quaternion manifold; nonlinear MPC
+therefore avoids the loss of fidelity caused by repeated linearisation over
+aggressive motion \cite{grune2017nmpc,kamel2017linear}. Its performance
+nevertheless depends on the model supplied to the prediction. If the controller
+continues to use the empty-airframe parameters after grasping a parcel, even a
+numerically converged optimisation solves the wrong problem.
+
+This dissertation couples moving horizon estimation with nonlinear model
+predictive control. MHE estimates states and parameters by optimising over a
+recent window of measurements while enforcing the system dynamics and physical
+bounds \cite{rao2003mhe}. Within that window the estimator identifies two
+payload-dependent scalars, and from them the controller reconstructs every
+payload-dependent term in its own model.
+
+\section{Problem Statement}
+
+Consider a quadrotor that follows a three-dimensional figure-eight path, grasps
+an eccentric payload, transports it and releases it at a selected phase of the
+trajectory. The controller has no access to the true payload parameters. Only
+ordinary onboard flight signals are available: odometry, attitude, body rate and
+rotor-speed telemetry.
+
+Three model errors appear at attachment:
+\begin{enumerate}
+\item the composite mass changes abruptly, shifting the hover thrust and the
+translational acceleration gain;
+\item the payload lever arm increases roll and pitch inertia, reducing effective
+inner-loop bandwidth;
+\item the horizontal centre-of-mass offset creates a non-zero trim moment and
+consumes part of the available torque authority.
+\end{enumerate}
+At release all three changes occur in the opposite direction.
+
+The obvious way to handle release is to tell the controller when it happens. The
+controller in this work in fact \emph{issues} the release command itself, so the
+information is available for free. The central observation of this dissertation
+is that using it is a mistake.
+
+\begin{quote}
+A release command is a \emph{request}. The model must describe the
+\emph{vehicle}. The two diverge whenever a gripper is slow, jams, releases only
+part of a load, or when a load is lost with no command at all --- and a
+controller that clears its payload model on the command flies a loaded vehicle
+with an empty model, silently, because nothing in its loop contradicts it.
+\end{quote}
+
+The central research question is therefore:
+
+\begin{quote}
+Can a quadrotor identify, from its ordinary flight signals alone, that a payload
+has been grasped and that it has physically left --- with no attach or release
+notification of any kind entering the estimator or the model update --- and
+remain a constrained, well-tracking predictive controller throughout?
+\end{quote}
+
+This question turns out to have a specific technical obstacle, which
+Chapter~\ref{ch:model} addresses and which shapes the whole design. The natural
+payload parameterisation --- a payload mass and a grasp offset --- becomes
+singular at exactly the moment of interest: as the payload mass goes to zero the
+offset is undefined, and an estimator holding the offset fixed can only cancel
+the resulting phantom trim moment by corrupting its mass estimate. The remedy
+adopted here is to estimate the \emph{first mass moment} $\svec=\mP\bm r_{xy}$,
+the product that the equations of motion actually contain, rather than its two
+factors.
+
+\section{Research Objectives}
+
+The dissertation has six objectives:
+\begin{enumerate}
+\item derive a consistent 13-state nonlinear quadrotor model with explicit
+payload mass, inertia and centre-of-mass entry points, and show which
+parameterisation of those entry points remains well posed through release;
+\item formulate a moving horizon estimator that augments the composite mass and
+the horizontal first mass moment, deriving the inertia increment and the
+centre-of-mass offset from that pair without any horizontal attachment geometry;
+\item reconstruct the physical wrench from rotor speeds so that the estimator is
+never driven by a signal computed from its own output;
+\item formulate a predictive controller whose dynamics, equilibrium-input
+baseline and inner-loop command scaling are all updated from one atomic,
+health-gated estimate frame;
+\item define a grasp--release lifecycle in which no attach or release
+notification is admitted as evidence, and in which an unconfirmed release is held
+as \emph{unresolved} rather than assumed complete;
+\item evaluate the complete interface in software-in-the-loop against
+command-triggered and command-armed baselines, under delayed detachment,
+unsignaled loss, partial loss and thrust-map mismatch.
+\end{enumerate}
+
+\section{Scope}
+
+The work covers simulation and software-in-the-loop validation of a rigidly
+attached parcel. Airframe inertia, rotor geometry and the thrust and
+yaw-reaction coefficients are treated as calibrated plant quantities. The
+calibrated airframe mass appears in the rigid-body model, in the derived payload
+mass $\mP=(\mT-\mB)^{+}$ and in offline scoring.
+
+The information boundary is stated precisely, because a looser statement would be
+false. \emph{No task-specific payload mass and no attach or release notification
+enter the estimator or the controller's model update.} One mass-valued platform
+constant does remain in the closed loop --- the airframe's \SI{0.30}{\kg} payload
+envelope, used for an attach-time inertia floor and for a physical admissibility
+bound --- and it is disclosed as a specification of the airframe rather than as
+information about the parcel. Chapter~\ref{ch:model} states exactly where it
+appears.
+
+The scope does not include deformable or sloshing loads, cable-suspended payload
+dynamics, wind, motor failure, hardware flight, or a formal closed-loop stability
+proof for the estimator--controller interconnection. These are revisited in
+Chapter~\ref{ch:conclusion}.
+
+\section{Contributions}
+
+The contributions are:
+\begin{enumerate}
+\item \textbf{A first-moment payload state.} Augmenting $\svec=\mP\bm r_{xy}$
+rather than a mass-and-offset pair removes the release singularity, supplies the
+centre-of-mass offset as $\cvec=\svec/\mT$ with no grasp geometry, and prevents
+the estimator from encoding payload \emph{presence} into the mass channel.
+
+\item \textbf{A well-posed reduction of the inertia model.} The second-order
+horizontal terms of the parallel-axis increment are shown to carry a factor
+$1/\mP$ in the first-moment coordinates, and are discarded for a quantified
+\SI{2.6}{\percent} bias. The remaining mass-dependent coefficient is shown to act
+as a lever by which the optimiser can dilute a phantom moment, and is frozen
+within each window to break that derivative.
+
+\item \textbf{A non-circular physical-input reconstruction}, including the
+yaw-reaction channel, so that the estimator observes what the actuators did
+rather than what the controller intended.
+
+\item \textbf{A window vertical-force-balance re-initialisation} that uses only
+the two velocity endpoints of the window and therefore requires no numerical
+differentiation, reducing the seed error from \SI{17.1}{\percent} to
+\SI{2.8}{\percent} in aggressive flight.
+
+\item \textbf{An eventless payload lifecycle} in which the estimator owns
+presence and may declare release, the controller owns the model and clears it
+only on persistent confirmation, and an unconfirmed release becomes a hold with a
+smooth brake to hover rather than an assumption of completion.
+
+\item \textbf{A release rule built on a self-formed, frozen moment reference},
+with mandatory moment evidence --- a requirement introduced after a
+weaker rule caused real premature releases --- and a documented record of what
+each threshold was selected against.
+
+\item \textbf{A single atomic, health-gated payload interface} feeding both the
+predictive model and a continuous body-rate command scaling with explicit
+headroom limiting, replacing a design in which parameters arrived on separate
+topics and the autopilot's own gains were rewritten in flight.
+
+\item \textbf{A paired experimental evaluation} that separates release
+\emph{semantics} from persistent confirmation, quantifies what eventlessness buys
+(detection of unsignaled loss) and what it costs (confirmation delay, and a
+severe sensitivity to thrust-map calibration), and reports the failure modes
+rather than only the successes.
+\end{enumerate}
+
+\section{Dissertation Organisation}
+
+Chapter~\ref{ch:literature} reviews predictive control, online estimation,
+inertial-parameter identification and payload-adaptive aerial control.
+Chapter~\ref{ch:model} derives the model and the payload parameter structure, and
+is where the first-moment argument and its consequences are developed in full.
+Chapter~\ref{ch:framework} presents the coupled architecture, the numerical form
+of both optimal control problems, the continuous payload interface and the
+eventless lifecycle. Chapter~\ref{ch:evaluation} describes the implementation and
+reports the frozen experimental campaign, including the conditions under which
+the interface fails. Chapter~\ref{ch:conclusion} summarises the findings and
+states what remains open.
+
+\end{spacing}
+\newpage

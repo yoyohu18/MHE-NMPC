@@ -1,0 +1,202 @@
+%=== CHAPTER SIX ===
+%% Rewritten 2026-09-18 against the deployed eventless interface.
+
+\chapter{Conclusion and Future Work}
+\label{ch:conclusion}
+\begin{spacing}{1.5}
+\setlength{\parskip}{0.22in}
+
+\section{Summary}
+
+This dissertation has treated the quadrotor payload problem as one coupled
+estimation-and-control task with a specific structural difficulty at its centre.
+The predictive model changes at grasp and at release in three ways: mass changes
+the thrust-to-acceleration gain and the hover thrust, attachment geometry
+increases roll and pitch inertia, and the horizontal centre-of-mass offset
+creates a standing trim moment. Treating these as one undifferentiated
+disturbance obscures that they act through different physical channels and are
+identifiable to different degrees.
+
+The structural difficulty is that the natural parameterisation of those changes
+--- a payload mass together with a grasp offset --- is singular at release.
+Chapter~\ref{ch:model} showed that as $\mP\to0$ the offset $\bm r_{xy}$ becomes
+undefined, that holding it fixed leaves a phantom trim moment in the model, and
+that the only way an optimiser can cancel that phantom is by corrupting the mass
+estimate. The remedy adopted is to estimate the horizontal \emph{first mass
+moment} $\svec=\mP\bm r_{xy}$ --- the product the equations of motion actually
+contain --- alongside the composite mass. From that pair the centre-of-mass
+offset follows as $\cvec=\svec/\mT$ with no division by the payload mass and no
+knowledge of the grasp geometry, the off-diagonal inertia follows with the
+payload mass cancelling exactly, and the dominant roll/pitch increment follows
+from the composite mass and a weak vertical-arm prior whose error was measured to
+be immaterial.
+
+Two further reductions were necessary and were quantified rather than assumed.
+The second-order horizontal inertia terms carry a factor $1/\mP$ in the new
+coordinates and were discarded at a cost of \SI{2.6}{\percent} of the increment.
+The remaining mass-dependent coefficient was shown to give the optimiser a lever
+by which raising the mass estimate dilutes a phantom moment --- a mechanism that
+drove the estimate \SI{53}{\percent} high in replay --- and was frozen within each
+window to break that derivative while still tracking the true mass between
+windows.
+
+Around this model, Chapter~\ref{ch:framework} built a 16-state moving horizon
+estimator driven by a wrench reconstructed from rotor speeds, a single atomic and
+health-gated interface carrying that estimate to the controller, and a lifecycle
+in which \emph{no attach or release notification is evidence}. The controller
+issues the release command itself and does not consult it. The model is cleared
+only by persistent estimator confidence; a release that cannot be confirmed
+becomes \textsc{unresolved}, a hold in which the vehicle brakes smoothly to hover
+and keeps waiting, rather than an assumption that the payload has gone.
+
+In software-in-the-loop, Chapter~\ref{ch:evaluation} reported that the complete
+interface confirmed release in 32 of 36 eligible flights through three distinct
+confirmation paths, with median delays of \SI{3.46}{\second} in manoeuvre and
+\SI{16.56}{\second} after braking to hover. Under a \SI{4}{\second} delayed
+detachment, persistent confirmation avoided the early model clearing of a
+command-triggered baseline in 5 of 5 pairs. The eventless interface additionally
+detected 10 of 18 unsignaled payload losses that a command-armed confirmer cannot
+see, at the cost of a detector exposed throughout loaded flight --- a cost that
+produced no false declaration in 209 loaded flights.
+
+\section{Principal Findings}
+
+\begin{enumerate}
+\item \textbf{The first mass moment, not the offset, is the estimable payload
+geometry.} The equations of motion contain only the product. Estimating the
+factors separately adds an unidentifiable direction and a singularity at exactly
+the operating point of interest.
+
+\item \textbf{Payload \emph{presence} must not be encoded in the mass channel.}
+When it is, the only way for the estimator to express ``the load has gone'' is to
+move the mass, which is the one quantity the controller most needs to be correct.
+Augmenting $\svec$ gives presence its own channel.
+
+\item \textbf{A parameter that appears in a denominator will be abused by an
+optimiser.} Both pathologies found in this work --- the $1/\mP$ coefficient of
+the discarded inertia terms, and the mass in the denominator of the ghost-moment
+expression --- are instances of the same phenomenon. The fix in both cases was
+structural, not a matter of tuning.
+
+\item \textbf{An adaptive loop must be driven by a signal that is not a product
+of the adaptation.} Feeding the controller's intended thrust to the estimator
+makes the mass unobservable by construction; the rotor-speed reconstruction
+breaks the circularity, and extending it to the yaw-reaction channel removed the
+last place where the estimator could learn the controller's intent.
+
+\item \textbf{Release evidence must come from the rotational channel.} A
+collective-thrust residual cannot distinguish a payload change from a trajectory
+change or a manoeuvre; a rule that omitted mandatory moment evidence released
+prematurely in 3 of 9 flights, up to \SI{51}{\second} early. Making moment
+collapse mandatory costs misses, which are handled as \textsc{unresolved} holds
+rather than by lowering the evidence bar.
+
+\item \textbf{A ratio needs a reference, and the reference must be formed
+autonomously and then frozen.} A running maximum absorbs the very estimation
+errors the detector exists to reject.
+
+\item \textbf{Timeout is not proof.} Treating an unconfirmed release as complete
+reintroduces the failure the design exists to prevent. \textsc{unresolved} is the
+state that makes eventlessness deployable.
+
+\item \textbf{Payload adaptation must update the objective as well as the state
+equation.} A stale equilibrium-input baseline produces a steady-state error that
+gets \emph{worse} as the input weight is increased --- a signature that
+identifies the fault and that no weight tuning can remove.
+
+\item \textbf{The interface is severely sensitive to thrust-map calibration.} A
+\SI{\pm5}{\percent} error in the estimator's thrust coefficient defeated payload
+recognition in both directions. This is the principal barrier to hardware
+transfer, and it is a direct consequence of recovering an absolute mass from an
+absolute thrust.
+\end{enumerate}
+
+\section{Limitations}
+
+All system-level evidence is software-in-the-loop, and the simulator's plant
+generates thrust with the same square law the estimator inverts. Rotor speeds are
+exact; speed noise, transport delay and induced inflow are untested.
+
+The attachment is rigid. Gripper compliance, pendulum modes, flexible and
+sloshing loads are not modelled. A sustained vertical gust remains intrinsically
+confounded with a payload change on a collective-thrust residual, and wind is not
+evaluated.
+
+Within the interface itself, the dominant failure is not a wrong decision but an
+unavailable one: in 13 of 32 completed flights the frozen moment reference never
+formed, so the ratio test never ran, and those flights are also the population of
+seven of the eight unsignaled-loss misses. Out-of-envelope first-moment samples
+are excluded from votes but still reach the controller's centre-of-mass parameter
+through filtering. The release command is not gated on estimator health, and one
+divergence is directly attributable to that omission.
+
+The heaviest condition, \SI{0.30}{\kg} at \SI{4}{\meter\per\second}, sits at the
+vehicle's torque limit rather than at an operating point: pitch torque saturated
+within \SI{98}{\percent} of diagnostic windows there. Safe release
+\emph{semantics} are claimed at that limit; reliable flight is not.
+
+Finally, the baseline set is thin. The reported comparisons isolate release
+semantics only. No comparison against a fixed-parameter controller, a
+lumped-disturbance adaptive controller, or a formal change-detection procedure
+under a matched false-alarm constraint is included, although implementations of
+the first two exist in the codebase.
+
+\section{Future Work}
+
+\paragraph{Reference formation.} The single highest-value improvement is to make
+the loaded moment reference form reliably. Roughly \SI{40}{\percent} of flights
+never produced one, and that single deficiency accounts for the brake-to-hover
+delay mode, most unsignaled-loss misses, and the confidence-only confirmations.
+Candidates include forming the reference during the lift transient rather than
+requiring a later quiet window, admitting a direction-only reference when the
+magnitude is unstable, and exiting the manoeuvre early on the envelope-exceedance
+counter that already correlates with the outcome at \SI{4}{\meter\per\second}.
+
+\paragraph{Calibration robustness.} Because the mass channel consumes an absolute
+thrust, its accuracy is bounded by the accuracy of $k_f$. Two directions are
+open: propagating a calibration uncertainty into the estimator weights so that
+the interface degrades gracefully rather than at a threshold, and exploiting the
+\emph{calibration-invariant} structure already present in the centre-of-mass
+inversion, in which $k_f$ cancels, as an independent cross-check on the mass
+channel.
+
+\paragraph{Health-gated release.} The release command should not be issued while
+the estimator is unhealthy. This is a small change with a demonstrated failure
+behind it.
+
+\paragraph{Baselines and detection theory.} A matched-false-alarm comparison
+against CUSUM and related procedures on the same signals would establish whether
+the hand-built persistence rules are near the achievable operating curve or far
+from it. A comparison against a fixed-parameter and an $\mathcal{L}_1$-adaptive
+controller would separate the benefit of the payload model from the benefit of
+adaptation in general.
+
+\paragraph{Modelling extensions.} The yaw inertia increment and the second-order
+horizontal terms could be restored if a formulation is found that avoids the
+$1/\mP$ degeneracy --- for example by regularising the payload mass away from
+zero only inside those terms. A random-walk treatment of the payload states would
+remove the remaining one-window transient, provided the Hessian scaling problem
+it caused can be solved.
+
+\paragraph{Hardware transfer.} Transfer should proceed in stages: motor-stand
+calibration of $k_f$ and $k_m$ against measured thrust and reaction torque;
+tethered hover with the estimator running open-loop; centred payload pickup;
+eccentric pickup; and only then dynamic flight. Simulated rotor speeds must be
+replaced by electronic-speed-controller telemetry, and the noise, delay and
+quantisation of that telemetry re-measured rather than assumed. A supervisor
+monitoring solver status, estimator health and input margin should gate every
+stage.
+
+\section{Closing Remark}
+
+The lesson that generalises beyond this vehicle is about the relationship between
+an estimate and a decision. Online estimation is useful only when the estimated
+quantity enters the controller in a physically and numerically consistent way ---
+and a system that acts on events it has been \emph{told} about, rather than on
+what it can \emph{observe}, has no way to notice when the two disagree. Choosing
+a parameterisation that stays well posed through the transition, and refusing to
+let a command stand in for evidence, are the two decisions that made the rest of
+this architecture work.
+
+\end{spacing}
+\newpage
