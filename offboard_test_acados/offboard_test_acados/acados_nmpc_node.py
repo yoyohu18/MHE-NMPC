@@ -254,6 +254,34 @@ class AcadosNMPCNode(Node):
         self._payload_estimate_received = False
         self._payload_estimate_rx_sec = None
         self._payload_estimate_health_prev = None
+        # ===== 【2026-09-17】机动段冻结 NMPC 所用 c_xy(当日开→当晚翻回默认关)=====
+        # 当日白天曾默认开(只有单测、无 SITL 背书),pfovr_ab_20260917_193153 整批
+        # 64 轮是在"开"下跑的,复现该批须显式 =true。当晚用户拍板翻回关,理由:
+        #   ① 意外脱落/部分丢失时解冻条件可能全不满足(无释放指令 → 无 pending、
+        #     连续主线不订阅 payload_lost、不进 unresolved、仍在 figure-8),只剩
+        #     空载 latch 一条,而 09-15 非计划丢失 7/12 漏检 → 幽灵偏心留到落地;
+        #   ② 解冻那一帧 c_est 从锁存值直接跳到在线值,未经平滑;
+        #   ③ 收益尚无 SITL 数据。要重新打开须先跑冻结 on/off × 意外脱落配对 A/B。
+        # 箱子刚性吸附,机体系 c_xy 物理上是常数;而 figure-8 中 MHE 的 s 会被
+        # 机动撑漂(memory s-drift-maneuver-reversible)。开启后:进入 figure-8
+        # 的那一刻,取此前 cxy_freeze_window_sec 秒悬停段 c=s/m 的均值锁存,
+        # 机动期间模型只用锁存值。**只冻结 NMPC 消费的 c_est**,MHE 内部的 s 与
+        # 释放判据(moment 证据)照常运行,不受影响。
+        # 解冻(立刻回到在线值):发出释放指令 / drop 已确认 / unresolved /
+        # 空载置信度已 latch / payload_lost —— 防 08-24 的"幽灵偏心配平"坠机。
+        # 质量门控:锁存窗口内有效帧(估计新鲜且 MHE 质量未贴下界)占比不足
+        # cxy_freeze_min_valid_frac 时不冻结,沿用在线值(不锁定一个坏值)。
+        self.declare_parameter('cxy_freeze_in_maneuver', False)
+        self.declare_parameter('cxy_freeze_window_sec', 3.0)
+        self.declare_parameter('cxy_freeze_min_valid_frac', 0.8)
+        self.cxy_freeze_in_maneuver = bool(
+            self.get_parameter('cxy_freeze_in_maneuver').value)
+        self.cxy_freeze_window_n = max(1, round(float(
+            self.get_parameter('cxy_freeze_window_sec').value) / p.dt))
+        self.cxy_freeze_min_valid_frac = float(np.clip(float(
+            self.get_parameter('cxy_freeze_min_valid_frac').value), 0.0, 1.0))
+        self._cxy_hist = []          # [(c_live, valid)],每个 NMPC 周期一条
+        self._cxy_frozen = None      # 锁存值;None = 未冻结
         self._payload_target = PayloadEstimate(
             m_total=p.m, s_xy=np.zeros(2), c_xy=np.zeros(2),
             dJ_diag=np.zeros(3), J_diag=np.array([p.Jxx, p.Jyy, p.Jzz]),
@@ -720,6 +748,37 @@ class AcadosNMPCNode(Node):
         # 地板，m 与一阶质量矩 s_xy 仍完全来自 MHE。MHE 给出持续的带载证据后，
         # 地板权重再连续退到零，由估计 dJ 接管。
         self.declare_parameter('attach_j_bootstrap_enable', True)
+        # ===== 【2026-09-16】J bootstrap 改按"真离地"事件武装(默认关)=====
+        # 根因见 memory attach-prelift-hover-instability + 批次 liftdur_ab_20260916_184331:
+        #   现状在 attach 指令发出的瞬间就 arm,dJ 斜坡 ~1.4s 把 omega_scale 顶到
+        #   cap 5.0;而 box 要到 attach+4.6s 左右才真离地。这中间飞机是"被地面
+        #   按住"的约束系统(正常轮 |w|≈0.005rad/s,比自由悬停还安静),而模型里
+        #   根本没有这个约束。增益拉满 + 接触随时可能崩开 = 经典的
+        #   constrained->free 转换失稳(Automatica 1990 / Brogliato TAC 1997:
+        #   "高增益局部反馈 readily leads to bouncing and unstable contact")。
+        #   32 轮实测 7 轮在 attach+1.2~1.6s 炸、3 轮穿地;判别量是 attach 偏心
+        #   d_xy(Mann-Whitney p=0.0024),而 dJ 斜坡/增益 cap/conf 三者 32/32 全同
+        #   -> 它们是共同时钟,不是判别量。
+        # 改法:把 arm 推迟到 box 真的离开地面 —— 那时载荷惯量才真正出现,也正是
+        #   bootstrap 原本要保护的那一刻(08-25 既有结论就写在上面:"要给 MHE 的
+        #   时间应该加在离地之后,而不是 attach 之后")。
+        # ⚠️ bootstrap 是**安全兜底**,推迟不等于可以不给。所以留超时强制 arm:
+        #   离地判据万一失效,最晚也在 LIFT 开始后 timeout 秒 arm,那时仍然避开了
+        #   attach->LIFT 这段真正危险的窗口,不比现状差。
+        # ⚠️ 新引入的风险:离地瞬间惯量突然出现,而 omega_scale 受 tau=0.5s 低通 +
+        #   rise_rate 限制要 ~1s 才爬到位。这段"保护迟到"必须由 A/B 测出来,不能
+        #   假设无害。
+        self.declare_parameter('attach_j_bootstrap_on_liftoff', False)
+        # 离地判据:z 超过 attach 后基线多少米算离地。0.03 与离线分析同口径;
+        # 基线取 attach 后 liftoff_baseline_sec 的均值 —— attach 后飞机会下沉
+        # 5~10mm 把 box 压进地面,拿 attach 当帧的 z 当基线会系统性偏高。
+        self.declare_parameter('liftoff_detect_dz', 0.03)
+        self.declare_parameter('liftoff_baseline_sec', 0.8)
+        self.declare_parameter('liftoff_confirm_sec', 0.15)
+        # 超时兜底:LIFT 开始后这么久仍未检出离地就强制 arm。实测离地在 LIFT 后
+        # 1.9s(lift_dur=8.4)~3.3s(16.8),实际阈值取 max(本值, 0.5*lift_dur),
+        # 以免长 lift_dur 工况频繁误兜底。
+        self.declare_parameter('liftoff_arm_timeout_sec', 6.0)
         self.declare_parameter('attach_j_bootstrap_confirm_sec', 0.5)
         self.declare_parameter('attach_j_bootstrap_release_sec', 0.5)
         self.declare_parameter('attach_j_bootstrap_min_dj', 0.010)
@@ -885,6 +944,22 @@ class AcadosNMPCNode(Node):
             self._attach_j_bootstrap_weight = 0.0
             self._attach_j_bootstrap_dj = 0.0
             self._attach_j_bootstrap_confirm_frames = 0
+            self.attach_j_bootstrap_on_liftoff = bool(self.get_parameter(
+                'attach_j_bootstrap_on_liftoff').value)
+            self.liftoff_detect_dz = max(0.0, float(
+                self.get_parameter('liftoff_detect_dz').value))
+            self.liftoff_baseline_sec = max(0.0, float(
+                self.get_parameter('liftoff_baseline_sec').value))
+            self.liftoff_confirm_frames = max(1, round(float(
+                self.get_parameter('liftoff_confirm_sec').value) / p.dt))
+            self.liftoff_arm_timeout_sec = max(0.0, float(
+                self.get_parameter('liftoff_arm_timeout_sec').value))
+            # 待离地状态机(只在 attach_j_bootstrap_on_liftoff=True 时启用)
+            self._liftoff_pending = False
+            self._liftoff_z_samples = []
+            self._liftoff_z_ref = None
+            self._liftoff_confirm = 0
+            self._liftoff_detected = False
             self.grip_approach_z = float(
                 self.get_parameter('grip_approach_z').value)
             self.grip_settle_sec = float(
@@ -945,6 +1020,7 @@ class AcadosNMPCNode(Node):
             # 见 grip_settle_sec 参数声明处注释——给 MHE 窗口热身时间。
             self.z_hover = self.grip_approach_z
             self.grip_lift_started = False
+            self._lift_started_time = None
             self.grip_drop_done = False   # gripper drop 是否已触发(一次)
             self.grip_drop_pending = False  # 已发 release,等待 MHE 无载荷置信度确认
             self.grip_dropped = False     # box 已释放(online 几何归零标志)
@@ -1459,6 +1535,60 @@ class AcadosNMPCNode(Node):
                 f'Jyy={p.Jyy + self._attach_j_bootstrap_dj:.4f}; '
                 'm/s_xy remain MHE-only')
 
+    def _update_liftoff_arm(self, nmpc_time):
+        """attach_j_bootstrap_on_liftoff=True 时,等 box 真离地再武装 J bootstrap。
+
+        判据与离线分析同口径:z 超过"attach 后 liftoff_baseline_sec 均值"基线
+        liftoff_detect_dz 米,并持续 liftoff_confirm_frames 帧。基线不取 attach
+        当帧 —— attach 后飞机会下沉 5~10mm 把 box 压进地面(实测 −4~−15mm),
+        用当帧值会让阈值系统性偏高、迟迟测不到离地。
+
+        超时兜底:LIFT 开始后 max(liftoff_arm_timeout_sec, 0.5*grip_lift_dur)
+        仍没检出就强制 arm。bootstrap 是安全机制,判据失效时宁可迟到也不能不到;
+        即便走到兜底,也仍然避开了 attach->LIFT 那段真正危险的窗口。
+        """
+        # 这些状态只在 gripper_mode 分支里初始化,非 gripper 轮次要能安全跳过
+        if not getattr(self, '_liftoff_pending', False) or self.x_cur is None:
+            return
+        z = float(self.x_cur[2])
+        # 基线采样窗口
+        if self._liftoff_z_ref is None:
+            if (self.attach_time is not None
+                    and nmpc_time - self.attach_time <= self.liftoff_baseline_sec):
+                self._liftoff_z_samples.append(z)
+                return
+            if self._liftoff_z_samples:
+                self._liftoff_z_ref = float(np.median(self._liftoff_z_samples))
+            else:
+                self._liftoff_z_ref = z
+            self.get_logger().info(
+                f't={nmpc_time:.1f}s | [liftoff] baseline z={self._liftoff_z_ref:.3f}m '
+                f'(n={len(self._liftoff_z_samples)}), waiting for '
+                f'+{self.liftoff_detect_dz:.3f}m to arm J bootstrap')
+        # 主判据
+        if z > self._liftoff_z_ref + self.liftoff_detect_dz:
+            self._liftoff_confirm += 1
+            if self._liftoff_confirm >= self.liftoff_confirm_frames:
+                self._liftoff_detected = True
+                self._liftoff_pending = False
+                self.get_logger().info(
+                    f't={nmpc_time:.1f}s | [liftoff] DETECTED at z={z:.3f}m '
+                    f'(+{z - self._liftoff_z_ref:.3f}m over baseline, '
+                    f'attach+{nmpc_time - self.attach_time:.2f}s) -> arming J bootstrap')
+                self._start_attach_j_bootstrap()
+            return
+        self._liftoff_confirm = 0
+        # 超时兜底
+        if self.grip_lift_started and getattr(self, '_lift_started_time', None) is not None:
+            timeout = max(self.liftoff_arm_timeout_sec, 0.5 * self.grip_lift_dur)
+            if nmpc_time - self._lift_started_time >= timeout:
+                self._liftoff_pending = False
+                self.get_logger().warn(
+                    f't={nmpc_time:.1f}s | [liftoff] NOT detected within {timeout:.1f}s '
+                    f'of LIFT start (z={z:.3f}m, baseline={self._liftoff_z_ref:.3f}m) '
+                    '-> arming J bootstrap on timeout fallback')
+                self._start_attach_j_bootstrap()
+
     def _update_continuous_payload_model(self):
         """Smooth and slew-limit the MHE state before every NMPC solve."""
         bootstrap_active = getattr(self, '_attach_j_bootstrap_active', False)
@@ -1533,8 +1663,72 @@ class AcadosNMPCNode(Node):
             self.dJ_est, dj_lp, self.payload_dj_slew, dt))
         # First mass moment is authoritative for lateral CoM.  Never infer
         # payload presence from m_est alone.
-        self.c_est = (self.s_est / max(self.m_est, 1e-6)
-                      if self.control_mode != 'l1' else np.zeros(2))
+        c_live = (self.s_est / max(self.m_est, 1e-6)
+                  if self.control_mode != 'l1' else np.zeros(2))
+        self.c_est = self._apply_cxy_freeze(c_live, estimate_fresh)
+
+    def _cxy_freeze_release_reason(self):
+        """冻结期间出现任一"载荷可能已不在"的信号时返回原因,否则 None。"""
+        if getattr(self, 'grip_drop_pending', False):
+            return 'drop command issued'
+        if getattr(self, 'grip_dropped', False):
+            return 'payload dropped/lost'
+        if self.payload_unresolved:
+            return 'unresolved'
+        if self._no_payload_latched:
+            return 'no-payload confidence latched'
+        if not getattr(self, 'grip_dynamic_active', False):
+            return 'left figure-8'
+        return None
+
+    def _apply_cxy_freeze(self, c_live, estimate_fresh):
+        """记录悬停段 c 历史;冻结期间返回锁存值,见 cxy_freeze_in_maneuver 注释。"""
+        if not self.cxy_freeze_in_maneuver or self.control_mode == 'l1':
+            return c_live
+        if self._cxy_frozen is None:
+            valid = bool(estimate_fresh and float(self._payload_target.m_total)
+                         > mhe_p.m_min + 0.005)
+            self._cxy_hist.append((np.array(c_live, dtype=float), valid))
+            if len(self._cxy_hist) > self.cxy_freeze_window_n:
+                del self._cxy_hist[0]
+            return c_live
+        reason = self._cxy_freeze_release_reason()
+        if reason is not None:
+            self.get_logger().info(
+                f'[cxy-freeze] RELEASED ({reason}): '
+                f'frozen=[{self._cxy_frozen[0]*1e3:+.1f},{self._cxy_frozen[1]*1e3:+.1f}]mm '
+                f'-> live=[{c_live[0]*1e3:+.1f},{c_live[1]*1e3:+.1f}]mm')
+            self._cxy_frozen = None
+            self._cxy_hist = []
+            return c_live
+        return self._cxy_frozen.copy()
+
+    def _cxy_freeze_try_latch(self, nmpc_time):
+        """进入 figure-8 时调用:窗口质量合格则锁存悬停段 c 均值。"""
+        if (not self.cxy_freeze_in_maneuver or self.control_mode == 'l1'
+                or not self.continuous_payload_estimates):
+            return
+        n = len(self._cxy_hist)
+        n_valid = sum(1 for _, v in self._cxy_hist if v)
+        need = self.cxy_freeze_min_valid_frac * self.cxy_freeze_window_n
+        reason = None
+        if n_valid < max(1.0, need):
+            reason = (f'valid frames {n_valid}/{self.cxy_freeze_window_n} '
+                      f'< {self.cxy_freeze_min_valid_frac:.0%} '
+                      '(stale estimate or MHE mass at lower bound)')
+        elif self._no_payload_latched:
+            reason = 'no payload evidence (confidence latched)'
+        if reason is not None:
+            self.get_logger().warn(
+                f't={nmpc_time:.1f}s | [cxy-freeze] NOT latched: {reason}; '
+                'c_xy stays online during figure-8')
+            return
+        c = np.mean([c for c, v in self._cxy_hist if v], axis=0)
+        self._cxy_frozen = np.asarray(c, dtype=float)
+        self.get_logger().info(
+            f't={nmpc_time:.1f}s | [cxy-freeze] LATCHED c_xy='
+            f'[{c[0]*1e3:+.1f},{c[1]*1e3:+.1f}]mm from {n_valid}/{n} valid '
+            f'hover frames; held through figure-8 until release')
 
     def _check_drop_unresolved(self):
         """载荷卸载**未被证实**时进入 unresolved,而不是当作已卸载(2026-09-05)。
@@ -2480,6 +2674,7 @@ class AcadosNMPCNode(Node):
             f't={nmpc_time:.1f}s | DYNAMIC: switch to figure8 (r={self.grip_dyn_r} '
             f'w={self.grip_dyn_w}) centered at [{self.grip_dyn_cx:.2f},'
             f'{self.grip_dyn_cy:.2f}] z={self.grip_z_high}, tracking with payload')
+        self._cxy_freeze_try_latch(nmpc_time)
 
     def _grip_mass_step(self, nmpc_time):
         """诊断:吸附后(grip_mass_step_sec)把 m_est 从空机手动阶跃到带载真值,
@@ -2512,11 +2707,23 @@ class AcadosNMPCNode(Node):
             self.grip_mass_stepped = True
             self.attach_time = self.grip_descend_done_time
             self.geom_online_active = True
-            self._start_attach_j_bootstrap()
-            self.get_logger().info(
-                f't={nmpc_time:.1f}s | ATTACH command issued; m/s remain on '
-                'continuous MHE estimates, J safety bootstrap active '
-                '(no attach notification subscription)')
+            if getattr(self, 'attach_j_bootstrap_on_liftoff', False):
+                # 推迟到真离地再 arm(见参数声明处的根因注释)。这里只进入待离地
+                # 状态并开始采 z 基线,increase 由 _update_liftoff_arm 负责。
+                self._liftoff_pending = True
+                self._liftoff_z_samples = []
+                self._liftoff_z_ref = None
+                self._liftoff_confirm = 0
+                self._liftoff_detected = False
+                self.get_logger().info(
+                    f't={nmpc_time:.1f}s | ATTACH command issued; J bootstrap '
+                    'DEFERRED until box liftoff (attach_j_bootstrap_on_liftoff=True)')
+            else:
+                self._start_attach_j_bootstrap()
+                self.get_logger().info(
+                    f't={nmpc_time:.1f}s | ATTACH command issued; m/s remain on '
+                    'continuous MHE estimates, J safety bootstrap active '
+                    '(no attach notification subscription)')
             return
         if self.attach_offset is None:
             if nmpc_time < (self.grip_descend_done_time
@@ -2841,6 +3048,7 @@ class AcadosNMPCNode(Node):
             (self.grip_z_high - self.grip_z_low) * smooth
         if not self.grip_lift_started:
             self.grip_lift_started = True
+            self._lift_started_time = nmpc_time
             self.get_logger().info(
                 f't={nmpc_time:.1f}s | LIFT: raising hover '
                 f'{self.grip_z_low}->{self.grip_z_high}m to lift payload')
@@ -3102,6 +3310,7 @@ class AcadosNMPCNode(Node):
         self._descend_phase(nmpc_time)
         self._grip_mass_step(nmpc_time)
         self._lift_phase(nmpc_time)
+        self._update_liftoff_arm(nmpc_time)
         self._grip_dynamic_phase(nmpc_time)
         self._grip_drop_phase(nmpc_time)
         # 指令兑现交叉检查:只告警不动控制,放相位链末尾(这里才有真 nmpc_time;
