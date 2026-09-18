@@ -11,6 +11,7 @@
 # 是质量估计的次要误差来源,不是主要的。
 
 import math
+import os
 import time
 
 import numpy as np
@@ -66,7 +67,10 @@ MOTOR_CONSTANT = 8.54858e-06
 # 数据零自由参数互证:满载悬停原始反算 20.19N=2.064g✓、wrench drop 后 15.25N=
 # 2.064g-4.9✓、gripper 空机 20.22N✓、MHE 读数 2.50/1.89=真值×1.2134✓。
 # 真机标定时该增益由推力台 RPM→推力曲线直接给出。
-THRUST_CAL_GAIN = 1.0
+# 环境变量覆盖(2026-09-18 新增,默认 1.0 = 逐位不变):只缩放**估计器侧**的推力图,
+# 用于"推力系数标定误差"敏感性实验(真机迁移的头号风险)。仿真物理与 NMPC 的油门
+# 映射都不受影响 —— 缩放的是 MHE 对同一批转速的解读,等价于真机上 k 标定错了。
+THRUST_CAL_GAIN = float(os.environ.get('MHE_THRUST_CAL_GAIN', '1.0'))
 
 # 电机转速反算**体力矩**(B.3 Phase 0,2026-07-13):与 T_phys=k_f·Σω² 同源思路,
 # 但用各电机推力 F_i=k_f·ω_i² 乘力臂叉出 roll/pitch 力矩。这是强闭环 Δr 在线估计的
@@ -856,6 +860,28 @@ class MHENode(Node):
         self.declare_parameter('moment_ref_vel_max', 0.20)   # m/s
         self.declare_parameter('moment_ref_max_cv', 0.25)    # 窗口离散度上限
         self.declare_parameter('moment_ref_dir_min', 0.90)   # 方向一致度下限
+        # ---- 越界触发重锚(2026-09-17,默认关)----
+        # 原重锚只在"连续 5 次求解失败"时触发。E1 回放(20260916_053239)查到另一种
+        # 锁死:attach 撞击暂态 -> 连败/重锚 -> 落进**求解成功但物理不可能**的盆地
+        # (m 贴 m_min 且 |s|≈0.045 > moment_abs_max=0.039,平稳悬停中每帧越界),
+        # 此后 solve 不再失败,旧触发永远不响。|s| 超过平台包线是物理不可能值,
+        # 平稳飞行中持续出现 = 估计器在错误盆地,而不是机动造成的动态失真
+        # (figure-8 下越界是常态,所以必须有角速度门控)。动作与连败重锚完全相同:
+        # m 用推力平衡重种、s 归零。记忆 liftoff-lb-stuck-mechanisms。
+        self.declare_parameter('reanchor_on_moment_overrange', False)
+        self.declare_parameter('reanchor_ovr_frames', 10)          # 10Hz -> 1s
+        self.declare_parameter('reanchor_ovr_omega_max', 0.30)     # rad/s
+        self.declare_parameter('reanchor_ovr_cooldown_sec', 3.0)
+        self.reanchor_on_moment_overrange = bool(
+            self.get_parameter('reanchor_on_moment_overrange').value)
+        self.reanchor_ovr_frames = max(1, int(
+            self.get_parameter('reanchor_ovr_frames').value))
+        self.reanchor_ovr_omega_max = float(
+            self.get_parameter('reanchor_ovr_omega_max').value)
+        self.reanchor_ovr_cooldown_sec = float(
+            self.get_parameter('reanchor_ovr_cooldown_sec').value)
+        self._ovr_streak = 0
+        self._ovr_last_reanchor_sec = -1e18
         _m_env = float(self.get_parameter('payload_mass_envelope').value)
         _r_env = float(self.get_parameter('payload_rxy_envelope').value)
         _derived = max(_m_env * _r_env, 1e-6)
@@ -2749,6 +2775,77 @@ class MHENode(Node):
             f'(gated {self._mg_frames_gated}/{self._mg_frames_total} 帧, '
             f'{100.0 * self._mg_frames_gated / max(self._mg_frames_total, 1):.0f}%)')
 
+    def _check_moment_overrange_reanchor(self, y_win):
+        """见 reanchor_on_moment_overrange 注释。触发重锚时返回 True。"""
+        if not (self.reanchor_on_moment_overrange and mhe_p.ns
+                and self.x_meas is not None):
+            return False
+        s_norm = float(np.linalg.norm(self.s_est))
+        om = float(np.linalg.norm(self.x_meas[10:13]))
+        if s_norm > self.moment_abs_max and om <= self.reanchor_ovr_omega_max:
+            self._ovr_streak += 1
+        else:
+            self._ovr_streak = 0
+            return False
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if (self._ovr_streak < self.reanchor_ovr_frames
+                or now - self._ovr_last_reanchor_sec
+                < self.reanchor_ovr_cooldown_sec):
+            return False
+        self._ovr_streak = 0
+        self._ovr_last_reanchor_sec = now
+        self._reanchor_window(
+            y_win, f'{self.reanchor_ovr_frames} quiet frames with '
+            f'|s|={s_norm:.4f} > {self.moment_abs_max:.4f} (moment overrange, '
+            f'|w|={om:.2f})')
+        return True
+
+    def _reanchor_window(self, y_win, reason):
+        """重锚:先验/初值全部对齐到当前窗口,m 用推力重种、s 归零。"""
+        N = mhe_p.N
+        # 重锚:先验/初值全部对齐到当前窗口的量测。质量维种子曾经直接
+        # 重用 self.m_est——但 2026-07-07 坏几何复测发现这会把问题锁死:
+        # 暴烈暂态(LIFT/attach)期间,失败streak开始前的最后一次"成功"
+        # 解本身就可能已经错(status=0 不代表暂态下的解可信,实测冻结在
+        # 1.638kg,比空机 2.06kg 还轻),重锚把这个错值当种子喂回去,
+        # solver 在错误先验附近找到一个自洽但错误的局部解,此后 solve
+        # 不再失败(看起来"已恢复")但 m_est 再也不动——错误被永久锁定。
+        # 改用电机转速反算的 thrust_phys(独立于 MHE 自身状态,不会被
+        # 同一次错误污染)做悬停近似 m≈T/g 当种子,给 solver 一个物理
+        # 站得住脚的重新出发点,而不是延续可能已经错的旧估计。
+        m_seed, from_thrust = self._seed_mass_from_thrust('re-anchor')
+        if not from_thrust:
+            # 拿不到 thrust_phys 时,这里比初始化更保守:延续当前估计
+            # 而不是跳回 m_nominal —— 连败往往发生在飞行中段,那时
+            # m_est 即使可疑也比空机标称值离真值近。
+            m_seed = self.m_est
+        # 重锚时 s 也归零:连败往往伴随几何/姿态失配,把上一次可能已错的
+        # 质量矩一起带过去只会延续错误(与 m 用 thrust_phys 重种同理)。
+        self.x0_bar = self._aug(y_win[0], m_seed)
+        self.x_guess = [
+            self._aug(y_win[min(i, N)], m_seed)
+            for i in range(N + 1)]
+        self.s_est = np.zeros(mhe_p.ns)
+        # ★ 2026-09-05:这个 0 是**初始化值**,不是"一阶矩塌了"。
+        # 它曾经直接喂进释放判据的 moment 通道(ratio=0.000),再撞上
+        # m_p 探负 => slow 误释放。标记它,由 health 门控挡住,直到下一次
+        # 成功解产生真实的 s。
+        self._s_reanchored = True
+        # 2026-09-14:日志原先无条件写 "seeded from thrust_phys",
+        # 但 MHE_SEED_FROM_THRUST 默认关时走的是上面的 m_est 回退 ——
+        # 20260914_185509 就是被这行字误导,以为种子来自推力。
+        _src = (('thrust_phys window balance' if mhe_p.seed_window_balance
+                 else 'thrust_phys') if from_thrust
+                else 'previous m_est (seed_from_thrust off/unavailable)')
+        _T = self.thrust_phys
+        self.get_logger().warn(
+            f're-anchored arrival prior to current window after '
+            f'{reason} '
+            f'(m seeded from {_src}: {self.m_est:.3f} -> '
+            f'{m_seed:.3f} kg; T_phys/g='
+            f'{(_T / mhe_p.g) if _T else float("nan"):.3f})')
+        self.m_est = m_seed
+
     def _solve_window(self):
         N, nx, nw = mhe_p.N, mhe_p.nx, mhe_p.nw
         y_win = self.y_buf
@@ -2873,48 +2970,8 @@ class MHENode(Node):
                 f'MHE solve failed [status={status}], skipping this window '
                 f'(streak {self._fail_streak})')
             if self._fail_streak >= 5:
-                # 重锚:先验/初值全部对齐到当前窗口的量测。质量维种子曾经直接
-                # 重用 self.m_est——但 2026-07-07 坏几何复测发现这会把问题锁死:
-                # 暴烈暂态(LIFT/attach)期间,失败streak开始前的最后一次"成功"
-                # 解本身就可能已经错(status=0 不代表暂态下的解可信,实测冻结在
-                # 1.638kg,比空机 2.06kg 还轻),重锚把这个错值当种子喂回去,
-                # solver 在错误先验附近找到一个自洽但错误的局部解,此后 solve
-                # 不再失败(看起来"已恢复")但 m_est 再也不动——错误被永久锁定。
-                # 改用电机转速反算的 thrust_phys(独立于 MHE 自身状态,不会被
-                # 同一次错误污染)做悬停近似 m≈T/g 当种子,给 solver 一个物理
-                # 站得住脚的重新出发点,而不是延续可能已经错的旧估计。
-                m_seed, from_thrust = self._seed_mass_from_thrust('re-anchor')
-                if not from_thrust:
-                    # 拿不到 thrust_phys 时,这里比初始化更保守:延续当前估计
-                    # 而不是跳回 m_nominal —— 连败往往发生在飞行中段,那时
-                    # m_est 即使可疑也比空机标称值离真值近。
-                    m_seed = self.m_est
-                # 重锚时 s 也归零:连败往往伴随几何/姿态失配,把上一次可能已错的
-                # 质量矩一起带过去只会延续错误(与 m 用 thrust_phys 重种同理)。
-                self.x0_bar = self._aug(y_win[0], m_seed)
-                self.x_guess = [
-                    self._aug(y_win[min(i, N)], m_seed)
-                    for i in range(N + 1)]
-                self.s_est = np.zeros(mhe_p.ns)
-                # ★ 2026-09-05:这个 0 是**初始化值**,不是"一阶矩塌了"。
-                # 它曾经直接喂进释放判据的 moment 通道(ratio=0.000),再撞上
-                # m_p 探负 => slow 误释放。标记它,由 health 门控挡住,直到下一次
-                # 成功解产生真实的 s。
-                self._s_reanchored = True
-                # 2026-09-14:日志原先无条件写 "seeded from thrust_phys",
-                # 但 MHE_SEED_FROM_THRUST 默认关时走的是上面的 m_est 回退 ——
-                # 20260914_185509 就是被这行字误导,以为种子来自推力。
-                _src = (('thrust_phys window balance' if mhe_p.seed_window_balance
-                         else 'thrust_phys') if from_thrust
-                        else 'previous m_est (seed_from_thrust off/unavailable)')
-                _T = self.thrust_phys
-                self.get_logger().warn(
-                    f're-anchored arrival prior to current window after '
-                    f'{self._fail_streak} consecutive failures '
-                    f'(m seeded from {_src}: {self.m_est:.3f} -> '
-                    f'{m_seed:.3f} kg; T_phys/g='
-                    f'{(_T / mhe_p.g) if _T else float("nan"):.3f})')
-                self.m_est = m_seed
+                self._reanchor_window(
+                    y_win, f'{self._fail_streak} consecutive failures')
                 self._fail_streak = 0
             return
         x_sol = [self.solver.get(i, 'x') for i in range(N + 1)]
@@ -2934,6 +2991,8 @@ class MHENode(Node):
             self.get_clock().now().nanoseconds * 1e-9)
         self._fail_streak = 0
         self._s_reanchored = False      # 拿到真实 s 了,释放判决可以恢复
+        if self._check_moment_overrange_reanchor(y_win):
+            return
 
         # 事件后逐帧打日志(平时 2s 一条太粗,量不出亚秒级收敛)。窗口由
         # _on_mass_event 设定、与调度开关解耦——对照组(触发关)也照打,
