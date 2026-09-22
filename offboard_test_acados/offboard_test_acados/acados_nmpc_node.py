@@ -322,10 +322,14 @@ class AcadosNMPCNode(Node):
 
         # ---- 强闭环几何来源 A/B 开关(B.3 Phase2,2026-07-14)----
         # geom_source='truth'(默认,现有行为):dJ/c_est 从 attach_offset 真值算;
-        # 'online':c_est 吃 mhe_node 发的 /acados_nmpc/c_xy_est(电机力矩反算,
-        # 与真值无关),dJ 由 m_est+rz 几何先验(grip_arm_d)在线推——消掉对 attach
-        # 真值的依赖。attach_offset 仍收(用于 [attach-window] 评估对表),但 online
-        # 模式下不喂几何。Phase1 已验证 c_xy_est 追真值<5%。⚠️前提:m_est 须健康
+        # 'online':c_est 吃 mhe_node 发的 /acados_nmpc/c_xy_est(与真值无关),
+        # dJ 由 m_est+rz 几何先验(grip_arm_d)在线推——消掉对 attach 真值的依赖。
+        # ⚠️ 话题名是历史包袱:2026-08-26 起(c_xy_from_moment,16 态默认开)它发的
+        # 是 MHE **窗口内**估的一阶矩归一 s/m_T,不再是 τ_phys/T 反算——后者只在
+        # c_xy_from_moment=false 的 legacy 档才跑。差别不是口味:τ/T 那条有稳态
+        # 门控(|ω|、|v_xy|),figure-8 中一次都不更新,drop 后冻结在带载偏心上。
+        # attach_offset 仍收(用于 [attach-window] 评估对表),但 online 模式下不喂
+        # 几何。⚠️前提:m_est 须健康
         # (信号质量依赖健康飞行,见 memory b3-strong-closed-loop-dr Phase1 教训),
         # gripper 场景配 GRIP_GEOM_MP_FLOOR。
         # 几何释放方式(2026-08-24,与 mhe_node 的同名参数同一语义):
@@ -1940,8 +1944,8 @@ class AcadosNMPCNode(Node):
                 f'{self.no_payload_confidence:.3f} persisted; adaptive states reset')
 
     def _update_online_geometry(self):
-        """B.3 Phase2:online 模式下 c_est 吃 mhe_node 发的在线 c_xy(τ_phys 反算,
-        与 m_est 无关);**dJ 不在这里更新**——它在 attach 瞬间由操作先验
+        """B.3 Phase2:online 模式下 c_est 吃 mhe_node 发的在线 c_xy;
+        **dJ 不在这里更新**——它在 attach 瞬间由操作先验
         (grip_payload_envelope + grip_arm_d)一次算定,之后保持不变。每次 solve 前调。
 
         2026-07-28 改:原实现每帧用 m_p=m_est-p.m 重推 dJ,等于把 07-19 在 MHE 侧
@@ -1950,8 +1954,10 @@ class AcadosNMPCNode(Node):
         没有 MHE 的棘轮/地板/m_min 保护;m_est 低于空机时旧的 `m_p<=1e-3` 门又把
         几何整个冻住(LIFT 段常态)。代价只有 dJ 的水平项 ½(rx²+ry²)——占 dJ 2.2%
         (rz² 主导 97.8%),而 dJ 只需量级对(几何解耦实验:先验错 33% 时 m_est 仍准
-        0.3%)。按可辨识性分配:c_xy 有独立观测(τ_phys)→在线估;rz 在力矩通道上
-        不可辨识(叉乘消掉)→弱先验;两者都不吃 m_est。
+        0.3%)。按可辨识性分配:c_xy 在线估(现走 s/m_T,分子 s 是窗口内独立估出的
+        状态;2026-09-22 订正:分母是 m_est,所以它并非"不吃 m_est",只是不像 dJ
+        那样把 m_est 当几何放大器);rz 在力矩通道上不可辨识(叉乘消掉)→弱先验;
+        dJ 不吃 m_est。
 
         rate 增益已在 attach 瞬间用先验缩放过(见 _grip_mass_step online 分支),
         这里只精修 model.p 的 c_est,不再动内环增益(避免随估计抖动反复改)。"""

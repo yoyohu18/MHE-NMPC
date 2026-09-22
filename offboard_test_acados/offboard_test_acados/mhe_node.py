@@ -611,14 +611,17 @@ class MHENode(Node):
         self._resid_settled = False   # 基线是否已预热到"可信静基线"(开放检测)
         self._resid_stable = 0        # 连续贴基线的帧数(预热计数)
 
-        # ---- 强闭环 c_xy 在线估计(B.3 Phase1,2026-07-14)----
+        # ---- c_xy 的 legacy 来源:τ/T 窗外反解(B.3 Phase1,2026-07-14)----
         # 从 tau_phys/thrust_phys 直接反解复合质心水平偏移 c_xy=[cx,cy]:
         # τ_roll=cy·T → cy=τ_roll/T,τ_pitch=-cx·T → cx=-τ_pitch/T(Phase0 已实测
         # 验证 <2%,且这两个量都来自电机转速反算,与 MHE 的 m_est 完全解耦——从根
-        # 上避开 c_xy↔model 自举耦合)。**Phase1 只记录不闭环**:估计值发话题+对真值
-        # 打日志,不喂任何模型。稳态门控:只在悬停稳(|ω|/|v_xy| 小)时更新 EMA,
-        # 避开 descend/LIFT/drop 暂态的力矩污染(思路同无信号消融的预热门控)。
+        # 上避开 c_xy↔model 自举耦合)。稳态门控:只在悬停稳(|ω|/|v_xy| 小)时更新
+        # EMA,避开 descend/LIFT/drop 暂态的力矩污染(思路同无信号消融的预热门控)。
         # 不进 MHE 状态(窗外慢滤波),符合长期计划"两个新变量不同时上线"。
+        # ⚠️ 2026-08-26 起这条路默认**不执行**:16 态档 c_xy_from_moment=True,
+        # c_xy 改由窗口内的 s 给出(s/m_T),见下面 c_xy_from_moment 的声明处。
+        # 下面这些 c_xy_est_* 参数只在 legacy 15 态档还起作用;稳态门控在 figure-8
+        # 中一次都不满足,正是它挡不住 drop 后冻结偏心的原因。
         # IMPORTANT: despite its historical name, this is currently also the
         # master gate for all online release decisions because _update_c_xy_est()
         # contains the mass-domain path and the sole release_decision() call.
@@ -1196,8 +1199,10 @@ class MHENode(Node):
         # 体力矩反算发布(B.3 Phase0):[roll,pitch,yaw] Nm,供强闭环 Δr 估计器订阅
         self.tau_phys_pub = self.create_publisher(
             Float64MultiArray, '/acados_nmpc/tau_phys', 10)
-        # 在线 c_xy 估计发布(B.3 Phase1):[cx,cy] m,Phase2 合闸时 NMPC 订阅它替代
-        # attach 真值反推的几何(Phase1 只发+记录,NMPC 暂不吃)
+        # 在线 c_xy 估计发布:[cx,cy] m,NMPC 的 geom_source='online' 订阅它替代
+        # attach 真值反推的几何(Phase2 起已合闸,不再是"只发+记录")。
+        # ⚠️ 话题名留着 B.3 Phase1 的历史:内容自 2026-08-26 起默认是 s/m_T,
+        # 只有 c_xy_from_moment=false 时才是 τ_phys/T 反算。
         self.c_xy_est_pub = self.create_publisher(
             Float64MultiArray, '/acados_nmpc/c_xy_est', 10)
         # 原子化连续估计帧。字段顺序由 payload_estimate.FIELDS 唯一定义;
@@ -2016,7 +2021,8 @@ class MHENode(Node):
         """estimate vs ground truth 的一行(纯评估,见 eval_true_payload_mass 注释)。
         m_true(t) 是分段常数:载荷在机上 = m_B+m_P_true,否则 = m_B。c_true/J_true
         用**同一个** attach 几何 r_p 和真值质量算,所以 c/J 的差异纯粹来自质量估计
-        误差,不掺几何误差——要单独看几何误差就对比 c_xy_est(τ_phys 反算)那一路。"""
+        误差,不掺几何误差——要单独看几何误差就对比 /acados_nmpc/c_xy_est 那一路
+        (默认 s/m_T;c_xy_from_moment=false 时才是 τ_phys/T 反算)。"""
         mp_true = self.eval_true_payload_mass
         if mp_true <= 0.0:
             return None
@@ -2503,9 +2509,15 @@ class MHENode(Node):
             self._publish_payload_estimate()
 
     def _update_c_xy_est(self):
-        """强闭环 c_xy 在线估计(B.3 Phase1,只记录不闭环)。稳态悬停时从电机
-        转速反算的体力矩直接反解复合质心水平偏移,慢 EMA 滤噪。见 __init__ 里
-        c_xy_est 的注释。c_xy=[cx,cy]=[-τ_pitch/T, τ_roll/T]。"""
+        """发布给 NMPC 的复合质心水平偏移 c_xy=[cx,cy],外加两条不依赖稳态的
+        释放判据(质量域、一阶矩塌缩)。函数名是 B.3 Phase1 的历史遗留。
+
+        两条互斥的 c_xy 来源,按 c_xy_from_moment 二选一:
+          * True(16 态默认):c_xy = s/m_T,s 是窗口内估出的状态 —— **无稳态门控**,
+            机动中照常更新,drop 后随 s 连续衰减。越界帧保持上一拍(见 c_xy_clamp)。
+          * False(legacy 15 态):c_xy = [-τ_pitch/T, τ_roll/T],窗外 EMA + 稳态门控。
+            figure-8 中门控一次都不满足 => 整段不更新,drop 后冻结在带载偏心上。
+        论文报告的批次全在前者。"""
         # 质量域卸载判据(见 __init__ 里 c_xy_mass_release_mp)。**必须放在最前**:
         # 下面的稳态门控在机动中直接 return,放它后面就永远轮不到 —— 而"机动中
         # 也要能熄灭"正是它存在的理由。
