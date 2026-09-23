@@ -100,6 +100,18 @@ angle between the body $z$ axis and the vertical,
 \end{equation}
 which is the fraction of the collective thrust that acts vertically.
 
+Here $\theta$ is the \emph{total tilt} angle, not the pitch angle. Writing
+$R(\bm{q})$ in the ZYX Euler convention $R = R_z(\psi)R_y(\theta_p)R_x(\phi)$ and
+reading off its $(3,3)$ entry gives
+\[
+\ev^{\!\top} R\, \ev \;=\; \cos\phi\,\cos\theta_p ,
+\]
+so the single cosine of \eqref{eq:costheta} already \emph{is} the product of the
+two cosines of the familiar Euler-angle vertical balance, and
+$1-2(q_x^2+q_y^2)$ is their quaternion equivalent. The one-symbol form is used
+throughout because it is what the implementation evaluates: directly from the
+quaternion, with no Euler intermediate and no gimbal singularity.
+
 \section{Rigid-Body Kinematics}\label{sec:model:kin}
 
 Translational kinematics is the definition of velocity,
@@ -200,7 +212,9 @@ vertical force balance
 \mT\bigl(g + a_z\bigr) \;=\; T\cos\theta ,
 \label{eq:vbal}
 \end{equation}
-with $\cos\theta$ from \eqref{eq:costheta} and $a_z=\dot v_z$.
+with $\cos\theta$ from \eqref{eq:costheta} --- equivalently
+$\cos\phi\,\cos\theta_p$, the two-cosine Euler form of
+Section~\ref{sec:model:quat} --- and $a_z=\dot v_z$.
 
 \subsection{Rotational dynamics}\label{sec:model:rot}
 
@@ -283,7 +297,8 @@ This separation is what makes the parameters individually attributable to
 distinct physical channels --- the mass to the thrust--acceleration relation, the
 inertia to angular acceleration, the offset to the steady-state torque balance.
 It is exploited directly in Sections~\ref{sec:model:mhe}
-and~\ref{sec:model:whynot}.
+and~\ref{sec:model:whynot}, and Figure~\ref{fig:paramflow} traces every entry
+point end to end.
 
 \section{Payload-Induced Parameters}\label{sec:model:payload}
 
@@ -507,6 +522,17 @@ J_{xz} \;=\; -\mu\, r_x r_z
 \end{equation}
 and identically $J_{yz} = -(\mB/\mT)\, s_y\, r_z$. The payload mass has cancelled
 exactly: these terms need only $\svec$ and the vertical arm $r_z$.
+
+\paragraph{The division of labour this produces.} Equations \eqref{eq:tcom_s} and
+\eqref{eq:Jxz} together say that the \emph{entire} rotational signature of the
+payload is carried by \emph{two} estimated scalars, $s_x$ and $s_y$: the
+eccentricity moment and the off-diagonal inertia are both linear in them, and no
+third rotational unknown is introduced. The composite mass, by contrast, enters
+the translational equation \eqref{eq:trans} only as the gain $1/\mT$, and is
+therefore read off the \emph{velocity} channel. Two parameters on the torque
+residual and one on the velocity residual is the whole online parameterisation
+--- the split made precise in Section~\ref{sec:model:observability}, and the
+reason the two extra decision variables cost no additional sensing.
 
 \subsection{Re-expressing the inertia increment}\label{sec:model:Jofs}
 
@@ -802,6 +828,31 @@ to lock onto self-consistent wrong solutions on light payloads.
 
 \subsection{Which residual identifies what}\label{sec:model:observability}
 
+The estimator's stage cost is built on a single residual, and the rest of this
+section refers to its blocks by name. Writing $\bm y_i$ for the odometry
+measurement at stage $i$ of the window and $x_i$ for the physical part of the
+estimator's own trajectory at that stage, the measurement residual is
+\begin{equation}
+\bm e_i \;=\; \bm y_i - x_i
+\;=\; \bigl[\,\bm e^p_i;\ \bm e^v_i;\ \bm e^q_i;\ \bm e^{\omega}_i\,\bigr]
+\in \mathbb{R}^{13},
+\label{eq:mheresid}
+\end{equation}
+weighted by $R=\mathrm{diag}(\sigma^{-2})$ in Bryson's rule, with
+$\sigma_v=\SI{0.05}{\meter\per\second}$ and
+$\sigma_{\omega}=\SI{0.02}{\radian\per\second}$. The \emph{velocity residual} and
+the \emph{angular-rate residual} named throughout are the blocks $\bm e^v$ and
+$\bm e^{\omega}$ of this one vector, not separate quantities.
+
+Note what \eqref{eq:mheresid} does \emph{not} contain: an acceleration. The
+trajectory $x_i$ is produced by integrating the dynamics forward from the start
+of the window under the known input $u^{\mathrm{phys}}$, so the comparison is
+between velocities, never between a measured acceleration and a modelled one.
+Differentiating the odometry velocity would amplify its noise by
+$1/\Delta t = 10$, turning $\sigma_v$ into \SI{0.5}{\meter\per\second\squared}
+--- the size of the very effect being estimated. The telescoping identity
+\eqref{eq:telescope} achieves the same avoidance for the seed.
+
 The two payload states enter through disjoint channels, which is what makes
 augmenting the second one nearly free in terms of sensing.
 
@@ -914,13 +965,11 @@ possibly corrupted previous estimate.
 The nonlinear model predictive controller carries the parameters as runtime
 values,
 \begin{equation}
-p_{\mathrm{NMPC}} = \bigl[\, x_{\mathrm{ref}}(13);\; \mT;\; \dJ;\; \cvec(2);\; \bm{d}(3);\; \bm{\xi}(3) \,\bigr] \in \mathbb{R}^{23},
+p_{\mathrm{NMPC}} = \bigl[\, x_{\mathrm{ref}}(13);\; \mT;\; \dJ;\; \cvec(2) \,\bigr] \in \mathbb{R}^{17},
 \label{eq:pnmpc}
 \end{equation}
-where $\bm{d}$ and $\bm{\xi}$ are lumped translational and rotational
-disturbances used only by the $\mathcal{L}_1$ comparison baseline
-\cite{hanover2021} and identically zero under the proposed method. Over a
-prediction horizon of $N$ stages it solves
+three payload quantities and the reference the stage costs are measured against.
+Over a prediction horizon of $N$ stages it solves
 \begin{align}
 \min_{u_{0:N-1}} \quad
 & \sum_{k=0}^{N-1} \Bigl( \bigl\| e_{\mathrm{track}}(x_k, x_{\mathrm{ref},k}) \bigr\|^2_{Q}
@@ -935,25 +984,134 @@ prediction horizon of $N$ stages it solves
 applying only $u_0$ and re-solving at the next step, with the thrust box taken
 from the actuator envelope \eqref{eq:envelope}.
 
+\subsection{The prediction model the solver integrates}\label{sec:model:predmodel}
+
+The map $F$ in \eqref{eq:nmpc} is the explicit Runge--Kutta discretisation
+(fourth order, one step per stage) of the continuous model assembled in this
+chapter, with the estimated parameters substituted for the symbols. Written out,
+the right-hand side the solver differentiates is
+\begin{align}
+\dot{\bm p} &= \bm v, \nonumber\\[2pt]
+\dot{\bm v} &= \frac{1}{\mT}\Bigl(R(\bm q)\,\ev\,T - k_d\,\bm v\Bigr) - g\,\ev,
+\nonumber\\[2pt]
+\dot{\bm q} &= \tfrac{1}{2}\,\Xi(\bm q)\,\bm\omega, \nonumber\\[2pt]
+\dot{\bm\omega} &= \Jt^{-1}\Bigl(
+  \bm\tau
+  + \underbrace{\begin{bmatrix} -c_y T \\ +c_x T \\ 0\end{bmatrix}}_{\tcom(\cvec)}
+  - \bm\omega \times \Jt\,\bm\omega \Bigr),
+\quad
+\Jt = \mathrm{diag}\bigl(J_{xx}+\dJ,\, J_{yy}+\dJ,\, J_{zz}\bigr),
+\label{eq:predmodel}
+\end{align}
+integrated over $N=20$ stages at $\Delta t = \SI{50}{\milli\second}$, a
+\SI{1}{\second} look-ahead, and re-solved at \SI{10}{\hertz}. Nothing in
+\eqref{eq:predmodel} is new to this section --- it is \eqref{eq:kin},
+\eqref{eq:quat}, \eqref{eq:trans} and \eqref{eq:rot} with $\cvec = \svec/\mT$
+from \eqref{eq:c_from_s} and $\dJ$ from \eqref{eq:Jdeployed} --- and that is the
+point: the three parameters $(\mT, \dJ, \cvec)$ are the only quantities that
+change from one solve to the next, and each enters at exactly one place;
+Figure~\ref{fig:paramflow} traces where each of them comes from and where it
+goes.
+
+One asymmetry between the controller's model and the estimator's should be stated
+plainly, because it is invisible in the notation. The estimator integrates the
+full inertia of \eqref{eq:Jdeployed}, off-diagonal $B_x$ and $B_y$ included. The
+controller receives $\dJ$ as the single scalar $A$ of \eqref{eq:Jdeployed} ---
+that is all \eqref{eq:pnmpc} carries --- and predicts with the diagonal $\Jt$
+above. The omission is deliberate on both sides. For the controller,
+$B_{x,y}/A = r_{x,y}/r_z$ is $0.23$ at the geometry of \eqref{eq:numbers}, and the
+terms it drops couple the roll and pitch axes to the yaw axis, where both the
+available moment and the commanded rate are an order of magnitude smaller than in
+roll and pitch; a dense $\Jt$ would in exchange put a $3\times 3$ inverse inside
+every stage of every SQP iteration. The estimator cannot make the same
+simplification, because $B_{x,y}$ is one of only two terms through which $\svec$
+is observable at all \eqref{eq:Jxz}.
+
+\paragraph{How the moment becomes forces.} The input $u = [T;\,\bm\tau]$ of
+\eqref{eq:predmodel} is a wrench, not a set of motor commands. How it maps to
+forces has a closed-form answer, because \eqref{eq:phys} is already a
+\emph{linear} map from the four rotor thrusts to the wrench: the allocation is
+its inverse. With the rotor geometry of Section~\ref{sec:model:phys} --- an X
+configuration with $|x_i| = |y_i| = l = \SI{0.174}{\meter}$ and spin directions
+$d_i \in \{\pm 1\}$ --- that map is
+\begin{equation}
+\begin{bmatrix} T \\ \tau_x \\ \tau_y \\ \tau_z \end{bmatrix}
+=
+\underbrace{
+\begin{bmatrix}
+1 & 1 & 1 & 1 \\
+-l & \phantom{-}l & \phantom{-}l & -l \\
+-l & \phantom{-}l & -l & \phantom{-}l \\
+-k_m & -k_m & \phantom{-}k_m & \phantom{-}k_m
+\end{bmatrix}}_{M}
+\begin{bmatrix} F_1 \\ F_2 \\ F_3 \\ F_4 \end{bmatrix},
+\qquad F_i = k_f \omega_i^2 .
+\label{eq:mixer}
+\end{equation}
+The rows of $M$ are mutually orthogonal, so
+$M^{-1} = M^{\!\top}\mathrm{diag}\bigl(\tfrac{1}{4}, \tfrac{1}{4l^2},
+\tfrac{1}{4l^2}, \tfrac{1}{4k_m^2}\bigr)$ and the allocation is a sum of four
+decoupled terms,
+\begin{equation}
+F_i \;=\; \frac{T}{4}
+ \;+\; \frac{y_i}{4l^2}\,\tau_x
+ \;-\; \frac{x_i}{4l^2}\,\tau_y
+ \;-\; \frac{d_i}{4k_m}\,\tau_z .
+\label{eq:mixerinv}
+\end{equation}
+
+The coefficients of \eqref{eq:mixerinv} are what single out the yaw channel.
+Since $|x_i| = |y_i| = l$, a unit roll or pitch moment costs
+$1/(4l) = \SI{1.44}{\per\meter}$ of differential rotor thrust, whereas a unit yaw
+moment costs $1/(4k_m) = \SI{15.6}{\per\meter}$ --- a factor of $10.9$. At a
+hover thrust of \SI{20}{\newton} each rotor carries \SI{5}{\newton} and has
+\SI{2.84}{\newton} of headroom to the \SI{7.84}{\newton} per-rotor ceiling
+implied by \eqref{eq:envelope}; that headroom buys \SI{1.98}{\newton\meter} of
+roll authority but only \SI{0.18}{\newton\meter} of yaw. Against the box
+constraints of \eqref{eq:nmpc}, $\overline\tau_{x,y} = \SI{0.5}{\newton\meter}$
+and $\overline\tau_z = \SI{0.2}{\newton\meter}$, the roll and pitch bounds are
+conservative by a factor of four while the yaw bound is marginally
+\emph{optimistic}. The same ratio explains the measured yaw slope of $0.32$ in
+Section~\ref{sec:model:phys}: the controller routinely commands yaw moments the
+allocation cannot pay for.
+
+\paragraph{Where the allocation actually runs.} In the deployed cascade the ROS
+node does not evaluate \eqref{eq:mixerinv}. Only the collective thrust leaves the
+optimal control problem as a force --- converted to a normalised throttle by
+\eqref{eq:throttleinv} --- and it is accompanied not by $\bm\tau$ but by the
+body-rate setpoint $\bm\omega_1$ read from the second stage of the predicted
+state trajectory. The moment $\bm\tau$ stays inside the OCP, where its role is to
+shape that predicted trajectory; the flight controller's rate loop and its own
+mixer are what realise it. The division is deliberate: the rate loop runs at a
+bandwidth the \SI{10}{\hertz} solver cannot match, and leaving the allocation on
+the flight controller keeps the saturation logic next to the hardware. It is also
+precisely why the estimator evaluates \eqref{eq:mixer} in the \emph{forward}
+direction from measured rotor speeds instead of reading $\bm\tau$ off the solver:
+$M$ applied to what the motors actually did is a measurement, whereas $\bm\tau$
+from the OCP is an intention, and Section~\ref{sec:model:phys} shows the two
+differ by a factor of three in yaw. Section~\ref{sec:frame:omegascale} derives
+the body-rate scaling that adapts the remaining inner-loop gap.
+
 \subsection{Why the input baseline must track the parameters}\label{sec:model:hover}
 
 The second term of \eqref{eq:nmpc} penalises the deviation of the input from a
 \emph{baseline} $u_{\mathrm{hover}}$, and that baseline is recomputed from the
 live parameters at every solve rather than fixed when the solver is generated:
 \begin{equation}
-T_h = \mT\bigl(g - d_z\bigr),
+T_h = \mT\, g,
 \qquad
 u_{\mathrm{hover}} = \bigl[\, T_h,\; c_y T_h,\; -c_x T_h,\; 0 \,\bigr]^{\!\top}.
 \label{eq:hover}
 \end{equation}
 
-Consider first why a baseline is needed at all. Penalising $\|u\|^2_R$ outright
-would treat the thrust required merely to remain airborne as an expense to be
-minimised, biasing the solution toward insufficient thrust. The baseline
-recentres the penalty on the input that sustains equilibrium, so that $R$
-penalises only genuine control effort.
+Penalising $\|u\|^2_R$ outright would treat the thrust that merely keeps the
+vehicle airborne as an expense to be minimised; the baseline recentres the
+penalty on the equilibrium input, so that $R$ charges only genuine control
+effort. That much is standard \cite{rawlings2017mpc}. What is not standard is
+that the baseline here is a function of the \emph{estimated} parameters, and the
+consequences of getting it wrong are quantified below.
 
-Consider next what happens when the baseline is \emph{stale}. Suppose
+Consider what happens when the baseline is \emph{stale}. Suppose
 $u_{\mathrm{hover}}$ is computed from the unloaded mass while the vehicle carries
 a parcel. The cost then pulls the thrust persistently toward a value below what
 equilibrium requires, and the optimum settles where the marginal tracking cost
@@ -971,11 +1129,7 @@ constant trim torque (Section~\ref{sec:model:tcom}); a cost that does not admit
 this pulls the torque toward zero and produces the same class of steady-state
 bias in the attitude channel. The two equations are complementary and neither
 suffices alone: \eqref{eq:tcom} teaches the \emph{model} that the moment exists,
-while \eqref{eq:hover} teaches the \emph{objective} that it is necessary. The
-$d_z$ term in $T_h$ plays the identical role for the lumped-disturbance baseline:
-with $\bm d$ in the model, vertical equilibrium is $T/\mT-g+d_z=0$, so omitting
-$d_z$ from the penalty centre would reintroduce the very bias the baseline exists
-to remove.
+while \eqref{eq:hover} teaches the \emph{objective} that it is necessary.
 
 \subsection{Inner-loop bandwidth}\label{sec:model:gain}
 
@@ -1006,6 +1160,138 @@ Table~\ref{tab:params} records the identity of every parameter in the model. Two
 scalars are online degrees of freedom; everything else is either derived from
 them by the algebra of this chapter, calibrated once for the airframe, or
 retained as a weak prior whose error has been shown not to matter.
+
+\begin{figure}[tbp]
+\centering
+\begin{tikzpicture}[
+  x=1cm,y=1cm,font=\scriptsize,
+  nd/.style={draw=gray!70,rounded corners=1.5pt,align=center,inner sep=3pt,
+             font=\scriptsize},
+  key/.style={nd,draw=black,line width=0.7pt,fill=gray!15},
+  der/.style={nd,fill=gray!4},
+  gh/.style={nd,draw=gray!50,text=gray!40!black},
+  ar/.style={-{Latex[length=1.5mm]},semithick,gray!25!black},
+  ln/.style={semithick,gray!25!black},
+  bus/.style={-{Latex[length=2mm]},line width=0.9pt,gray!15!black},
+  dar/.style={-{Latex[length=1.4mm]},dashed,thin,gray!55!black},
+  lb/.style={font=\tiny,align=center,inner sep=1.2pt},
+  lane/.style={draw=gray!45,dashed,rounded corners=2.5pt,inner sep=3mm},
+  hd/.style={font=\tiny\bfseries,text=gray!50!black,inner sep=1.2pt},
+]
+
+%========================= band 1: measured =========================
+\node[nd]  (rot) at (2.0,0)   {rotor speeds $\omega_i$\\ \SI{250}{\hertz}};
+\node[der] (wr)  at (5.8,0)   {$\Tphys,\ \tauphys$\\ \eqref{eq:phys}};
+\node[nd]  (odo) at (10.6,0)  {odometry\\ $\bm p,\bm v,\bm q,\bm\omega$};
+\draw[ar] (rot) -- node[lb,above]{$M$ forward} (wr);
+\begin{scope}[on background layer]
+  \node[lane,fit=(rot)(wr)(odo)] (L1) {};
+\end{scope}
+\node[hd,anchor=south west] at ([xshift=1mm]L1.north west) {MEASURED --- downstream of allocation, independent of every model state};
+
+%========================= band 2: estimated ========================
+\node[nd,text width=47mm] (res) at (6.6,-2.1)
+  {measurement residual \eqref{eq:mheresid}\\ $\bm e_i=\bm y_i-x_i\in\mathbb{R}^{13}$};
+\node[nd]  (vres) at (4.8,-3.35) {velocity residual\\ $\bm e^v_i$};
+\node[nd]  (wres) at (8.4,-3.35) {angular-rate residual\\ $\bm e^{\omega}_i$};
+\node[key] (mT)   at (4.8,-4.5)  {$\mT$};
+\node[key] (sv)   at (8.4,-4.5)  {$\svec=(s_x,s_y)$};
+\node[gh]  (seed) at (1.5,-4.5)  {seed\\ \eqref{eq:winbal}};
+\node[gh,text width=26mm]  (prior)at (12.7,-3.9) {fixed inputs\\ $r_z$ weak prior\\ $\mB,\Jb$ calibrated};
+\draw[ar] (wr.south) -- (res.north -| wr.south);
+\node[lb,anchor=east] at (5.65,-0.95) {$u^{\mathrm{phys}}$ (input)};
+\draw[ar] (odo.south) -- ++(0,-1.05) -| (res.north -| 8.6,0);
+\node[lb,anchor=west] at (10.75,-0.95) {$\bm y_i$ (measured)};
+\draw[ar] (res.south -| vres.north) -- (vres.north);
+\draw[ar] (res.south -| wres.north) -- (wres.north);
+\draw[ar] (vres) -- (mT);
+\draw[ar] (wres) -- (sv);
+\draw[dar] (seed) -- node[lb,above]{initial\\ iterate only} (mT);
+\begin{scope}[on background layer]
+  \node[lane,fit=(res)(vres)(wres)(mT)(sv)(seed)(prior)] (L2) {};
+\end{scope}
+\node[hd,anchor=south west] at ([xshift=1mm]L2.north west) {ESTIMATED --- the only online degrees of freedom};
+
+\draw[ar] (mT.south) -- (4.8,-5.4);
+\draw[ar] (sv.south) -- (8.4,-5.4);
+\draw[ln] (4.8,-5.4) -- (8.4,-5.4);
+\draw[bus] (6.6,-5.4) -- node[lb,right,pos=0.55]{three scalars, nothing else} (6.6,-6.4);
+
+%========================= band 3: derived ==========================
+\node[der] (cxy) at (2.5,-7.4)  {$\cvec=\svec/\mT$\\ \eqref{eq:c_from_s}};
+\node[der] (tc)  at (6.1,-7.4)  {$\tcom=\frac{T}{\mT}(-s_y,\,s_x,\,0)$\\ \eqref{eq:tcom_s}};
+\node[der] (dj)  at (9.7,-7.4)  {$\dJ=A(\mT,\mB,r_z)$\\ \eqref{eq:Jdeployed}, frozen \eqref{eq:Afrozen}};
+\node[gh]  (jxz) at (12.7,-7.4) {$J_{xz},J_{yz}$ \eqref{eq:Jxz}\\ \emph{estimator only}};
+\draw[ar] (cxy) -- (tc);
+\begin{scope}[on background layer]
+  \node[lane,fit=(cxy)(tc)(dj)(jxz)] (L3) {};
+\end{scope}
+\node[hd,anchor=south west] at ([xshift=1mm]L3.north west) {DERIVED --- rigid-body algebra, no new unknowns, no new sensing};
+\draw[dar] (prior.south) -- ++(0,-1.5) -| node[lb,pos=0.22,above]{$\to A,\ B_{x,y},\ \Jt$} (dj.north);
+
+\draw[ln] (4.8,-5.4) -- (1.0,-5.4) -- (1.0,-8.6) -- (2.5,-8.6);
+\node[lb,rotate=90,anchor=south] at (0.92,-7.0) {$\mT$ passes straight through};
+
+\draw[ar] (cxy.south) -- (2.5,-8.6);
+\draw[ar] (dj.south)  -- (9.7,-8.6);
+\draw[ln] (2.5,-8.6) -- (9.7,-8.6);
+\draw[bus] (6.1,-8.6) -- node[lb,right,pos=0.6]
+  {$p_{\mathrm{NMPC}}=[\,x_{\mathrm{ref}};\mT;\dJ;\cvec\,]\in\mathbb{R}^{17}$ \eqref{eq:pnmpc}}
+  (6.1,-9.6);
+
+%========================= band 4: consumed =========================
+\node[nd,text width=54mm,align=left] (mdl) at (4.4,-10.7)
+  {\textbf{prediction model} $F$ \eqref{eq:predmodel}\\[1pt]
+   $1/\mT \to \dot{\bm v}$ \qquad $\tcom(\cvec) \to \dot{\bm\omega}$\\
+   $\Jt(\dJ) \to \dot{\bm\omega}$, diagonal};
+\node[nd,text width=44mm,align=left] (cst) at (11.0,-10.7)
+  {\textbf{cost baseline} $u_{\mathrm{hover}}$ \eqref{eq:hover}\\[1pt]
+   $T_h=\mT g$\\ torque entries $=-\tcom$};
+\begin{scope}[on background layer]
+  \node[lane,fit=(mdl)(cst)] (L4) {};
+\end{scope}
+\node[hd,anchor=south west] at ([xshift=1mm]L4.north west) {CONSUMED --- the same numbers enter the constraint and the objective};
+
+%========================= band 5: actuated =========================
+\node[nd] (eta) at (5.0,-12.7) {throttle $\eta(T)$ \eqref{eq:throttleinv}};
+\node[nd] (w1)  at (5.0,-13.6) {body-rate $\bm\omega_1$};
+\node[nd] (px4) at (11.0,-13.15) {PX4 rate loop $+$ mixer \eqref{eq:mixerinv}};
+\draw[ar] (eta.east) -- (px4.west|-eta.east) -- (px4.west);
+\draw[ar] (w1.east)  -- (px4.west|-w1.east)  -- (px4.west);
+\begin{scope}[on background layer]
+  \node[lane,fit=(eta)(w1)(px4)] (L5) {};
+\end{scope}
+\node[hd,anchor=south east] at ([xshift=-1mm]L5.north east) {ACTUATED --- $\bm\tau$ never leaves the solver};
+\draw[ln] (mdl.south) -- ++(0,-0.55) -| (2.2,-12.7);
+\draw[ar] (2.2,-12.7) -- (eta.west);
+\draw[ln] (2.2,-12.7) -- (2.2,-13.6);
+\draw[ar] (2.2,-13.6) -- (w1.west);
+
+%========================= loop closure =============================
+\draw[bus,gray!40!black] (px4.east) -- (14.4,-13.15) -- (14.4,1.55)
+  -- node[lb,above,pos=0.55]{the loop closes through \emph{measurement}, never through the controller's intention} (2.0,1.55) -- (rot.north);
+\end{tikzpicture}
+\caption{How a payload parameter reaches the controller. The window's
+measurements and its known input meet in one residual \eqref{eq:mheresid}, whose
+$\bm v$ and $\bm\omega$ blocks are what identify the two boxed decision
+variables; everything in the \textsc{derived} band follows from those by the
+algebra of Sections~\ref{sec:model:payload}--\ref{sec:model:moment} and
+introduces neither a new unknown nor a new sensor. Three asymmetries are worth
+tracing. The composite mass is the only estimated quantity the controller
+receives directly, while the first moment reaches it solely through $\cvec$ and
+$\dJ$ --- which is why a release leaves no quantity undefined. The mass
+nevertheless also reaches $\dot{\bm\omega}$, through $\cvec$ and $B_{x,y}$; only
+the amplified path $A$ is frozen by \eqref{eq:Afrozen}. And the off-diagonal
+inertia \eqref{eq:Jxz} is carried by the estimator's model but not by the
+controller's, whose $\Jt$ is diagonal. The loop closes through measured rotor
+speeds, never through the moment the solver intended.}
+\label{fig:paramflow}
+\end{figure}
+
+Figure~\ref{fig:paramflow} traces the same accounting as a flow: what is
+measured, what is estimated, what is generated by algebra, and where each
+quantity is finally consumed.
+
 
 \begin{table}[ht]
 \caption{Model parameters, classified by identity. Only the composite mass and
@@ -1046,9 +1332,9 @@ near-hover, low-rate flight --- excites that channel weakly. Admitting $\dJ$ as 
 free variable would let the optimiser explain measurement noise with a quantity
 the data barely constrains. There is a second, sharper reason: $\Jt$ appears
 \emph{inverted} in \eqref{eq:rot} and is propagated $N$ steps forward, so an
-error in it is amplified rather than damped, whereas the additive lumped term
-$\bm\xi$ of \eqref{eq:pnmpc} --- the alternative used by disturbance-based
-methods --- is always safe. Estimating six inertia elements would also add
+error in it is amplified rather than damped, whereas an additive disturbance
+term on $\dot{\bm\omega}$ --- the alternative used by disturbance-based methods
+\cite{hanover2021} --- is always safe. Estimating six inertia elements would also add
 decision variables whose natural scale is $10^{-2}$, two orders of magnitude
 below the mass, to a Hessian already sensitive to scaling.
 
