@@ -122,8 +122,7 @@ MP_CAP_D=$(_f2dv "${GRIP_MP_CAP:-0.6}")
 # ⚠️ 只改**这一侧**:NMPC_GEOM_COUPLED 保持关(可用边界 r_y≲0.05m,而本场景
 #    ecc=0.10 远在禁区外);推荐组合是 MHE coupled + NMPC 几何走 online。
 # ⚠️ 未覆盖:4m/s 工作点；一阶质量矩在无事件主线默认开启。
-# 回退:MHE_GEOM_COUPLED=0
-export MHE_GEOM_COUPLED="${MHE_GEOM_COUPLED:-1}"
+# 注:MHE_GEOM_COUPLED 已删。estimate_moment 分支优先,09-04 起它再未生效过。
 export MHE_ESTIMATE_MOMENT="${MHE_ESTIMATE_MOMENT:-1}"
 export MHE_MOMENT_A_MODE="${MHE_MOMENT_A_MODE:-frozen}"
 export MHE_SIGMA_S0="${MHE_SIGMA_S0:-0.1}"

@@ -493,7 +493,14 @@ MHE_LOG="$RUNDIR/grip_mhe_$STAMP.log"
 # 批次脚本照跑不误——整轮**静默没有 MHE**。07-31 加残差采集时引入,当时所有批次
 # 都经 run_residual_collect.sh 带着 RESID_LOG_DIR 进来,所以一直没暴露;任何不设
 # 该变量的裸跑都会中招。
-# ===== 几何-质量耦合档(2026-08-31 起默认开)=====
+# ===== [已废弃] 几何-质量耦合档(2026-08-31 启用 → 09-04 被一阶质量矩取代)=====
+# ⚠️ export 已删除。mhe_model.py 的分支是
+#     if estimate_moment: ... elif geom_coupled: ... else: legacy
+#   而 6419cbe(09-04 16:43)把 MHE_ESTIMATE_MOMENT 默认翻为 1,
+#   estimate_moment 优先级更高 —— 自那之后 MHE_GEOM_COUPLED 再未生效过。
+#   留着它会让任何按本脚本反推 09-04 之后批次档位的人推成 coupled,故删。
+#   下面的 A/B 证据是 08-31~09-04 那段 coupled 确实在线时测得的,保留备查。
+# --- 以下为当时的原说明 ---
 # MHE 的几何槽从 [dJ,cx,cy](窗外算好的常参数,∂(J,c)/∂m≡0)换成可测杆臂
 # [rx,ry,rz],J(m)/c(m) 由被估质量在模型内现算 —— 质量因此能从**转动通路**辨识。
 # 证据(记忆 geom-coupled-ab-n8,两批 n=8 配对 A/B,唯一差异就是本变量):
@@ -508,8 +515,6 @@ MHE_LOG="$RUNDIR/grip_mhe_$STAMP.log"
 # ⚠️ 只改**这一侧**:NMPC_GEOM_COUPLED 保持关(可用边界 r_y≲0.05m,而本场景
 #    ecc=0.10 远在禁区外);推荐组合是 MHE coupled + NMPC 几何走 online。
 # ⚠️ 未覆盖:4m/s 工作点。一阶质量矩见下面的 MHE_ESTIMATE_MOMENT 段。
-# 回退:MHE_GEOM_COUPLED=0
-export MHE_GEOM_COUPLED="${MHE_GEOM_COUPLED:-1}"
 # ===== 一阶质量矩增广 2b(2026-09-02,无事件主线默认开)=====
 # MHE_ESTIMATE_MOMENT=1:把 s=m_P·r_xy [kg·m] 增广成被估状态。载荷的"在不在/
 #   偏多少"由 s 独立承担,c_xy=s/m_T 里 m_P 恰好约掉 —— 解掉 self 释放档下
