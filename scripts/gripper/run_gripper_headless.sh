@@ -274,7 +274,9 @@ bash "$WS/src/scripts/record_experiment_provenance.sh" \
 # ②本轮 px4 stdout 只留前 PX4_LOG_CAP(默认 5M)排错用,之后全丢 /dev/null。
 # 详见记忆 sitl-px4-log-disk-blowup。
 PX4_LOG_CAP="${PX4_LOG_CAP:-5M}"
-find "$RUNDIR" -maxdepth 1 -type f \( -name 'grip_px4_*.log' -o -name 'px4_*.log' \) -delete 2>/dev/null || true
+if [ "${PRESERVE_PX4_LOGS:-false}" != "true" ]; then
+  find "$RUNDIR" -maxdepth 1 -type f \( -name 'grip_px4_*.log' -o -name 'px4_*.log' \) -delete 2>/dev/null || true
+fi
 
 echo "cleaning up leftover sim processes..."
 for pat in "px4_sitl_default/bin/px4" "gz sim" "/gz " "ruby" "mavros/mavros_node" \
@@ -418,6 +420,7 @@ nohup ros2 run offboard_test_acados acados_nmpc_node --ros-args \
     -p grip_payload_envelope:=$GRIP_PAYLOAD_ENVELOPE_D \
     -p attach_j_bootstrap_enable:=${ATTACH_J_BOOTSTRAP:-true} \
     -p attach_j_bootstrap_on_liftoff:=${BOOTSTRAP_ON_LIFTOFF:-false} \
+    -p eccentricity_compensation:=${NMPC_ECC_COMP:-false} \
     -p cxy_freeze_in_maneuver:=${NMPC_CXY_FREEZE:-false} \
     -p cxy_freeze_window_sec:=${NMPC_CXY_FREEZE_WINDOW:-3.0} \
     -p liftoff_detect_dz:=${LIFTOFF_DZ:-0.03} \
@@ -566,7 +569,7 @@ nohup ros2 run offboard_test_acados mhe_node --ros-args \
     -p c_xy_mass_release_persist:=${MHE_CXY_MASS_RELEASE_PERSIST:-20} \
     -p c_xy_mass_arm_ratio:=${MHE_CXY_MASS_ARM_RATIO:-3.0} \
     -p c_xy_mass_arm_persist:=${MHE_CXY_MASS_ARM_PERSIST:-20} \
-    -p c_xy_est_enable:=${MHE_C_XY_EST:-false} \
+    -p c_xy_est_enable:=${MHE_C_XY_EST:-true} \
     -p c_xy_from_moment:=$(_b "${MHE_C_XY_FROM_MOMENT:-true}") \
     -p maneuver_gate_enable:=$(_b "${MHE_MANEUVER_GATE:-false}") \
     -p resid_release_geom:=$(_b "${MHE_RESID_RELEASE_GEOM:-true}") \
@@ -606,5 +609,14 @@ echo "  payload=${GRIP_PAYLOAD_KG}kg ecc_y=${GRIP_ECC_Y}m r_xy=$R_XY"
 echo "  release_baseline=$RELEASE_BASELINE_D (P=主线)"
 echo "  event_trigger=${MHE_EVENT_TRIGGER:-true} signal=${MHE_SIGNAL_MODE:-residual} drop_publish=${DROP_PUBLISH_MASS_EVENT:-false}"
 echo "  geom_release: NMPC=${NMPC_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-event}} MHE=${MHE_GEOM_RELEASE_MODE:-${GEOM_RELEASE_MODE:-self}} cxy_release_mp=${MHE_CXY_MASS_RELEASE_MP:-0.03}"
+# 【2026-10-20】NMPC 偏心默认关,但 MHE 一阶矩(MHE_C_XY_EST)必须开:它同时是
+# 释放判据总开关(见 paper/REPRODUCE.md 配置总开关审计)。关掉它 = 没有在线释放
+# 决策,drop 只能靠 unresolved 超时兜底 —— 不能当 detector miss 或安全验证。
+echo "  ecc: NMPC_c_xy=${NMPC_ECC_COMP:-false} MHE_moment(release gate)=${MHE_C_XY_EST:-true}"
+if [ "$(_b "${CONTINUOUS_PAYLOAD_ESTIMATES:-true}")" = "true" ] && \
+   [ "$(_b "${MHE_C_XY_EST:-true}")" != "true" ]; then
+  echo "  ⚠️⚠️ MHE_C_XY_EST=false:在线释放判据不运行,本轮生命周期安全未验证" \
+       "(只该出现在刻意的消融里)" >&2
+fi
 echo "  theta=${MHE_SCHEDULE_THETA:-M0} confirm_alpha=$MHE_CONFIRM_ALPHA_D (alpha>=0 => thresh=alpha*g*envelope; <0 => fixed ${MHE_CONFIRM_THRESH:-1.5}N)"
 echo "  payload_envelope=${GRIP_PAYLOAD_ENVELOPE:-0.3}kg (机架规格; attach 仅用它引导 J,m/s 仍来自 MHE)"

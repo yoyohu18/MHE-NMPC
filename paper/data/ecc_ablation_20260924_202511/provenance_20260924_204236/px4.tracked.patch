@@ -1,0 +1,81 @@
+diff --git a/ROMFS/px4fmu_common/init.d-posix/airframes/CMakeLists.txt b/ROMFS/px4fmu_common/init.d-posix/airframes/CMakeLists.txt
+index a2e2a4d290..59251470ad 100644
+--- a/ROMFS/px4fmu_common/init.d-posix/airframes/CMakeLists.txt
++++ b/ROMFS/px4fmu_common/init.d-posix/airframes/CMakeLists.txt
+@@ -71,6 +71,8 @@ px4_add_romfs_files(
+ 	3011_jsbsim_hexarotor_x
+ 
+ 	4001_gz_x500
++	4090_gz_dexi
++	4091_gz_dexi_racing
+ 	4002_gz_x500_depth
+ 	4003_gz_rc_cessna
+ 	4004_gz_standard_vtol
+diff --git a/ROMFS/px4fmu_common/init.d-posix/px4-rc.gzsim b/ROMFS/px4fmu_common/init.d-posix/px4-rc.gzsim
+index 5b4676e60e..49f77c3cfb 100644
+--- a/ROMFS/px4fmu_common/init.d-posix/px4-rc.gzsim
++++ b/ROMFS/px4fmu_common/init.d-posix/px4-rc.gzsim
+@@ -47,7 +47,12 @@ if [ -z "${PX4_GZ_STANDALONE}" ]; then
+ 
+ 		echo "INFO  [init] Starting gazebo with world: ${PX4_GZ_WORLDS}/${PX4_GZ_WORLD}.sdf"
+ 
+-		${gz_command} ${gz_sub_command} --verbose=${GZ_VERBOSE:=1} -r -s "${PX4_GZ_WORLDS}/${PX4_GZ_WORLD}.sdf" &
++		gz_seed_arg=""
++		if [ -n "${PX4_GZ_SEED}" ]; then
++			gz_seed_arg="--seed ${PX4_GZ_SEED}"
++		fi
++
++		${gz_command} ${gz_sub_command} --verbose=${GZ_VERBOSE:=1} -r -s ${gz_seed_arg} "${PX4_GZ_WORLDS}/${PX4_GZ_WORLD}.sdf" &
+ 
+ 		if [ -z "${HEADLESS}" ]; then
+ 			echo "INFO  [init] Starting gz gui"
+Submodule Tools/simulation/gz contains modified content
+diff --git a/Tools/simulation/gz/models/x500/model.sdf b/Tools/simulation/gz/models/x500/model.sdf
+index 2dd80a1..a3c22e8 100644
+--- a/Tools/simulation/gz/models/x500/model.sdf
++++ b/Tools/simulation/gz/models/x500/model.sdf
+@@ -75,5 +75,19 @@
+     <plugin filename="MotorFailurePlugin"
+       name="gz::sim::systems::MotorFailureSystem">
+     </plugin>
++    <!-- Diagnostic only (added for mpcc_uav EKF2-bypass test, see
++         ros2_jazzy_zzq_ws/docs/reproducibility_debug.md): publishes Gazebo's
++         own ground-truth pose/twist, independent of PX4's EKF2 estimate, so
++         the bridge can log it side-by-side with the EKF2-derived angular
++         velocity it normally uses. Does not affect control — nothing
++         subscribes to this for setpoints, only for offline comparison. -->
++    <plugin filename="gz-sim-odometry-publisher-system"
++      name="gz::sim::systems::OdometryPublisher">
++      <odom_frame>world</odom_frame>
++      <robot_base_frame>base_link</robot_base_frame>
++      <odom_topic>/x500/odometry_groundtruth</odom_topic>
++      <odom_publish_frequency>100</odom_publish_frequency>
++      <dimensions>3</dimensions>
++    </plugin>
+   </model>
+ </sdf>
+diff --git a/src/modules/uxrce_dds_client/dds_topics.yaml b/src/modules/uxrce_dds_client/dds_topics.yaml
+index 56e5b36b6f..df95825bdf 100644
+--- a/src/modules/uxrce_dds_client/dds_topics.yaml
++++ b/src/modules/uxrce_dds_client/dds_topics.yaml
+@@ -53,8 +53,9 @@ publications:
+   - topic: /fmu/out/transponder_report
+     type: px4_msgs::msg::TransponderReport
+ 
+-  # - topic: /fmu/out/vehicle_angular_velocity
+-  #   type: px4_msgs::msg::VehicleAngularVelocity
++  - topic: /fmu/out/vehicle_angular_velocity
++    type: px4_msgs::msg::VehicleAngularVelocity
++    rate_limit: 500.
+ 
+   - topic: /fmu/out/vehicle_land_detected
+     type: px4_msgs::msg::VehicleLandDetected
+@@ -85,7 +86,7 @@ publications:
+ 
+   - topic: /fmu/out/vehicle_odometry
+     type: px4_msgs::msg::VehicleOdometry
+-    rate_limit: 100.
++    rate_limit: 500.
+ 
+   - topic: /fmu/out/vehicle_status
+     type: px4_msgs::msg::VehicleStatus

@@ -254,6 +254,27 @@ class AcadosNMPCNode(Node):
         self._payload_estimate_received = False
         self._payload_estimate_rx_sec = None
         self._payload_estimate_health_prev = None
+        # ===== 【2026-10-20】NMPC 侧偏心补偿默认关 =====
+        # 09-24 消融(paper/data/ecc_ablation_20260924_202511,4 对)显示 solver 的
+        # c_xy 对跟踪无可测收益:配平力矩由 PX4 速率环积分项承担(10-12 ulog 99%),
+        # NMPC 只发 body-rate,c_xy 前馈与积分器重复。用户 10-20 拍板默认去掉。
+        # 关的只是"控制侧":solver 几何槽 cx/cy 写 0,质量/dJ/omega_scale 照常。
+        # ⚠️ MHE 的一阶矩 s 必须保留 —— 释放置信度 = 质量×一阶矩×惯量,且每次
+        #   释放都必须带一阶矩证据;它由 MHE 的 c_xy_est_enable 管,与本开关无关。
+        # ⚠️ 冻结的论文/历史批次全是在 True 下跑的,复现须显式 NMPC_ECC_COMP=true。
+        self.eccentricity_compensation = bool(self.declare_parameter(
+            'eccentricity_compensation', False).value)
+        if not self.eccentricity_compensation:
+            if p.geom_coupled:
+                raise ValueError(
+                    'NMPC_GEOM_COUPLED=1 把偏心编进模型几何,无法单独去掉;'
+                    '用耦合档须显式 eccentricity_compensation=true')
+            self.get_logger().info(
+                '[ecc] NMPC c_xy=0 (default since 2026-10-20); '
+                'mass/dJ/MHE moment/release unchanged')
+        else:
+            self.get_logger().warn(
+                '[ecc] NMPC c_xy compensation ON (legacy; frozen-cohort reproduction)')
         # ===== 【2026-09-17】机动段冻结 NMPC 所用 c_xy(当日开→当晚翻回默认关)=====
         # 当日白天曾默认开(只有单测、无 SITL 背书),pfovr_ab_20260917_193153 整批
         # 64 轮是在"开"下跑的,复现该批须显式 =true。当晚用户拍板翻回关,理由:
@@ -2856,6 +2877,8 @@ class AcadosNMPCNode(Node):
         coupled: [rx, ry, rz] 载荷几何偏移,J/c 由模型内部按 m_est 现算——这一档
         NMPC 与 MHE 用**同一套**代数,两个求解器对同一质量给出同一姿态动力学。
         载荷不在机上(未 attach / 已 drop)时装全零,退化回空机 J、c=0。"""
+        if not getattr(self, 'eccentricity_compensation', False):
+            return np.array([self.dJ_est, 0.0, 0.0])
         if self.continuous_payload_estimates:
             if self.control_mode == 'l1':
                 return np.zeros(3)

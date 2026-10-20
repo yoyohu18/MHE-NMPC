@@ -1,0 +1,1457 @@
+diff --git a/offboard_test_acados/offboard_test_acados/acados_nmpc_node.py b/offboard_test_acados/offboard_test_acados/acados_nmpc_node.py
+index 632c043..aa45c45 100644
+--- a/offboard_test_acados/offboard_test_acados/acados_nmpc_node.py
++++ b/offboard_test_acados/offboard_test_acados/acados_nmpc_node.py
+@@ -111,8 +111,7 @@ class AcadosNMPCNode(Node):
+         self.THRUST_K   = ACT_THRUST_K      # T=THRUST_K*ω² [N/(rad/s)²], 4 电机合计
+         self.omega_cmd_max = 2.0
+         self.bodyrate_ramp_time = 0.8
+-        # 先跑悬停测试,跟当年 CasADi 节点的验证顺序一样:先确认能稳定悬停,
+-        # 再切 False 去追轨迹
++        # 先跑悬停测试,确认能稳定悬停,再切 False 去追轨迹
+         self.hover_test_mode = False
+ 
+         # 'circle' / 'figure8' / 'straight' 三种参考轨迹都保留、互不影响,改这
+@@ -254,6 +253,14 @@ class AcadosNMPCNode(Node):
+         self._payload_estimate_received = False
+         self._payload_estimate_rx_sec = None
+         self._payload_estimate_health_prev = None
++        # Control-side eccentricity ablation: keep mass, inertia and detection.
++        self.eccentricity_compensation = bool(self.declare_parameter(
++            'eccentricity_compensation', True).value)
++        if not self.eccentricity_compensation:
++            if p.geom_coupled:
++                raise ValueError('eccentricity ablation requires NMPC_GEOM_COUPLED=0')
++            self.get_logger().info(
++                '[ecc-ablation] OFF: solver c_xy=0; mass/dJ/MHE/release unchanged')
+         # ===== 【2026-09-17】机动段冻结 NMPC 所用 c_xy(当日开→当晚翻回默认关)=====
+         # 当日白天曾默认开(只有单测、无 SITL 背书),pfovr_ab_20260917_193153 整批
+         # 64 轮是在"开"下跑的,复现该批须显式 =true。当晚用户拍板翻回关,理由:
+@@ -495,6 +502,21 @@ class AcadosNMPCNode(Node):
+         self.omega_scale = 1.0              # 当前(已低通)比例,1.0=不缩放
+         self._omega_scale_target = 1.0
+         self._omega_scale_stamp = None
++        # 内环补偿的 dJ **下界**(2026-09-22,L1 对照修复)。主线恒为 0 → 逐位
++        # no-op;control_mode='l1' 在 attach 时置成包线上界的 dJ,让流派 B 也
++        # 经**同一条** omega_scale 通路拿到内环补偿。
++        #
++        # 为什么必须有这条:D2(b)(2026-07-23 用户拍板)要求 L1 臂用载荷包线上界
++        # 缩内环增益——"纯平动版实测 0.3kg/ecc0.10 姿态失稳,不给增益就是绑着
++        # baseline 的手打,审稿必疑"。当时那条路走 _scale_px4_rate_gains(改 PX4
++        # 参数)。后来内环补偿改成 omega_scale(缩放 body-rate 指令),并加了互锁
++        # "omega_scale_enable=true → 自动关闭 scale_px4_rate_gains" —— 于是
++        # L1 分支里那句 _scale_px4_rate_gains(dJ0) 变成**静默 no-op**,而
++        # omega_scale 的 djest 源在 L1 档下读的 dJ_est 恒为 0(L1 不做模型几何),
++        # 结果 L1 臂内环补偿**归零**,D2(b) 在 omega_scale 时代事实上失效了。
++        # 两臂因此走同一机制、同一套滤波/死区/headroom,只有 dJ 来源不同
++        # (A=在线 dJ_est,B=包线常数),对照才干净。
++        self._omega_scale_dj_floor = 0.0
+         self._omega_scale_clip_warned = False
+ 
+         # ---- 飞行安全诊断(2026-09-03,连续主线 A/B 验收用)----
+@@ -532,7 +554,32 @@ class AcadosNMPCNode(Node):
+         if self.control_mode == 'l1':
+             self.get_logger().info(
+                 f'CONTROL MODE: l1 (a={self.l1.a:.1f}, omega_c={self.l1.omega_c:.1f}'
+-                f') — m_est 固定 {p.m}kg,几何/增益缩放停用,平动扰动走 d_lumped')
++                f') — m_est 固定 {p.m}kg,模型侧 m/s/dJ 全部隔离,平动扰动走 d_lumped')
++            # 内环补偿的归属(D2(b),2026-07-23 用户拍板):允许用载荷**包线上界**
++            # (机架规格,非任务信息)缩内环,否则是绑着 baseline 的手打。下面这行
++            # 让"这一轮到底补没补"在日志里可事后自证。
++            if self.omega_scale_enable:
++                self.get_logger().info(
++                    '  inner-loop: omega_scale(cmd) at attach, dJ from payload '
++                    'envelope (rack spec) — arm is NOT handicapped')
++            elif self.scale_px4_rate_gains:
++                self.get_logger().info(
++                    '  inner-loop: PX4 MC_*RATE_K at attach, dJ from payload '
++                    'envelope (rack spec) — arm is NOT handicapped')
++            else:
++                self.get_logger().error(
++                    '  ⚠️ inner-loop: NO compensation (omega_scale 与 '
++                    'scale_px4_rate_gains 都关) — 该轮 L1 臂被绑手,不可用于对照!')
++            if self.continuous_payload_estimates:
++                # _grip_mass_step 的 continuous 分支在 l1 分支**之前** return,
++                # 于是 l1 的 attach 处理(包线内环补偿)根本走不到,而 attach 语义
++                # 也变成了"连续估计接管",与流派 B 的定义冲突。这个组合跑出来的
++                # L1 臂是被绑手的,结论不可用 —— 直接喊停,不靠使用者记得。
++                self.get_logger().error(
++                    '  ⚠️ control_mode=l1 与 continuous_payload_estimates=true '
++                    '不兼容:attach 走 continuous 分支提前 return,L1 臂拿不到'
++                    '包线内环补偿。请用 CONTINUOUS_PAYLOAD_ESTIMATES=false '
++                    '(配 NMPC_GEOM_RELEASE_MODE=event)跑对照。')
+         if self.tau_lumped_enable and p.geom_coupled:
+             self.tau_lumped_enable = False
+             self.get_logger().warn(
+@@ -825,6 +872,11 @@ class AcadosNMPCNode(Node):
+         # 把水平位置对齐、悬停稳,再垂直下降到 grip_z_low——避免在 grip_z_low
+         # 这种低空做水平平移时高度下冲、起落架把 box 顶出吸附窗口(attach 竞态)。
+         self.declare_parameter('grip_approach_z', 1.5)
++        # 【2026-09-24】预装载:载荷起飞前就挂在机腹下,没有接近/下降/抓取三段。
++        # 代价是吊臂从 ~0.5 m 缩到 ~0.2 m,kappa 从 5.2 掉到 1.5(r_z² 占 dJ 的
++        # 98%);但 s=m_P*r_xy 与配平力矩 tau=m_P*g*r_y 都不含 r_z,偏心那条线
++        # 零损失。用户 09-24 明确接受该取舍。enable 由启动脚本在起飞前就发。
++        self.declare_parameter('grip_preloaded', False)
+         # 07-07 新增:NMPC 现在改成在 grip_approach_z(安全高度,离 box 远)就
+         # 接管,而不是像旧版那样下降到 grip_z_low 才接管——根因是 MHE 的事件
+         # 触发降权机制依赖 self.frames(只有 NMPC 发布 u_opt 后才计数),旧版
+@@ -966,6 +1018,8 @@ class AcadosNMPCNode(Node):
+             self._liftoff_detected = False
+             self.grip_approach_z = float(
+                 self.get_parameter('grip_approach_z').value)
++            self.grip_preloaded = bool(
++                self.get_parameter('grip_preloaded').value)
+             self.grip_settle_sec = float(
+                 self.get_parameter('grip_settle_sec').value)
+             self.grip_descend_dur = float(
+@@ -1431,6 +1485,10 @@ class AcadosNMPCNode(Node):
+         if self.control_mode == 'l1':
+             self.l1.reset()
+             self.d_lumped = np.zeros(3)
++            # 载荷没了 → 撤掉内环补偿。主线走 _reset_px4_rate_gains/几何归零,
++            # L1 档的补偿挂在 omega_scale 下界上,必须在这里显式撤(那个函数在
++            # omega_scale 档下开头就 return,清不到这里)。
++            self._omega_scale_dj_floor = 0.0
+         if self.tau_lumped_enable:
+             self.l1_rot.reset()
+             self.xi_lumped = np.zeros(3)
+@@ -1662,6 +1720,13 @@ class AcadosNMPCNode(Node):
+             dj_target = dj_mhe + self._attach_j_bootstrap_weight * floor_extra
+         else:
+             dj_target = dj_mhe
++        if self.control_mode == 'l1':
++            # 流派 B 的定义是"模型侧不含任何载荷参数"。m_est/c_est 上面两处已
++            # 分别门控,dJ 这条原先漏了:continuous 档下 dj_mhe 来自 MHE 的
++            # dJ,而 MHE 的 dJ 是由 m̂_p 代数生成的(见参数账本),等于把质量估计
++            # 从惯量通道偷偷喂回对照臂,对照不成立。内环补偿另走 omega_scale
++            # 下界(包线常数,非估计量),不受此影响。
++            dj_target = 0.0
+         dj_lp = self.dJ_est + alpha * (dj_target - self.dJ_est)
+         self.dJ_est = float(slew(
+             self.dJ_est, dj_lp, self.payload_dj_slew, dt))
+@@ -1917,6 +1982,10 @@ class AcadosNMPCNode(Node):
+             self.l1.reset()
+             self.d_lumped = np.zeros(3)
+             self._l1_last_stamp = None
++            # 载荷没了 → 撤掉内环补偿。主线走 _reset_px4_rate_gains/几何归零,
++            # L1 档的补偿挂在 omega_scale 下界上,必须在这里显式撤(那个函数在
++            # omega_scale 档下开头就 return,清不到这里)。
++            self._omega_scale_dj_floor = 0.0
+         if self.tau_lumped_enable:
+             self.l1_rot.reset()
+             self.xi_lumped = np.zeros(3)
+@@ -2415,6 +2484,10 @@ class AcadosNMPCNode(Node):
+             m_eff = self.m_est
+             m_p_eff = max(0.0, m_eff - p.m)
+             dJ_eff = self._dJ_from_mp(m_p_eff)
++        # 下界:主线恒 0(逐位 no-op);L1 对照档 attach 后 = 包线上界的 dJ。
++        # 放在三个源**之后**统一应用,这样无论用哪个源,"不估质量的那一臂也拿
++        # 得到内环补偿"这件事都成立(见 _omega_scale_dj_floor 声明处)。
++        dJ_eff = max(dJ_eff, self._omega_scale_dj_floor)
+         desired = float(np.clip(
+             (p.Jxx + dJ_eff) / p.Jxx, 1.0, self.omega_scale_cap))
+         # Schmitt-like dead band on the requested ratio.  Noise inside the band
+@@ -2772,11 +2845,23 @@ class AcadosNMPCNode(Node):
+         if self.control_mode == 'l1':
+             mp0, src0 = self._envelope_mp()  # l1 分支本来就只做增益、不做模型前馈
+             dJ0 = self._dJ_from_mp(mp0)
++            # 内环补偿的**两条**出口都要走到,因为哪条生效取决于配置:
++            #   scale_px4_rate_gains 档 → 改 PX4 速率环参数(历史路径);
++            #   omega_scale 档         → 缩放 body-rate 指令(现主线路径)。
++            # 两者被 __init__ 里的互锁保证**至多一条**生效,所以这里两条都设不会
++            # 双重补偿。只调前者会在 omega_scale 档下静默 no-op —— 那正是
++            # 2026-09-22 之前 L1 臂零内环补偿的 bug(见 _omega_scale_dj_floor)。
+             self._scale_px4_rate_gains(dJ0)
++            self._omega_scale_dj_floor = dJ0
++            gain_path = ('omega_scale(cmd)' if self.omega_scale_enable
++                         else ('px4_rate_k' if self.scale_px4_rate_gains
++                               else 'NONE(⚠️ 内环无补偿)'))
+             self.get_logger().info(
+                 f't={nmpc_time:.1f}s | ATTACH (control_mode=l1): rate gains from '
+-                f'{src0} m_p={mp0:.2f}kg (dJ={dJ0:.4f}); no model-side feedforward,'
+-                f' translational payload handled by L1 d_lumped only')
++                f'{src0} m_p={mp0:.2f}kg (dJ={dJ0:.4f}, ratio='
++                f'{(p.Jxx + dJ0) / p.Jxx:.2f}, path={gain_path}); '
++                'no model-side feedforward,'
++                ' translational payload handled by L1 d_lumped only')
+             return
+         m_p = self.grip_payload_mass
+         m_t = p.m + m_p
+@@ -2856,6 +2941,8 @@ class AcadosNMPCNode(Node):
+         coupled: [rx, ry, rz] 载荷几何偏移,J/c 由模型内部按 m_est 现算——这一档
+         NMPC 与 MHE 用**同一套**代数,两个求解器对同一质量给出同一姿态动力学。
+         载荷不在机上(未 attach / 已 drop)时装全零,退化回空机 J、c=0。"""
++        if not getattr(self, 'eccentricity_compensation', True):
++            return np.array([self.dJ_est, 0.0, 0.0])
+         if self.continuous_payload_estimates:
+             if self.control_mode == 'l1':
+                 return np.zeros(3)
+@@ -2977,6 +3064,20 @@ class AcadosNMPCNode(Node):
+         时过早吸附,造成系统性深挂。"""
+         if not self.gripper_mode or self.grip_descend_done:
+             return
++        if self.grip_preloaded:
++            # 预装载:没有接近/下降/抓取。这里只把"受控 attach 时刻"锚定到 NMPC
++            # 接管时刻 —— ★ attach_time 取的是 grip_descend_done_time 而不是真正
++            # 的 attach 消息(见 _grip_mass_step),不锚这一下,attach_time 恒 None,
++            # _lift_phase 和 _grip_mass_step 都永远不触发,飞机会一直悬停不抬升。
++            # z_hover 保持在 grip_approach_z,等 _lift_phase 接手;enable 不在这里
++            # 发(启动脚本在起飞前就发,地面吸附必须早于 NMPC 接管)。
++            self.grip_descend_done = True
++            self.grip_descend_done_time = nmpc_time
++            self.grip_enable_sent = True
++            self.get_logger().info(
++                f't={nmpc_time:.1f}s | PRELOADED: 跳过 descend/grasp,'
++                f'attach 计时基准锚定于此,z_hover={self.grip_approach_z}m')
++            return
+         if nmpc_time < self.grip_settle_sec:
+             return
+         s = min(max((nmpc_time - self.grip_settle_sec) /
+@@ -3157,6 +3258,10 @@ class AcadosNMPCNode(Node):
+             # 零重新估计(若有残余未建模效应会自行爬回)。
+             self.l1.reset()
+             self.d_lumped = np.zeros(3)
++            # 载荷没了 → 撤掉内环补偿。主线走 _reset_px4_rate_gains/几何归零,
++            # L1 档的补偿挂在 omega_scale 下界上,必须在这里显式撤(那个函数在
++            # omega_scale 档下开头就 return,清不到这里)。
++            self._omega_scale_dj_floor = 0.0
+         if self.tau_lumped_enable:
+             # 同理:掉包后真实转动扰动阶跃回零,残留 xi 会持续给一个幽灵角加速度
+             # 偏置,NMPC 会拿姿态去抵消它。
+diff --git a/offboard_test_acados/offboard_test_acados/gripper/proximity_gripper_node.py b/offboard_test_acados/offboard_test_acados/gripper/proximity_gripper_node.py
+index 1abb494..faec1bc 100644
+--- a/offboard_test_acados/offboard_test_acados/gripper/proximity_gripper_node.py
++++ b/offboard_test_acados/offboard_test_acados/gripper/proximity_gripper_node.py
+@@ -81,6 +81,11 @@ class ProximityGripperNode(Node):
+         # 默认 0.13 = ECC_Y 标称 0.10 + 0.03 容差,配平占 77%、留 23% 给机动;
+         # 对应历史拒绝率 15.4%(0.15 只拒 4.9% 但放行了高危档,0.12 拒 23.7%)。
+         self.declare_parameter('r_xy', 0.13)
++        # 【2026-09-24 变体 A】box 内部质心相对其几何中心的偏置 [m]。
++        # 非零时 world 由 make_offset_com_world.py 生成(<inertial><pose>),
++        # 这里的值必须与那份 world 一致 —— 批次脚本从同一个 GRIP_BOX_COM_Y 传两边。
++        # 只影响真值口径,不影响任何判据:r_xy 门槛量的仍是**抓取**几何偏差。
++        self.declare_parameter('box_com_xyz', [0.0, 0.0, 0.0])
+         # 被拒时的节流日志间隔 [s]。0 = 不打(旧行为)。**默认要打**:收紧门槛后
+         # "为什么迟迟不 attach"必须看得见,否则轮次挂在低空而日志里一片空白。
+         self.declare_parameter('reject_log_period', 2.0)
+@@ -123,6 +128,7 @@ class ProximityGripperNode(Node):
+         self.targets = list(g('targets').value)
+         self.child_link = g('child_link').value
+         self.r_xy = float(g('r_xy').value)
++        self.box_com_xyz = [float(v) for v in g('box_com_xyz').value]
+         self.h_min = float(g('h_min').value)
+         self.h_max = float(g('h_max').value)
+         self.v_rel_max = float(g('v_rel_max').value)
+@@ -374,12 +380,26 @@ class ProximityGripperNode(Node):
+                 f'若 box 被下洗吹偏则不会,此时本轮不会进入 LIFT。')
+ 
+     def publish_offset(self, drone, tgt):
++        # 这条 offset 的语义是**机体原点 → 载荷质心**的力臂,下游(MHE 真值日志、
++        # geom_source=truth、四个分析脚本)全按这个语义消费。box 的 pose 给的是
++        # 它的 link 原点 = 几何中心,两者只在质心居中时相等。
++        # 【2026-09-24 变体 A】box_com_xyz != 0 时质心在箱内偏置(内容物不居中),
++        # 几何中心仍被抓在正下方,故必须在这里补上,否则真值会系统性漏掉这一项。
++        geo = [float(tgt.pos[i] - drone.pos[i]) for i in range(3)]
+         msg = Float64MultiArray()
+-        msg.data = [float(tgt.pos[i] - drone.pos[i]) for i in range(3)]
++        msg.data = [geo[i] + self.box_com_xyz[i] for i in range(3)]
+         self.offset_pub.publish(msg)
+         self.get_logger().info(
+             f'-> attach offset (box - drone) = '
+             f'[{msg.data[0]:+.3f}, {msg.data[1]:+.3f}, {msg.data[2]:+.3f}] m')
++        if any(abs(v) > 1e-9 for v in self.box_com_xyz):
++            # 分解单独打一行,便于事后自证"真值里确实含内部偏置"(照抄
++            # geom-truth-guard 的做法:每轮必留一条可核对的痕迹)。
++            self.get_logger().info(
++                f'-> [offset-com] grasp geom = '
++                f'[{geo[0]:+.3f}, {geo[1]:+.3f}, {geo[2]:+.3f}] m + internal CoM '
++                f'[{self.box_com_xyz[0]:+.3f}, {self.box_com_xyz[1]:+.3f}, '
++                f'{self.box_com_xyz[2]:+.3f}] m')
+         self.get_logger().info(evt_line(
+             'attach_offset', rx=msg.data[0], ry=msg.data[1], rz=msg.data[2]))
+ 
+diff --git a/offboard_test_acados/offboard_test_acados/mhe_node.py b/offboard_test_acados/offboard_test_acados/mhe_node.py
+index c45a98b..e7b3c7d 100644
+--- a/offboard_test_acados/offboard_test_acados/mhe_node.py
++++ b/offboard_test_acados/offboard_test_acados/mhe_node.py
+@@ -2280,9 +2280,7 @@ class MHENode(Node):
+                         self._residual_drop_evidence_until = (
+                             _now + self.residual_evidence_hold_sec)
+                         self.get_logger().info(
+-                            '[step-detect] → 投出释放票(不直接释放)')
+-                        self.get_logger().info(
+-                            f'[step-detect] → 自主释放载荷几何 '
++                            f'[step-detect] → 投出释放票(不直接释放) '
+                             f'(|Δ|={-_d:.2f}N ≥ '
+                             f'{self.resid_step_release_thresh}N)')
+                     elif _dropped:
+diff --git a/offboard_test_acados/px4_assets/legacy_masschanger/README.md b/offboard_test_acados/px4_assets/legacy_masschanger/README.md
+deleted file mode 100644
+index c7f1c72..0000000
+--- a/offboard_test_acados/px4_assets/legacy_masschanger/README.md
++++ /dev/null
+@@ -1,13 +0,0 @@
+-# legacy_masschanger PX4 assets (archived 2026-09-15)
+-
+-Removed from the shared `/home/clear/PX4-Autopilot` tree after the masschanger
+-line was retired (`efe7986`). Needed only to re-simulate historical results
+-listed in `paper/REPRODUCE.md` (A.2 no-signal ablation, C.3 wind FPR); the
+-paper's current tables are recomputed from logs and do not need these.
+-
+-| File | Install to |
+-| --- | --- |
+-| `models/x500_payload/` | `PX4-Autopilot/Tools/simulation/gz/models/` |
+-| `airframes/22000_gz_x500_payload` | `PX4-Autopilot/ROMFS/px4fmu_common/init.d-posix/airframes/`, and add `22000_gz_x500_payload` under `# [22000, 22999] Reserve for custom models` in that directory's `CMakeLists.txt` |
+-| `worlds/default_payload_*.sdf` | `PX4-Autopilot/Tools/simulation/gz/worlds/` (early tests, unreferenced) |
+-| `worlds/default.sdf.wind_plugins.patch` | `git apply` inside `Tools/simulation/gz` (C.3 ApplyLinkWrench world) |
+diff --git a/offboard_test_acados/px4_assets/legacy_masschanger/airframes/22000_gz_x500_payload b/offboard_test_acados/px4_assets/legacy_masschanger/airframes/22000_gz_x500_payload
+deleted file mode 100644
+index 6a6b8e8..0000000
+--- a/offboard_test_acados/px4_assets/legacy_masschanger/airframes/22000_gz_x500_payload
++++ /dev/null
+@@ -1,56 +0,0 @@
+-#!/bin/sh
+-#
+-# @name Gazebo x500 (payload pickup variant)
+-#
+-# @type Quadrotor
+-#
+-
+-# 跟 4001_gz_x500 完全一样的机身几何/混控参数(x500_payload 只是多挂了一个
+-# DetachableJoint 系统插件,机身/电机布局没变),纯新增文件,不修改
+-# 4001_gz_x500 本身。给 ros2_ws_HJH/src/offboard_test_acados 的"抓物块"
+-# 质量突变闭环测试用。
+-
+-. ${R}etc/init.d/rc.mc_defaults
+-
+-PX4_SIMULATOR=${PX4_SIMULATOR:=gz}
+-PX4_GZ_WORLD=${PX4_GZ_WORLD:=default}
+-PX4_SIM_MODEL=${PX4_SIM_MODEL:=x500_payload}
+-
+-param set-default SIM_GZ_EN 1
+-
+-param set-default CA_AIRFRAME 0
+-param set-default CA_ROTOR_COUNT 4
+-
+-param set-default CA_ROTOR0_PX 0.13
+-param set-default CA_ROTOR0_PY 0.22
+-param set-default CA_ROTOR0_KM  0.05
+-
+-param set-default CA_ROTOR1_PX -0.13
+-param set-default CA_ROTOR1_PY -0.20
+-param set-default CA_ROTOR1_KM  0.05
+-
+-param set-default CA_ROTOR2_PX 0.13
+-param set-default CA_ROTOR2_PY -0.22
+-param set-default CA_ROTOR2_KM -0.05
+-
+-param set-default CA_ROTOR3_PX -0.13
+-param set-default CA_ROTOR3_PY 0.20
+-param set-default CA_ROTOR3_KM -0.05
+-
+-param set-default SIM_GZ_EC_FUNC1 101
+-param set-default SIM_GZ_EC_FUNC2 102
+-param set-default SIM_GZ_EC_FUNC3 103
+-param set-default SIM_GZ_EC_FUNC4 104
+-
+-param set-default SIM_GZ_EC_MIN1 150
+-param set-default SIM_GZ_EC_MIN2 150
+-param set-default SIM_GZ_EC_MIN3 150
+-param set-default SIM_GZ_EC_MIN4 150
+-
+-param set-default SIM_GZ_EC_MAX1 1000
+-param set-default SIM_GZ_EC_MAX2 1000
+-param set-default SIM_GZ_EC_MAX3 1000
+-param set-default SIM_GZ_EC_MAX4 1000
+-
+-param set-default MPC_THR_HOVER 0.60
+-param set-default NAV_DLL_ACT 2
+diff --git a/offboard_test_acados/px4_assets/legacy_masschanger/models/x500_payload/model.config b/offboard_test_acados/px4_assets/legacy_masschanger/models/x500_payload/model.config
+deleted file mode 100644
+index c182844..0000000
+--- a/offboard_test_acados/px4_assets/legacy_masschanger/models/x500_payload/model.config
++++ /dev/null
+@@ -1,14 +0,0 @@
+-<?xml version="1.0"?>
+-<model>
+-  <name>x500_payload</name>
+-  <version>1.0</version>
+-  <sdf version="1.9">model.sdf</sdf>
+-  <description>
+-    x500 变体,跟现成的 x500 模型(Tools/simulation/gz/models/x500/)完全一样
+-    (复用 x500_base 的机身/电机,4 个 MulticopterMotorModel 插件原样照抄),
+-    唯一区别是多挂了一个 DetachableJoint 系统插件,用来在仿真中模拟"抓取
+-    物块"(质量突变),给 ros2_ws_HJH/src/offboard_test_acados 的 MHE+NMPC
+-    闭环自适应测试用。这是一个全新、独立的子目录,不修改 x500/ 或
+-    x500_base/ 里的任何现有文件。
+-  </description>
+-</model>
+diff --git a/offboard_test_acados/px4_assets/legacy_masschanger/models/x500_payload/model.sdf b/offboard_test_acados/px4_assets/legacy_masschanger/models/x500_payload/model.sdf
+deleted file mode 100644
+index 1d9c209..0000000
+--- a/offboard_test_acados/px4_assets/legacy_masschanger/models/x500_payload/model.sdf
++++ /dev/null
+@@ -1,115 +0,0 @@
+-<?xml version='1.0' encoding='UTF-8'?>
+-<!--
+-  跟 Tools/simulation/gz/models/x500/model.sdf 完全一样的机身/电机配置
+-  (同样 include x500_base + 4 个 MulticopterMotorModel 插件,数值原样照抄,
+-  不是重新调的)。
+-
+-  方案A(投放,不是抓取),第一版:payload 作为一个远处独立 spawn 的 dynamic
+-  模型,飞到起点后用 DetachableJoint 焊上去——实测这条路会让飞机剧烈姿态
+-  失控飞不起来,根因后来钉死了:只要 world 里存在一个独立于机体之外的
+-  dynamic 刚体,无论距离多远、是否经历下落瞬态,都会触发这个问题。
+-
+-  第二版:把 payload_link 直接定义在本模型内部、紧贴 base_link,靠
+-  DetachableJoint 在仿真启动时 attach、运行中 detach——结果发现
+-  DetachableJoint 的设计前提是连接两个独立的 model,parent/child 都在
+-  同一个 model 内(child_model 填自身名字)这种用法被插件静默忽略,约束
+-  从未真正建立。用带仿真时间戳的世界坐标时间序列实测验证:静止状态下
+-  payload_link 相对 base_link 的位置看似稳定不变,但那只是因为没有外力
+-  试图分开两者；一旦飞机起飞需要克服重力加速,base_link 和 payload_link
+-  立刻分道扬镳、方向相反地自由运动——约束从未传递过任何力。这也顺带说明
+-  了一个方法论教训:验证刚体约束是否生效,必须看受力时的响应,不能只看
+-  静态相对位置是否共位。
+-
+-  第三版(当前):彻底放弃"额外刚体 + 约束"这条路,改用一个自定义的
+-  gz-sim C++ 系统插件(见 ../../../../../../ros2_ws_HJH/src/
+-  offboard_test_acados/gz_plugins/mass_changer/),直接在仿真运行时
+-  用 EntityComponentManager::SetComponentData<components::Inertial>
+-  改写 base_link 自身的质量/惯量分量——物理引擎下一步就会用新值积分,
+-  IMU/推力的响应是真实的,质量从来没有以任何形式表现为一个独立刚体,
+-  彻底规避了前两版踩过的所有坑。插件在 Configure 阶段把 base_link 设成
+-  满载(2.0kg 空机 + 1.5kg payload,质心假设重合、不做平行轴偏移——
+-  MHE 目前只估质量这一个自由度,偏移只会引入无意义的力矩噪声),收到
+-  /payload/drop_mass 消息后切回空载,只切一次。质量做减法而不是加法——
+-  对 MHE 在线收敛能力的测试价值是等价的,阶跃方向不影响验证目的。
+--->
+-<sdf version='1.9'>
+-  <model name='x500_payload'>
+-    <include merge='true'>
+-      <uri>model://x500_base</uri>
+-    </include>
+-
+-    <plugin filename="mass_changer" name="mass_changer::MassChanger">
+-    </plugin>
+-    <plugin filename="gz-sim-multicopter-motor-model-system"
+-      name="gz::sim::systems::MulticopterMotorModel">
+-      <jointName>rotor_0_joint</jointName>
+-      <linkName>rotor_0</linkName>
+-      <turningDirection>ccw</turningDirection>
+-      <timeConstantUp>0.0125</timeConstantUp>
+-      <timeConstantDown>0.025</timeConstantDown>
+-      <maxRotVelocity>1000.0</maxRotVelocity>
+-      <motorConstant>8.54858e-06</motorConstant>
+-      <momentConstant>0.016</momentConstant>
+-      <commandSubTopic>command/motor_speed</commandSubTopic>
+-      <motorNumber>0</motorNumber>
+-      <rotorDragCoefficient>8.06428e-05</rotorDragCoefficient>
+-      <rollingMomentCoefficient>1e-06</rollingMomentCoefficient>
+-      <rotorVelocitySlowdownSim>10</rotorVelocitySlowdownSim>
+-      <motorType>velocity</motorType>
+-    </plugin>
+-    <plugin filename="gz-sim-multicopter-motor-model-system"
+-      name="gz::sim::systems::MulticopterMotorModel">
+-      <jointName>rotor_1_joint</jointName>
+-      <linkName>rotor_1</linkName>
+-      <turningDirection>ccw</turningDirection>
+-      <timeConstantUp>0.0125</timeConstantUp>
+-      <timeConstantDown>0.025</timeConstantDown>
+-      <maxRotVelocity>1000.0</maxRotVelocity>
+-      <motorConstant>8.54858e-06</motorConstant>
+-      <momentConstant>0.016</momentConstant>
+-      <commandSubTopic>command/motor_speed</commandSubTopic>
+-      <motorNumber>1</motorNumber>
+-      <rotorDragCoefficient>8.06428e-05</rotorDragCoefficient>
+-      <rollingMomentCoefficient>1e-06</rollingMomentCoefficient>
+-      <rotorVelocitySlowdownSim>10</rotorVelocitySlowdownSim>
+-      <motorType>velocity</motorType>
+-    </plugin>
+-    <plugin filename="gz-sim-multicopter-motor-model-system"
+-      name="gz::sim::systems::MulticopterMotorModel">
+-      <jointName>rotor_2_joint</jointName>
+-      <linkName>rotor_2</linkName>
+-      <turningDirection>cw</turningDirection>
+-      <timeConstantUp>0.0125</timeConstantUp>
+-      <timeConstantDown>0.025</timeConstantDown>
+-      <maxRotVelocity>1000.0</maxRotVelocity>
+-      <motorConstant>8.54858e-06</motorConstant>
+-      <momentConstant>0.016</momentConstant>
+-      <commandSubTopic>command/motor_speed</commandSubTopic>
+-      <motorNumber>2</motorNumber>
+-      <rotorDragCoefficient>8.06428e-05</rotorDragCoefficient>
+-      <rollingMomentCoefficient>1e-06</rollingMomentCoefficient>
+-      <rotorVelocitySlowdownSim>10</rotorVelocitySlowdownSim>
+-      <motorType>velocity</motorType>
+-    </plugin>
+-    <plugin filename="gz-sim-multicopter-motor-model-system"
+-      name="gz::sim::systems::MulticopterMotorModel">
+-      <jointName>rotor_3_joint</jointName>
+-      <linkName>rotor_3</linkName>
+-      <turningDirection>cw</turningDirection>
+-      <timeConstantUp>0.0125</timeConstantUp>
+-      <timeConstantDown>0.025</timeConstantDown>
+-      <maxRotVelocity>1000.0</maxRotVelocity>
+-      <motorConstant>8.54858e-06</motorConstant>
+-      <momentConstant>0.016</momentConstant>
+-      <commandSubTopic>command/motor_speed</commandSubTopic>
+-      <motorNumber>3</motorNumber>
+-      <rotorDragCoefficient>8.06428e-05</rotorDragCoefficient>
+-      <rollingMomentCoefficient>1e-06</rollingMomentCoefficient>
+-      <rotorVelocitySlowdownSim>10</rotorVelocitySlowdownSim>
+-      <motorType>velocity</motorType>
+-    </plugin>
+-    <plugin filename="MotorFailurePlugin"
+-      name="gz::sim::systems::MotorFailureSystem">
+-    </plugin>
+-  </model>
+-</sdf>
+diff --git a/offboard_test_acados/px4_assets/legacy_masschanger/worlds/default.sdf.wind_plugins.patch b/offboard_test_acados/px4_assets/legacy_masschanger/worlds/default.sdf.wind_plugins.patch
+deleted file mode 100644
+index 39b92f7..0000000
+--- a/offboard_test_acados/px4_assets/legacy_masschanger/worlds/default.sdf.wind_plugins.patch
++++ /dev/null
+@@ -1,30 +0,0 @@
+-diff --git a/worlds/default.sdf b/worlds/default.sdf
+-index 584b51f..e2d20e2 100644
+---- a/worlds/default.sdf
+-+++ b/worlds/default.sdf
+-@@ -1,6 +1,25 @@
+- ﻿<?xml version="1.0" encoding="UTF-8"?>
+- <sdf version="1.9">
+-   <world name="default">
+-+    <!--
+-+      C.3 风扰消融(2026-07-23):为了用 topic 施加风扰(免编译、幅度脚本可扫),
+-+      加载 ApplyLinkWrench 系统 → /world/default/wrench[/persistent|/clear]。
+-+      重要:gz-sim 里只要 world SDF 写了任何 <plugin>,就不再自动加载默认系统
+-+      插件集,所以必须把 Physics/UserCommands/SceneBroadcaster/传感器系统全部
+-+      显式写上(照搬 gripper_test.sdf 已验证的组合),漏一个整个仿真静默不工作。
+-+    -->
+-+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+-+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+-+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+-+    <plugin filename="gz-sim-contact-system" name="gz::sim::systems::Contact"/>
+-+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+-+    <plugin filename="gz-sim-air-pressure-system" name="gz::sim::systems::AirPressure"/>
+-+    <plugin filename="gz-sim-air-speed-system" name="gz::sim::systems::AirSpeed"/>
+-+    <plugin filename="gz-sim-apply-link-wrench-system" name="gz::sim::systems::ApplyLinkWrench"/>
+-+    <plugin filename="gz-sim-navsat-system" name="gz::sim::systems::NavSat"/>
+-+    <plugin filename="gz-sim-magnetometer-system" name="gz::sim::systems::Magnetometer"/>
+-+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+-+    </plugin>
+-     <physics type="ode">
+-       <max_step_size>0.004</max_step_size>
+-       <real_time_factor>1.0</real_time_factor>
+diff --git a/offboard_test_acados/px4_assets/legacy_masschanger/worlds/default_payload_stand.sdf b/offboard_test_acados/px4_assets/legacy_masschanger/worlds/default_payload_stand.sdf
+deleted file mode 100644
+index b5f4765..0000000
+--- a/offboard_test_acados/px4_assets/legacy_masschanger/worlds/default_payload_stand.sdf
++++ /dev/null
+@@ -1,165 +0,0 @@
+-﻿<?xml version="1.0" encoding="UTF-8"?>
+-<sdf version="1.9">
+-  <world name="default_payload_stand">
+-    <physics type="ode">
+-      <max_step_size>0.004</max_step_size>
+-      <real_time_factor>1.0</real_time_factor>
+-      <real_time_update_rate>250</real_time_update_rate>
+-    </physics>
+-    <gravity>0 0 -9.8</gravity>
+-    <magnetic_field>6e-06 2.3e-05 -4.2e-05</magnetic_field>
+-    <atmosphere type="adiabatic"/>
+-    <scene>
+-      <grid>false</grid>
+-      <ambient>0.4 0.4 0.4 1</ambient>
+-      <background>0.7 0.7 0.7 1</background>
+-      <shadows>true</shadows>
+-    </scene>
+-    <model name="ground_plane">
+-      <static>true</static>
+-      <link name="link">
+-        <collision name="collision">
+-          <geometry>
+-            <plane>
+-              <normal>0 0 1</normal>
+-              <size>1 1</size>
+-            </plane>
+-          </geometry>
+-          <surface>
+-            <friction>
+-              <ode/>
+-            </friction>
+-            <bounce/>
+-            <contact/>
+-          </surface>
+-        </collision>
+-        <visual name="visual">
+-          <geometry>
+-            <plane>
+-              <normal>0 0 1</normal>
+-              <size>500 500</size>
+-            </plane>
+-          </geometry>
+-          <material>
+-            <ambient>0.8 0.8 0.8 1</ambient>
+-            <diffuse>0.8 0.8 0.8 1</diffuse>
+-            <specular>0.8 0.8 0.8 1</specular>
+-          </material>
+-        </visual>
+-        <pose>0 0 0 0 -0 0</pose>
+-        <inertial>
+-          <pose>0 0 0 0 -0 0</pose>
+-          <mass>1</mass>
+-          <inertia>
+-            <ixx>1</ixx>
+-            <ixy>0</ixy>
+-            <ixz>0</ixz>
+-            <iyy>1</iyy>
+-            <iyz>0</iyz>
+-            <izz>1</izz>
+-          </inertia>
+-        </inertial>
+-        <enable_wind>false</enable_wind>
+-      </link>
+-      <pose>0 0 0 0 -0 0</pose>
+-      <self_collide>false</self_collide>
+-    </model>
+-    <light name="sunUTC" type="directional">
+-      <pose>0 0 500 0 -0 0</pose>
+-      <cast_shadows>true</cast_shadows>
+-      <intensity>1</intensity>
+-      <direction>0.001 0.625 -0.78</direction>
+-      <diffuse>0.904 0.904 0.904 1</diffuse>
+-      <specular>0.271 0.271 0.271 1</specular>
+-      <attenuation>
+-        <range>2000</range>
+-        <linear>0</linear>
+-        <constant>1</constant>
+-        <quadratic>0</quadratic>
+-      </attenuation>
+-      <spot>
+-        <inner_angle>0</inner_angle>
+-        <outer_angle>0</outer_angle>
+-        <falloff>0</falloff>
+-      </spot>
+-    </light>
+-    <spherical_coordinates>
+-      <surface_model>EARTH_WGS84</surface_model>
+-      <world_frame_orientation>ENU</world_frame_orientation>
+-      <latitude_deg>47.397971057728974</latitude_deg>
+-      <longitude_deg> 8.546163739800146</longitude_deg>
+-      <elevation>0</elevation>
+-    </spherical_coordinates>
+-
+-    <!-- 诊断实验专用:跟 default.sdf 唯一的差异就是这个模型,静态写在 world
+-         里、随 world 一起加载,不走运行时 gz service /world/.../create 动态
+-         spawn。目的是二分排查 payload_stand 导致飞机震荡的根因到底是
+-         "payload_stand.sdf 模型内容本身"还是"运行时动态 create 这个操作
+-         本身"——如果用这种方式加载问题消失,就指向后者。 -->
+-    <model name="payload_stand">
+-      <static>true</static>
+-      <pose>2.0 2.0 2.375 0 0 0</pose>
+-      <link name="stand_link">
+-        <visual name="visual">
+-          <geometry>
+-            <box>
+-              <size>0.3 0.3 0.5</size>
+-            </box>
+-          </geometry>
+-          <material>
+-            <ambient>0.4 0.4 0.4 1</ambient>
+-            <diffuse>0.4 0.4 0.4 1</diffuse>
+-          </material>
+-        </visual>
+-        <collision name="collision">
+-          <geometry>
+-            <box>
+-              <size>0.3 0.3 0.5</size>
+-            </box>
+-          </geometry>
+-        </collision>
+-      </link>
+-    </model>
+-
+-    <!-- 诊断实验专用(下一步):跟上面 payload_stand 一样静态写在 world 里,
+-         但这个模型本身不是 static——它要靠 DetachableJoint 真正焊到飞机
+-         base_link 上,质量才会算进飞控动力学,所以必须保留为 dynamic body。
+-         验证目标是:dynamic body 随 world 一起加载(而不是运行时动态
+-         create)是否也能避免之前确认的震荡问题。位置跟 payload.sdf 一致,
+-         半块边长落在 payload_stand 顶面上,靠重力+碰撞自然落定。 -->
+-    <model name="payload">
+-      <pose>2.0 2.0 2.7 0 0 0</pose>
+-      <link name="payload_link">
+-        <inertial>
+-          <mass>1.5</mass>
+-          <inertia>
+-            <ixx>0.005625</ixx>
+-            <ixy>0</ixy>
+-            <ixz>0</ixz>
+-            <iyy>0.005625</iyy>
+-            <iyz>0</iyz>
+-            <izz>0.005625</izz>
+-          </inertia>
+-        </inertial>
+-        <visual name="visual">
+-          <geometry>
+-            <box>
+-              <size>0.15 0.15 0.15</size>
+-            </box>
+-          </geometry>
+-          <material>
+-            <ambient>0.8 0.2 0.1 1</ambient>
+-            <diffuse>0.8 0.2 0.1 1</diffuse>
+-          </material>
+-        </visual>
+-        <collision name="collision">
+-          <geometry>
+-            <box>
+-              <size>0.15 0.15 0.15</size>
+-            </box>
+-          </geometry>
+-        </collision>
+-      </link>
+-    </model>
+-  </world>
+-</sdf>
+diff --git a/offboard_test_acados/px4_assets/legacy_masschanger/worlds/default_payload_test1.sdf b/offboard_test_acados/px4_assets/legacy_masschanger/worlds/default_payload_test1.sdf
+deleted file mode 100644
+index 7a9aa44..0000000
+--- a/offboard_test_acados/px4_assets/legacy_masschanger/worlds/default_payload_test1.sdf
++++ /dev/null
+@@ -1,169 +0,0 @@
+-﻿<?xml version="1.0" encoding="UTF-8"?>
+-<sdf version="1.9">
+-  <world name="default_payload_test1">
+-    <physics type="ode">
+-      <max_step_size>0.004</max_step_size>
+-      <real_time_factor>1.0</real_time_factor>
+-      <real_time_update_rate>250</real_time_update_rate>
+-    </physics>
+-    <gravity>0 0 -9.8</gravity>
+-    <magnetic_field>6e-06 2.3e-05 -4.2e-05</magnetic_field>
+-    <atmosphere type="adiabatic"/>
+-    <scene>
+-      <grid>false</grid>
+-      <ambient>0.4 0.4 0.4 1</ambient>
+-      <background>0.7 0.7 0.7 1</background>
+-      <shadows>true</shadows>
+-    </scene>
+-    <model name="ground_plane">
+-      <static>true</static>
+-      <link name="link">
+-        <collision name="collision">
+-          <geometry>
+-            <plane>
+-              <normal>0 0 1</normal>
+-              <size>1 1</size>
+-            </plane>
+-          </geometry>
+-          <surface>
+-            <friction>
+-              <ode/>
+-            </friction>
+-            <bounce/>
+-            <contact/>
+-          </surface>
+-        </collision>
+-        <visual name="visual">
+-          <geometry>
+-            <plane>
+-              <normal>0 0 1</normal>
+-              <size>500 500</size>
+-            </plane>
+-          </geometry>
+-          <material>
+-            <ambient>0.8 0.8 0.8 1</ambient>
+-            <diffuse>0.8 0.8 0.8 1</diffuse>
+-            <specular>0.8 0.8 0.8 1</specular>
+-          </material>
+-        </visual>
+-        <pose>0 0 0 0 -0 0</pose>
+-        <inertial>
+-          <pose>0 0 0 0 -0 0</pose>
+-          <mass>1</mass>
+-          <inertia>
+-            <ixx>1</ixx>
+-            <ixy>0</ixy>
+-            <ixz>0</ixz>
+-            <iyy>1</iyy>
+-            <iyz>0</iyz>
+-            <izz>1</izz>
+-          </inertia>
+-        </inertial>
+-        <enable_wind>false</enable_wind>
+-      </link>
+-      <pose>0 0 0 0 -0 0</pose>
+-      <self_collide>false</self_collide>
+-    </model>
+-    <light name="sunUTC" type="directional">
+-      <pose>0 0 500 0 -0 0</pose>
+-      <cast_shadows>true</cast_shadows>
+-      <intensity>1</intensity>
+-      <direction>0.001 0.625 -0.78</direction>
+-      <diffuse>0.904 0.904 0.904 1</diffuse>
+-      <specular>0.271 0.271 0.271 1</specular>
+-      <attenuation>
+-        <range>2000</range>
+-        <linear>0</linear>
+-        <constant>1</constant>
+-        <quadratic>0</quadratic>
+-      </attenuation>
+-      <spot>
+-        <inner_angle>0</inner_angle>
+-        <outer_angle>0</outer_angle>
+-        <falloff>0</falloff>
+-      </spot>
+-    </light>
+-    <spherical_coordinates>
+-      <surface_model>EARTH_WGS84</surface_model>
+-      <world_frame_orientation>ENU</world_frame_orientation>
+-      <latitude_deg>47.397971057728974</latitude_deg>
+-      <longitude_deg> 8.546163739800146</longitude_deg>
+-      <elevation>0</elevation>
+-    </spherical_coordinates>
+-
+-    <!-- 诊断实验专用:跟 default.sdf 唯一的差异就是这个模型,静态写在 world
+-         里、随 world 一起加载,不走运行时 gz service /world/.../create 动态
+-         spawn。目的是二分排查 payload_stand 导致飞机震荡的根因到底是
+-         "payload_stand.sdf 模型内容本身"还是"运行时动态 create 这个操作
+-         本身"——如果用这种方式加载问题消失,就指向后者。 -->
+-    <model name="payload_stand">
+-      <static>true</static>
+-      <pose>2.0 2.0 2.375 0 0 0</pose>
+-      <link name="stand_link">
+-        <visual name="visual">
+-          <geometry>
+-            <box>
+-              <size>0.3 0.3 0.5</size>
+-            </box>
+-          </geometry>
+-          <material>
+-            <ambient>0.4 0.4 0.4 1</ambient>
+-            <diffuse>0.4 0.4 0.4 1</diffuse>
+-          </material>
+-        </visual>
+-        <collision name="collision">
+-          <geometry>
+-            <box>
+-              <size>0.3 0.3 0.5</size>
+-            </box>
+-          </geometry>
+-        </collision>
+-      </link>
+-    </model>
+-
+-    <!-- 诊断实验专用(下一步):跟上面 payload_stand 一样静态写在 world 里,
+-         但这个模型本身不是 static——它要靠 DetachableJoint 真正焊到飞机
+-         base_link 上,质量才会算进飞控动力学,所以必须保留为 dynamic body。
+-         验证目标是:dynamic body 随 world 一起加载(而不是运行时动态
+-         create)是否也能避免之前确认的震荡问题。位置跟 payload.sdf 一致,
+-         半块边长落在 payload_stand 顶面上,靠重力+碰撞自然落定。 -->
+-    <model name="payload">
+-      <!-- 测试1专用:pose 直接设为上一轮实测落定后的姿态(2.000710 2.000600
+-           2.700470, rpy 0.000001 -0.006289 -0.004026),消除"从悬空位置自由
+-           下落到接触平衡"这个物理沉降瞬态,目的是排查是否就是这个瞬态
+-           干扰了 EKF2 收敛窗口。 -->
+-      <pose>2.000710 2.000600 2.700470 0.000001 -0.006289 -0.004026</pose>
+-      <link name="payload_link">
+-        <inertial>
+-          <mass>1.5</mass>
+-          <inertia>
+-            <ixx>0.005625</ixx>
+-            <ixy>0</ixy>
+-            <ixz>0</ixz>
+-            <iyy>0.005625</iyy>
+-            <iyz>0</iyz>
+-            <izz>0.005625</izz>
+-          </inertia>
+-        </inertial>
+-        <visual name="visual">
+-          <geometry>
+-            <box>
+-              <size>0.15 0.15 0.15</size>
+-            </box>
+-          </geometry>
+-          <material>
+-            <ambient>0.8 0.2 0.1 1</ambient>
+-            <diffuse>0.8 0.2 0.1 1</diffuse>
+-          </material>
+-        </visual>
+-        <collision name="collision">
+-          <geometry>
+-            <box>
+-              <size>0.15 0.15 0.15</size>
+-            </box>
+-          </geometry>
+-        </collision>
+-      </link>
+-    </model>
+-  </world>
+-</sdf>
+diff --git a/offboard_test_acados/px4_assets/legacy_masschanger/worlds/default_payload_test2.sdf b/offboard_test_acados/px4_assets/legacy_masschanger/worlds/default_payload_test2.sdf
+deleted file mode 100644
+index 81ab9d0..0000000
+--- a/offboard_test_acados/px4_assets/legacy_masschanger/worlds/default_payload_test2.sdf
++++ /dev/null
+@@ -1,169 +0,0 @@
+-﻿<?xml version="1.0" encoding="UTF-8"?>
+-<sdf version="1.9">
+-  <world name="default_payload_test2">
+-    <physics type="ode">
+-      <max_step_size>0.004</max_step_size>
+-      <real_time_factor>1.0</real_time_factor>
+-      <real_time_update_rate>250</real_time_update_rate>
+-    </physics>
+-    <gravity>0 0 -9.8</gravity>
+-    <magnetic_field>6e-06 2.3e-05 -4.2e-05</magnetic_field>
+-    <atmosphere type="adiabatic"/>
+-    <scene>
+-      <grid>false</grid>
+-      <ambient>0.4 0.4 0.4 1</ambient>
+-      <background>0.7 0.7 0.7 1</background>
+-      <shadows>true</shadows>
+-    </scene>
+-    <model name="ground_plane">
+-      <static>true</static>
+-      <link name="link">
+-        <collision name="collision">
+-          <geometry>
+-            <plane>
+-              <normal>0 0 1</normal>
+-              <size>1 1</size>
+-            </plane>
+-          </geometry>
+-          <surface>
+-            <friction>
+-              <ode/>
+-            </friction>
+-            <bounce/>
+-            <contact/>
+-          </surface>
+-        </collision>
+-        <visual name="visual">
+-          <geometry>
+-            <plane>
+-              <normal>0 0 1</normal>
+-              <size>500 500</size>
+-            </plane>
+-          </geometry>
+-          <material>
+-            <ambient>0.8 0.8 0.8 1</ambient>
+-            <diffuse>0.8 0.8 0.8 1</diffuse>
+-            <specular>0.8 0.8 0.8 1</specular>
+-          </material>
+-        </visual>
+-        <pose>0 0 0 0 -0 0</pose>
+-        <inertial>
+-          <pose>0 0 0 0 -0 0</pose>
+-          <mass>1</mass>
+-          <inertia>
+-            <ixx>1</ixx>
+-            <ixy>0</ixy>
+-            <ixz>0</ixz>
+-            <iyy>1</iyy>
+-            <iyz>0</iyz>
+-            <izz>1</izz>
+-          </inertia>
+-        </inertial>
+-        <enable_wind>false</enable_wind>
+-      </link>
+-      <pose>0 0 0 0 -0 0</pose>
+-      <self_collide>false</self_collide>
+-    </model>
+-    <light name="sunUTC" type="directional">
+-      <pose>0 0 500 0 -0 0</pose>
+-      <cast_shadows>true</cast_shadows>
+-      <intensity>1</intensity>
+-      <direction>0.001 0.625 -0.78</direction>
+-      <diffuse>0.904 0.904 0.904 1</diffuse>
+-      <specular>0.271 0.271 0.271 1</specular>
+-      <attenuation>
+-        <range>2000</range>
+-        <linear>0</linear>
+-        <constant>1</constant>
+-        <quadratic>0</quadratic>
+-      </attenuation>
+-      <spot>
+-        <inner_angle>0</inner_angle>
+-        <outer_angle>0</outer_angle>
+-        <falloff>0</falloff>
+-      </spot>
+-    </light>
+-    <spherical_coordinates>
+-      <surface_model>EARTH_WGS84</surface_model>
+-      <world_frame_orientation>ENU</world_frame_orientation>
+-      <latitude_deg>47.397971057728974</latitude_deg>
+-      <longitude_deg> 8.546163739800146</longitude_deg>
+-      <elevation>0</elevation>
+-    </spherical_coordinates>
+-
+-    <!-- 诊断实验专用:跟 default.sdf 唯一的差异就是这个模型,静态写在 world
+-         里、随 world 一起加载,不走运行时 gz service /world/.../create 动态
+-         spawn。目的是二分排查 payload_stand 导致飞机震荡的根因到底是
+-         "payload_stand.sdf 模型内容本身"还是"运行时动态 create 这个操作
+-         本身"——如果用这种方式加载问题消失,就指向后者。 -->
+-    <model name="payload_stand">
+-      <static>true</static>
+-      <pose>2.0 2.0 2.375 0 0 0</pose>
+-      <link name="stand_link">
+-        <visual name="visual">
+-          <geometry>
+-            <box>
+-              <size>0.3 0.3 0.5</size>
+-            </box>
+-          </geometry>
+-          <material>
+-            <ambient>0.4 0.4 0.4 1</ambient>
+-            <diffuse>0.4 0.4 0.4 1</diffuse>
+-          </material>
+-        </visual>
+-        <collision name="collision">
+-          <geometry>
+-            <box>
+-              <size>0.3 0.3 0.5</size>
+-            </box>
+-          </geometry>
+-        </collision>
+-      </link>
+-    </model>
+-
+-    <!-- 诊断实验专用(下一步):跟上面 payload_stand 一样静态写在 world 里,
+-         但这个模型本身不是 static——它要靠 DetachableJoint 真正焊到飞机
+-         base_link 上,质量才会算进飞控动力学,所以必须保留为 dynamic body。
+-         验证目标是:dynamic body 随 world 一起加载(而不是运行时动态
+-         create)是否也能避免之前确认的震荡问题。位置跟 payload.sdf 一致,
+-         半块边长落在 payload_stand 顶面上,靠重力+碰撞自然落定。 -->
+-      <!-- 测试2专用:payload 挪到 50m 外,直接静止在地面上(box 半边长
+-           0.075m,贴着 ground_plane,不需要 stand 支撑),其余完全不变。
+-           目的是排查问题是否跟"离飞机距离/碰撞体重叠"有关,还是跟距离
+-           无关(指向全局物理求解器负载/lockstep 时序)。 -->
+-    <model name="payload">
+-      <pose>50.0 0.0 0.075 0 0 0</pose>
+-      <link name="payload_link">
+-        <inertial>
+-          <mass>1.5</mass>
+-          <inertia>
+-            <ixx>0.005625</ixx>
+-            <ixy>0</ixy>
+-            <ixz>0</ixz>
+-            <iyy>0.005625</iyy>
+-            <iyz>0</iyz>
+-            <izz>0.005625</izz>
+-          </inertia>
+-        </inertial>
+-        <visual name="visual">
+-          <geometry>
+-            <box>
+-              <size>0.15 0.15 0.15</size>
+-            </box>
+-          </geometry>
+-          <material>
+-            <ambient>0.8 0.2 0.1 1</ambient>
+-            <diffuse>0.8 0.2 0.1 1</diffuse>
+-          </material>
+-        </visual>
+-        <collision name="collision">
+-          <geometry>
+-            <box>
+-              <size>0.15 0.15 0.15</size>
+-            </box>
+-          </geometry>
+-        </collision>
+-      </link>
+-    </model>
+-  </world>
+-</sdf>
+diff --git a/offboard_test_acados/test/test_attach_j_bootstrap_standalone.py b/offboard_test_acados/test/test_attach_j_bootstrap_standalone.py
+index 3bfe906..78d3a20 100644
+--- a/offboard_test_acados/test/test_attach_j_bootstrap_standalone.py
++++ b/offboard_test_acados/test/test_attach_j_bootstrap_standalone.py
+@@ -57,6 +57,13 @@ class _Stub:
+         self.tau_lumped_enable = False
+         self.gripper_mode = False
+         self.drop_pending_confirmation = False
++        # omega_scale 的 dJ 下界(2026-09-22 为 L1 臂补的内环补偿):主线默认
++        # 0.0 = 逐位 no-op,本文件测的就是主线路径。
++        self._omega_scale_dj_floor = 0.0
++        # c_xy 冻结默认关(2026-09-17 翻回),_apply_cxy_freeze 首行即直通。
++        self.cxy_freeze_in_maneuver = False
++        # _accept_empty 里唯一没有 getattr 兜底的位,产品默认 False(见 624 行)。
++        self.payload_unresolved = False
+ 
+     def get_logger(self):
+         class _Logger:
+@@ -82,6 +89,16 @@ _update = an.AcadosNMPCNode._update_continuous_payload_model
+ _Stub._payload_estimate_is_fresh = an.AcadosNMPCNode._payload_estimate_is_fresh
+ _confirm_empty = an.AcadosNMPCNode._confirm_no_payload_if_persistent
+ _update_omega = an.AcadosNMPCNode._update_omega_scale
++# 非被测对象,但都在被测路径上被调用,绑真方法即可:
++# _apply_cxy_freeze 在 cxy_freeze_in_maneuver=False 时首行直通;
++# _check_drop_unresolved 首行 getattr('grip_drop_pending', False) 后即 return。
++_Stub._apply_cxy_freeze = an.AcadosNMPCNode._apply_cxy_freeze
++_Stub._check_drop_unresolved = an.AcadosNMPCNode._check_drop_unresolved
++# 清除逻辑门控:内部 getattr(release_baseline,'P') 兜底 → 主线恒 True。
++_Stub._confidence_accept_allowed = an.AcadosNMPCNode._confidence_accept_allowed
++# accept 路径终点:本文件 test_unhealthy_frame_breaks_empty_confidence_hold
++# 的第二段就是要走到这里 latch 空载,必须是真方法。
++_Stub._accept_empty = an.AcadosNMPCNode._accept_empty
+ 
+ 
+ def test_bootstrap_uses_03kg_reduced_mass_inertia_only():
+diff --git a/offboard_test_acados/test/test_delayed_detach_standalone.py b/offboard_test_acados/test/test_delayed_detach_standalone.py
+index 39dac3d..29d2f71 100644
+--- a/offboard_test_acados/test/test_delayed_detach_standalone.py
++++ b/offboard_test_acados/test/test_delayed_detach_standalone.py
+@@ -19,6 +19,9 @@ class _Stub:
+ 
+     def __init__(self, delay):
+         self.detach_delay_sec = delay
++        # jam 注入(2026-09-15)与 detach_delay_sec>0 在产品里互斥(见节点 135 行
++        # 的 raise),本文件测的是 delay 路径,只能是 False。
++        self.detach_jam = False
+         self.attached = {'box'}
+         self._pending_detach = {}
+         self.sent = []
+diff --git a/offboard_test_acados/test/test_mhe_cold_start_standalone.py b/offboard_test_acados/test/test_mhe_cold_start_standalone.py
+index 08cb936..182dc52 100644
+--- a/offboard_test_acados/test/test_mhe_cold_start_standalone.py
++++ b/offboard_test_acados/test/test_mhe_cold_start_standalone.py
+@@ -68,6 +68,9 @@ class _Stub:
+ _gate = mn.MHENode._pre_offboard_gate_ok
+ _conv = mn.MHENode._update_pre_offboard_convergence
+ _pub = mn.MHENode._mass_publish_allowed
++# 窗口平衡种子(2026-09-15 默认开):stub 没有 u_buf/y_buf,真方法首行即
++# 返回 None,调用方照常回退到瞬时 T/g —— 正是本文件要测的兜底路径。
++_Stub._window_balance_mass = mn.MHENode._window_balance_mass
+ 
+ 
+ def test_gate_rejects_on_ground():
+diff --git a/offboard_test_acados/test/test_resid_confirm_switch_standalone.py b/offboard_test_acados/test/test_resid_confirm_switch_standalone.py
+index cb0cd98..370d393 100644
+--- a/offboard_test_acados/test/test_resid_confirm_switch_standalone.py
++++ b/offboard_test_acados/test/test_resid_confirm_switch_standalone.py
+@@ -28,7 +28,9 @@ def test_off_drop_silent():
+     s = _S(resid_confirm_enable=False, resid_release_geom=True)
+     _step(s, 23.2, 17.6)                      # -5.6N,远超 1.5N 阈值
+     assert not s.scheduler.notified, '关闭后不应降权'
+-    assert not hasattr(s, '_residual_drop_evidence_until'), '关闭后不应投释放票'
++    # 原判法是 not hasattr(...):它假设 _S 不预设该字段,而产品初值其实是
++    # -1.0(mhe_node.py:846)。_S 对齐产品补上初值后 hasattr 恒真,故改数值判据。
++    assert s._residual_drop_evidence_until < 0.0, '关闭后不应投释放票'
+     assert s._resid_baseline is None, '关闭后慢基线不应被播种'
+     assert not any('self-detected' in m for m in s.logs)
+     print('[1] 关:DROP 台阶零降权/零投票 OK')
+diff --git a/offboard_test_acados/test/test_resid_geom_release_standalone.py b/offboard_test_acados/test/test_resid_geom_release_standalone.py
+index 7cc34fc..918ab3a 100644
+--- a/offboard_test_acados/test/test_resid_geom_release_standalone.py
++++ b/offboard_test_acados/test/test_resid_geom_release_standalone.py
+@@ -32,6 +32,9 @@ class _S:
+         self._resid_settled = False
+         self._resid_stable = 0
+         self.frames = 0
++        # 残差是**边沿**事件,检出后作为释放证据保持一段时间(产品默认 3.0s)。
++        self.residual_evidence_hold_sec = 3.0
++        self._residual_drop_evidence_until = -1.0   # 产品初值,见 mhe_node.py:846
+         self.scheduler = _Sched()
+         self._payload_attached = True
+         # 注:MHE 侧棘轮 _m_p_hat_ratchet 已随 2026-08-26 去先验改造移除,
+@@ -96,6 +99,19 @@ class _S:
+             def warn(self, m): stub.logs.append(m)
+         return _L()
+ 
++    def get_clock(self):
++        """证据时效要用到墙钟;跟着 frames 走,与测试推进帧的方式一致。"""
++        stub = self
++        class _Now:
++            @property
++            def nanoseconds(self):
++                return int(stub.frames * mhe_p.dt * 1e9)
++        class _Clock:
++            @staticmethod
++            def now():
++                return _Now()
++        return _Clock()
++
+ 
+ _det = mn.MHENode._residual_detect
+ 
+@@ -107,17 +123,24 @@ def _warm(s, T=23.2, n=8):
+     assert s._resid_settled, '基线应已预热'
+ 
+ 
+-def test_drop_releases_geometry():
+-    """T_phys 台阶式下降(23.2→20.1,载荷没了)→ 自检测确认 → 释放几何。"""
++def test_drop_casts_release_vote():
++    """T_phys 台阶式下降(23.2→20.1,载荷没了)→ 自检测确认 → **投出释放证据**。
++
++    2026-09-05 起残差不再单通道释放几何,只作为"动态证据"投进
++    release_decision(见 mhe_node 该分支注释:单通道裸奔正是上一版的问题)。
++    所以这里断言的是证据被投出、而几何**保持不动**——后者原本是本用例的
++    失败条件,现在是它要守的规则。真正的释放由 release_decision 三源合议。
++    """
+     s = _S(); _warm(s)
+     for _ in range(4):
+         s.thrust_phys = 20.1; s.frames += 1; _det(s)
+     assert s.scheduler.notified, '应当自检测到事件'
+-    assert s._payload_attached is False, '未释放 _payload_attached'
+-    assert s.attach_offset is None, '未丢弃 attach 几何'
++    assert s._residual_drop_evidence_until > 0.0, '未投出释放证据'
++    assert s._payload_attached is True, '残差不得单通道释放几何(2026-09-05)'
++    assert s.attach_offset is not None, '几何须保持到合议放行'
+     assert any('DROP' in m for m in s.logs), '日志未标出方向'
+-    assert any('自主释放载荷几何' in m for m in s.logs)
+-    print('[1] 推力下降 → 自主释放几何 OK')
++    assert any('作为释放证据保持' in m for m in s.logs)
++    print('[1] 推力下降 → 投出释放证据、几何不动 OK')
+ 
+ 
+ def test_attach_does_not_release():
+@@ -141,7 +164,10 @@ def test_switch_off_keeps_legacy():
+         s.thrust_phys = 20.1; s.frames += 1; _det(s)
+     assert s.scheduler.notified, '降权链路仍应触发'
+     assert s._payload_attached is True, '开关关闭时不该动几何'
+-    print('[3] 开关关闭 = legacy(只降权) OK')
++    # _payload_attached 自 2026-09-05 起两档都保持 True,单靠它区分不了开关;
++    # 能区分的是"有没有投证据"。
++    assert s._residual_drop_evidence_until < 0.0, '开关关闭时不该投释放证据'
++    print('[3] 开关关闭 = legacy(只降权、不投票) OK')
+ 
+ 
+ def test_no_release_when_already_empty():
+@@ -151,7 +177,10 @@ def test_no_release_when_already_empty():
+     _warm(s, T=20.3)
+     for _ in range(4):
+         s.thrust_phys = 17.0; s.frames += 1; _det(s)
+-    assert not any('自主释放载荷几何' in m for m in s.logs), '空载不该再释放一次'
++    # 原断言找的是 '自主释放载荷几何' 日志,该文本已随 2026-09-05 改造去掉,
++    # 恒真 = 守不住任何东西。空载时 _load_armed=False,分支进不去,
++    # 判据换成"没有投出证据"。
++    assert s._residual_drop_evidence_until < 0.0, '空载不该再投一次释放证据'
+     print('[4] 空载幂等 OK')
+ 
+ 
+diff --git a/offboard_test_acados/test/test_s_collapse_release_standalone.py b/offboard_test_acados/test/test_s_collapse_release_standalone.py
+index 433698c..fd9f3ff 100644
+--- a/offboard_test_acados/test/test_s_collapse_release_standalone.py
++++ b/offboard_test_acados/test/test_s_collapse_release_standalone.py
+@@ -78,6 +78,9 @@ class _Stub:
+         self._c_xy_mass_armed = False
+         self._c_xy_mass_high = 0
+         self._c_xy_mass_low = 0
++        # 清除逻辑基线:默认主线 P(不抑制 eventless 放行)。release_baseline
++        # 在 _eventless_release_suppressed 里有 getattr 兜底,这个位没有,必须显式给。
++        self.release_arm_on_command = False
+         # drop 侧塌陷判据(被测对象)
+         self.s_release_ratio = ratio
+         self.s_release_persist = persist
+diff --git a/scripts/gripper/run_gripper_headless.sh b/scripts/gripper/run_gripper_headless.sh
+index 446572f..0b3f9c1 100755
+--- a/scripts/gripper/run_gripper_headless.sh
++++ b/scripts/gripper/run_gripper_headless.sh
+@@ -94,6 +94,68 @@ BOX_I=$(python3 -c "print(f'{$GRIP_PAYLOAD_KG * 0.00375:.6f}')")
+ #   3→8s)并作为独立 A/B 跑够样本,不要顺手塞进别的批次。
+ GRIP_ATTACH_TOL="${GRIP_ATTACH_TOL:-0.03}"
+ R_XY=$(python3 -c "print(f'{$GRIP_ECC_Y + $GRIP_ATTACH_TOL:.3f}')")
++
++# ── 内部质心偏移(变体 A, 2026-09-24)────────────────────────────────────────
++# GRIP_BOX_COM_Y != 0 时,box 的**几何中心仍在抓取点正下方**(配 GRIP_ECC_Y=0),
++# 但质心在箱子内部偏 y。用途:导师 09-24 问"现实中抓取为什么会有质心偏移"。
++# 现有所有批次的偏心都是**抓取位置**偏了,原则上测一下抓在哪就能知道 c;
++# 内部偏移则**任何对抓取点的测量都给出 c=0**,而飞机仍需常值配平力矩 ——
++# 这是"只能估、测不到"的干净证据,也是包裹内容物不居中的物理实况。
++# 真值:s_true = m_P * (attach_offset_y + GRIP_BOX_COM_Y),两项都精确已知。
++GRIP_BOX_COM_Y="${GRIP_BOX_COM_Y:-0.0}"
++# 【2026-09-24】预装载:扁平箱子直接放在无人机出生点正下方,起飞前就吸附,彻底
++# 没有接近/下降/抓取三段衔接。代价是吊臂 ~0.5m -> ~0.2m,kappa 5.2 -> 1.5
++# (r_z² 占 dJ 的 98%);但 s=m_P*r_xy 与配平力矩 tau=m_P*g*r_y 都不含 r_z,
++# 变体 A 要测的偏心零损失。用户 09-24 明确接受。⚠️ 这些轮次不能与 0.5m 吊臂的
++# 历史 cohort 混算,也不支撑论文 kappa=5.3 的惯量叙事。
++GRIP_PRELOADED="${GRIP_PRELOADED:-false}"
++# 预装载的机腹吸附窗口:落地时 dz = drone_z - box_z ~ 0.2m,远低于抓取式的
++# h_min=0.35。窗口收在地面段,防止没吸上时在爬升途中补吸。
++GRIP_PRE_HMIN="${GRIP_PRE_HMIN:-0.05}"
++GRIP_PRE_HMAX="${GRIP_PRE_HMAX:-0.40}"
++# NMPC 接管高度。抓取式下是"安全高度"(1.5,先接管再下降到 grip_z_low)。
++# ★ 预装载下必须默认等于 grip_z_low=0.55:_lift_phase 的斜坡是从 grip_z_low
++#   起算的,接管高度若高于它,开抬升那一拍 z_hover 会从 approach_z 直接跳到
++#   grip_z_low —— 09-24 实测 pos_err 由 0.078 阶跃到 0.977,正落在 MHE 该收敛
++#   的窗口里。抓取式不受影响(那条路本来就要降到 grip_z_low 才 attach)。
++# ★ 预装载的正解(09-24 用户指出):载荷本来就是在 **PX4 位置控制段** 吸上的
++#   —— 172613 轮吸附时刻比 NMPC 接管早 12s。所以只要让 PX4 的悬停高度**落在
++#   夹爪吸附窗口内**,PX4 就会带着载荷起飞,NMPC 接管时载荷已在机上,
++#   descend/grasp 三段在 NMPC 侧被 grip_preloaded 整个跳过。
++#   181745 轮没吸上的原因就是悬停在 0.55 而 dz=0.52 落在窗口 [0.05,0.40] 之外。
++#   approach_z 与 z_low 必须相等,否则开抬升那一拍 z_hover 会跳(见下方注释)。
++GRIP_Z_LOW="${GRIP_Z_LOW:-0.55}"
++if [ "$GRIP_PRELOADED" = "true" ]; then
++  GRIP_Z_LOW="${GRIP_Z_LOW_PRE:-0.30}"          # dz = 0.30 - box_h/2 ≈ 0.27,窗口内
++  GRIP_APPROACH_Z="${GRIP_APPROACH_Z:-$GRIP_Z_LOW}"
++else
++  GRIP_APPROACH_Z="${GRIP_APPROACH_Z:-1.5}"
++fi
++# 预装载时 box 就在出生点 (0,0),抓取式在 (1.0,0)。不改的话吸上之后还要横飞
++# 一趟 1 m,纯属多余行程和多余暂态。
++if [ "$GRIP_PRELOADED" = "true" ]; then
++  GRIP_HOVER_X="${GRIP_HOVER_X:-0.0}"
++else
++  GRIP_HOVER_X="${GRIP_HOVER_X:-1.0}"
++fi
++if [ "$(python3 -c "print(abs(float('$GRIP_BOX_COM_Y')) > 1e-9)")" = "True" ]; then
++  if [ "${GRIP_NBOX:-1}" != "1" ]; then
++    echo "GRIP_BOX_COM_Y 与 GRIP_NBOX=4 不能同用(两者都重写 box 模型)" >&2; exit 1
++  fi
++  # 抓取门槛改由**配平力矩预算**导出,而不是 ECC_Y+容差。
++  # 悬停配平 tau = (m_P/m_T)*r*T,而 T=m_T*g,故 tau = m_P*g*r —— 与 m_T 无关。
++  # 取历史已验证的 77% 预算线(0.77*0.5=0.385 N·m),得 r_total <= 0.385/(m_P*g)。
++  # ✓ 该式在 m_P=0.3 给出 0.131,与经验门槛 0.13 精确吻合 —— 老常数的物理来源。
++  # 内部偏移已占掉 |COM_Y|,余额才是留给抓取偏差的,下限 0.03 防门槛收到吸不上。
++  R_XY=$(python3 -c "
++mp=float('$GRIP_PAYLOAD_KG'); com=abs(float('$GRIP_BOX_COM_Y'))
++budget=0.385/(mp*9.81)
++print(f'{max(0.03, budget-com):.3f}')")
++  echo "[offset-com] m_P=$GRIP_PAYLOAD_KG com_y=$GRIP_BOX_COM_Y" \
++       "trim=$(python3 -c "print(f'{float('$GRIP_PAYLOAD_KG')*9.81*abs(float('$GRIP_BOX_COM_Y')):.3f}')")N·m" \
++       "($(python3 -c "print(f'{float('$GRIP_PAYLOAD_KG')*9.81*abs(float('$GRIP_BOX_COM_Y'))/0.5*100:.0f}')")% of roll budget)," \
++       "grasp gate r_xy=$R_XY"
++fi
+ GRIP_ATTACH_DWELL_SEC="${GRIP_ATTACH_DWELL_SEC:-0.0}"
+ GRIP_ATTACH_RMIN="${GRIP_ATTACH_RMIN:-0.0}"
+ USE_MHE="${USE_MHE:-true}"
+@@ -274,7 +336,9 @@ bash "$WS/src/scripts/record_experiment_provenance.sh" \
+ # ②本轮 px4 stdout 只留前 PX4_LOG_CAP(默认 5M)排错用,之后全丢 /dev/null。
+ # 详见记忆 sitl-px4-log-disk-blowup。
+ PX4_LOG_CAP="${PX4_LOG_CAP:-5M}"
+-find "$RUNDIR" -maxdepth 1 -type f \( -name 'grip_px4_*.log' -o -name 'px4_*.log' \) -delete 2>/dev/null || true
++if [ "${PRESERVE_PX4_LOGS:-false}" != "true" ]; then
++  find "$RUNDIR" -maxdepth 1 -type f \( -name 'grip_px4_*.log' -o -name 'px4_*.log' \) -delete 2>/dev/null || true
++fi
+ 
+ echo "cleaning up leftover sim processes..."
+ for pat in "px4_sitl_default/bin/px4" "gz sim" "/gz " "ruby" "mavros/mavros_node" \
+@@ -321,6 +385,20 @@ sed -e "s|<mass>[0-9.]*</mass>|<mass>$GRIP_PAYLOAD_KG</mass>|" \
+ #   正落在 408 轮回归坠机率 15.5%~38.5% 档)。现在无条件写入,设计上限生效。
+ #   复现 09-16 之前的批次须显式 GRIP_ATTACH_TOL=0.05(0.10+0.05=0.15)。
+ #   同样被 YAML 盖掉的还有 h_min/h_max(实际 0.3/1.5,非 -p 的 0.35/0.60),未改。
++# 内部质心偏移(变体 A):重写 box 模型(盖掉上面 sed 的结果)。
++# 默认 GRIP_BOX_COM_Y=0 时**完全不走这条路**,world 与历史批次逐字相同。
++if [ "$(python3 -c "print(abs(float('$GRIP_BOX_COM_Y')) > 1e-9)")" = "True" ]; then
++  PRELOAD_ARG=""
++  [ "$GRIP_PRELOADED" = "true" ] && PRELOAD_ARG="--preloaded"
++  python3 "$WS/src/scripts/gripper/make_offset_com_world.py" "$WORLD_SRC" \
++      "$PX4_WORLDS/gripper_test.sdf" "$GRIP_PAYLOAD_KG" "$GRIP_BOX_COM_Y" \
++      $PRELOAD_ARG || exit 1
++fi
++if [ "$GRIP_PRELOADED" = "true" ] && \
++   [ "$(python3 -c "print(abs(float('$GRIP_BOX_COM_Y')) < 1e-9)")" = "True" ]; then
++  python3 "$WS/src/scripts/gripper/make_offset_com_world.py" "$WORLD_SRC" \
++      "$PX4_WORLDS/gripper_test.sdf" "$GRIP_PAYLOAD_KG" 0.0 --preloaded || exit 1
++fi
+ PROX_OVERRIDE_YAML="$RUNDIR/grip_prox_override_$STAMP.yaml"
+ {
+   echo "proximity_gripper_node:"
+@@ -328,6 +406,14 @@ PROX_OVERRIDE_YAML="$RUNDIR/grip_prox_override_$STAMP.yaml"
+   echo "    r_xy: $R_XY"
+   echo "    attach_dwell_sec: $(python3 -c "print(float('$GRIP_ATTACH_DWELL_SEC'))")"
+   echo "    attach_r_min: $(python3 -c "print(float('$GRIP_ATTACH_RMIN'))")"
++  # 变体 A:内部质心偏置必须与 world 里 <inertial><pose> 的值一致(同源同一个
++  # GRIP_BOX_COM_Y)。⚠️ 走 override YAML 而不是 -p:gripper_params.yaml 里按
++  # 节点名写的键优先级更高,-p 会被静默忽略(见 ros2-params-file-overrides-cli)。
++  echo "    box_com_xyz: [0.0, $(python3 -c "print(float('$GRIP_BOX_COM_Y'))"), 0.0]"
++  if [ "$GRIP_PRELOADED" = "true" ]; then
++    echo "    h_min: $(python3 -c "print(float('$GRIP_PRE_HMIN'))")"
++    echo "    h_max: $(python3 -c "print(float('$GRIP_PRE_HMAX'))")"
++  fi
+ } > "$PROX_OVERRIDE_YAML"
+ # 部分丢失实验(2026-09-15):GRIP_NBOX=4 时把单箱换成 4 个 GRIP_BOX_KG 小箱(2x2 排布),
+ # 并把 proximity 的目标列表扩成 4 个。默认不设 = 历史单箱世界逐字不变。
+@@ -380,6 +466,16 @@ nohup ros2 run offboard_test_acados proximity_gripper_node --ros-args \
+     $PROX_TARGETS_ARG "${PROX_SCHED_ARG[@]}" \
+     > "$RUNDIR/grip_proximity_$STAMP.log" 2>&1 &
+ 
++# 5b. 预装载:enable 必须在**起飞前**就为真,否则地面吸附窗口错过。
++# ⚠️ 只发有限次(20s),不能常发:计划内 drop 靠发 enable=false 释放,常发 true
++# 会立刻把载荷又吸回去。抓取式(默认)完全不走这条路,行为逐字不变。
++if [ "$GRIP_PRELOADED" = "true" ]; then
++  nohup ros2 topic pub -r 2 --times 40 /gripper/enable std_msgs/msg/Bool \
++      "{data: true}" > "$RUNDIR/grip_enable_$STAMP.log" 2>&1 &
++  echo "[preloaded] enable 已在起飞前发出(2Hz x 40 = 20s),地面吸附窗口 " \
++       "h=[$GRIP_PRE_HMIN,$GRIP_PRE_HMAX]"
++fi
++
+ # 6. (方案a)gripper enable 不再由脚本持续发——改由 NMPC 节点在
+ #    descend 到位后主动发一次(见 acados_nmpc_node.py 的 _descend_phase)。
+ #    这样 attach 时机由控制器决定,是受控可重复事件,不再靠飞机爬升途中
+@@ -397,8 +493,10 @@ nohup gz topic -e -t /gripper/state > "$RUNDIR/grip_state_$STAMP.log" 2>&1 &
+ # 7. acados NMPC(gripper_mode,两段式接近->attach->定时抬升)
+ NODE_LOG="$RUNDIR/grip_nmpc_$STAMP.log"
+ nohup ros2 run offboard_test_acados acados_nmpc_node --ros-args \
+-    -p gripper_mode:=true -p grip_x:=1.0 -p grip_y:=$GRIP_ECC_Y_D \
+-    -p grip_z_low:=0.55 -p grip_z_high:=$GRIP_Z_HIGH_D \
++    -p gripper_mode:=true -p grip_x:=$(_f2d "$GRIP_HOVER_X") -p grip_y:=$GRIP_ECC_Y_D \
++    -p grip_z_low:=$(_f2d "$GRIP_Z_LOW") -p grip_z_high:=$GRIP_Z_HIGH_D \
++    -p grip_preloaded:=$(_b "$GRIP_PRELOADED") \
++    -p grip_approach_z:=$(_f2d "$GRIP_APPROACH_Z") \
+     -p grip_mass_step_sec:=0.0 -p grip_payload_mass:=$GRIP_PAYLOAD_KG_D -p grip_arm_d:=0.47 \
+     -p grip_lift_after_sec:=$GRIP_LIFT_AFTER_D -p grip_lift_dur:=$GRIP_LIFT_DUR_D \
+     -p grip_lift_hold_enable:=$(_b "${GRIP_LIFT_HOLD:-false}") \
+@@ -418,6 +516,7 @@ nohup ros2 run offboard_test_acados acados_nmpc_node --ros-args \
+     -p grip_payload_envelope:=$GRIP_PAYLOAD_ENVELOPE_D \
+     -p attach_j_bootstrap_enable:=${ATTACH_J_BOOTSTRAP:-true} \
+     -p attach_j_bootstrap_on_liftoff:=${BOOTSTRAP_ON_LIFTOFF:-false} \
++    -p eccentricity_compensation:=${NMPC_ECC_COMP:-true} \
+     -p cxy_freeze_in_maneuver:=${NMPC_CXY_FREEZE:-false} \
+     -p cxy_freeze_window_sec:=${NMPC_CXY_FREEZE_WINDOW:-3.0} \
+     -p liftoff_detect_dz:=${LIFTOFF_DZ:-0.03} \
+diff --git a/scripts/gripper/run_sitl_gripper_viz.sh b/scripts/gripper/run_sitl_gripper_viz.sh
+index 0d14015..44b6cda 100755
+--- a/scripts/gripper/run_sitl_gripper_viz.sh
++++ b/scripts/gripper/run_sitl_gripper_viz.sh
+@@ -213,6 +213,16 @@ BOX_I=$(python3 -c "print(f'{$PAYLOAD_KG * 0.00375:.6f}')")
+ # proximity 侧有节流日志 + 8s 未 attach 的 WARN。
+ GRIP_ATTACH_TOL="${GRIP_ATTACH_TOL:-0.03}"
+ R_XY=$(python3 -c "print(f'{$ECC_Y + $GRIP_ATTACH_TOL:.3f}')")
++# 内部质心偏移(变体 A, 2026-09-24)。与 run_gripper_headless.sh 同一套语义与公式,
++# 注释见那边。默认 0 时本脚本行为逐字不变。
++GRIP_BOX_COM_Y="${GRIP_BOX_COM_Y:-0.0}"
++OFFSET_COM=$(python3 -c "print(abs(float('$GRIP_BOX_COM_Y')) > 1e-9)")
++if [ "$OFFSET_COM" = "True" ]; then
++  R_XY=$(python3 -c "
++mp=float('$PAYLOAD_KG'); com=abs(float('$GRIP_BOX_COM_Y'))
++print(f'{max(0.03, 0.385/(mp*9.81)-com):.3f}')")
++  echo "[offset-com] com_y=$GRIP_BOX_COM_Y grasp gate r_xy=$R_XY"
++fi
+ 
+ if [ "$METHOD" = thetastar ]; then
+   THETA="[-4.8038,-1.2080,0.4930,-0.9602,0.9875]"; CALPHA="0.9875"
+@@ -274,6 +284,21 @@ sed -e "s|<mass>[0-9.]*</mass>|<mass>$PAYLOAD_KG</mass>|" \
+     -e "s|<iyy>[0-9.]*</iyy>|<iyy>$BOX_I</iyy>|" \
+     -e "s|<izz>[0-9.]*</izz>|<izz>$BOX_I</izz>|" \
+     "$WORLD_SRC" > "$PX4_WORLDS/gripper_test.sdf"
++PROX_COM_ARG=""
++if [ "$OFFSET_COM" = "True" ]; then
++  python3 "$WS/src/scripts/gripper/make_offset_com_world.py" "$WORLD_SRC" \
++      "$PX4_WORLDS/gripper_test.sdf" "$PAYLOAD_KG" "$GRIP_BOX_COM_Y" || exit 1
++  # r_xy 与 box_com_xyz 都必须压过 gripper_params.yaml,而按节点名写的 YAML 键
++  # 优先级高于 -p(ros2-params-file-overrides-cli),所以走第二个 --params-file。
++  PROX_COM_YAML="$LOGDIR/gviz_prox_com_$TS.yaml"
++  {
++    echo "proximity_gripper_node:"
++    echo "  ros__parameters:"
++    echo "    r_xy: $R_XY"
++    echo "    box_com_xyz: [0.0, $(python3 -c "print(float('$GRIP_BOX_COM_Y'))"), 0.0]"
++  } > "$PROX_COM_YAML"
++  PROX_COM_ARG="--params-file '$PROX_COM_YAML'"
++fi
+ echo "world -> box mass=$PAYLOAD_KG I=$BOX_I ; method=$METHOD ecc=$ECC_Y drop_after=$DROP_AFTER dynamic=$DYNAMIC"
+ 
+ # 日志终端的窗口位置(2026-08-23):这 4 个 gnome-terminal 是**后起**的,z-order 必然
+@@ -362,7 +387,7 @@ gnome-terminal --title="Drone Model + Rotors" "${TG3[@]}" -- bash -c \
+ nohup bash -c "source /opt/ros/jazzy/setup.bash && source '$WS/install/setup.bash' && \
+   export PYTHONUNBUFFERED=1 && \
+   ros2 run offboard_test_acados proximity_gripper_node --ros-args \
+-    --params-file '$PKG/config/gripper/gripper_params.yaml' \
++    --params-file '$PKG/config/gripper/gripper_params.yaml' $PROX_COM_ARG \
+     -p drone_model:=x500_0 -p r_xy:=$R_XY -p h_min:=0.35 -p h_max:=0.60" \
+   > "$LOGDIR/gviz_proximity_$TS.log" 2>&1 &
+ 

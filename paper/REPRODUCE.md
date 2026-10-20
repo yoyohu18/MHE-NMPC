@@ -416,6 +416,13 @@ MHE_C_XY_EST=true
 这是待解耦的软件配置缺陷：后续应给统一 detector 独立开关，或在 eventless profile
 中无条件执行，同时对“eventless + detector disabled”的矛盾启动配置直接报错。
 
+**2026-10-20 更新**：`run_gripper_headless.sh` 的 `MHE_C_XY_EST` 默认已改为 `true`
+（viz 入口本来就固定为 true），启动摘要打印 `ecc: ... MHE_moment(release gate)=...`，
+continuous 模式下显式关闭时 stderr 告警。节点参数声明的默认值仍为 `false`，耦合本身
+未解。同日 NMPC 侧偏心补偿 `eccentricity_compensation` 默认改为 `false`（依据
+`data/ecc_ablation_20260924_202511/`），**本文所有冻结批次均在补偿开启下运行，复现须
+显式 `NMPC_ECC_COMP=true`**。
+
 **代码口径**：审计结果对应提交 `078b054`。其中
 `src/offboard_test_acados/offboard_test_acados/payload_estimate.py` 的
 `release_decision()` 是在线节点和离线回放共同调用的唯一判决函数。论文不能把

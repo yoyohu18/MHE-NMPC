@@ -391,6 +391,7 @@ nohup bash -c "source /opt/ros/jazzy/setup.bash && source '$WS/install/setup.bas
     -p drop_publish_mass_event:=$DROP_PUB_EVENT \
     -p geom_source:=estimate -p grip_payload_envelope:=$PAYLOAD_ENVELOPE_D \
     -p attach_j_bootstrap_enable:=${ATTACH_J_BOOTSTRAP:-true} \
+    -p eccentricity_compensation:=${NMPC_ECC_COMP:-false} \
     -p cxy_freeze_in_maneuver:=${NMPC_CXY_FREEZE:-false} \
     -p cxy_freeze_window_sec:=${NMPC_CXY_FREEZE_WINDOW:-3.0} \
     -p omega_scale_enable:=${NMPC_OMEGA_SCALE:-true} -p omega_scale_source:=djest \
