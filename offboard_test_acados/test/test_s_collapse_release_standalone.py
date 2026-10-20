@@ -78,6 +78,9 @@ class _Stub:
         self._c_xy_mass_armed = False
         self._c_xy_mass_high = 0
         self._c_xy_mass_low = 0
+        # 清除逻辑基线:默认主线 P(不抑制 eventless 放行)。release_baseline
+        # 在 _eventless_release_suppressed 里有 getattr 兜底,这个位没有,必须显式给。
+        self.release_arm_on_command = False
         # drop 侧塌陷判据(被测对象)
         self.s_release_ratio = ratio
         self.s_release_persist = persist

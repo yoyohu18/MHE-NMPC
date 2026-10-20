@@ -28,7 +28,9 @@ def test_off_drop_silent():
     s = _S(resid_confirm_enable=False, resid_release_geom=True)
     _step(s, 23.2, 17.6)                      # -5.6N,远超 1.5N 阈值
     assert not s.scheduler.notified, '关闭后不应降权'
-    assert not hasattr(s, '_residual_drop_evidence_until'), '关闭后不应投释放票'
+    # 原判法是 not hasattr(...):它假设 _S 不预设该字段,而产品初值其实是
+    # -1.0(mhe_node.py:846)。_S 对齐产品补上初值后 hasattr 恒真,故改数值判据。
+    assert s._residual_drop_evidence_until < 0.0, '关闭后不应投释放票'
     assert s._resid_baseline is None, '关闭后慢基线不应被播种'
     assert not any('self-detected' in m for m in s.logs)
     print('[1] 关:DROP 台阶零降权/零投票 OK')

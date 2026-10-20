@@ -68,6 +68,9 @@ class _Stub:
 _gate = mn.MHENode._pre_offboard_gate_ok
 _conv = mn.MHENode._update_pre_offboard_convergence
 _pub = mn.MHENode._mass_publish_allowed
+# 窗口平衡种子(2026-09-15 默认开):stub 没有 u_buf/y_buf,真方法首行即
+# 返回 None,调用方照常回退到瞬时 T/g —— 正是本文件要测的兜底路径。
+_Stub._window_balance_mass = mn.MHENode._window_balance_mass
 
 
 def test_gate_rejects_on_ground():

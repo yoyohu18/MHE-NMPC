@@ -32,6 +32,9 @@ class _S:
         self._resid_settled = False
         self._resid_stable = 0
         self.frames = 0
+        # 残差是**边沿**事件,检出后作为释放证据保持一段时间(产品默认 3.0s)。
+        self.residual_evidence_hold_sec = 3.0
+        self._residual_drop_evidence_until = -1.0   # 产品初值,见 mhe_node.py:846
         self.scheduler = _Sched()
         self._payload_attached = True
         # 注:MHE 侧棘轮 _m_p_hat_ratchet 已随 2026-08-26 去先验改造移除,
@@ -96,6 +99,19 @@ class _S:
             def warn(self, m): stub.logs.append(m)
         return _L()
 
+    def get_clock(self):
+        """证据时效要用到墙钟;跟着 frames 走,与测试推进帧的方式一致。"""
+        stub = self
+        class _Now:
+            @property
+            def nanoseconds(self):
+                return int(stub.frames * mhe_p.dt * 1e9)
+        class _Clock:
+            @staticmethod
+            def now():
+                return _Now()
+        return _Clock()
+
 
 _det = mn.MHENode._residual_detect
 
@@ -107,17 +123,24 @@ def _warm(s, T=23.2, n=8):
     assert s._resid_settled, '基线应已预热'
 
 
-def test_drop_releases_geometry():
-    """T_phys 台阶式下降(23.2→20.1,载荷没了)→ 自检测确认 → 释放几何。"""
+def test_drop_casts_release_vote():
+    """T_phys 台阶式下降(23.2→20.1,载荷没了)→ 自检测确认 → **投出释放证据**。
+
+    2026-09-05 起残差不再单通道释放几何,只作为"动态证据"投进
+    release_decision(见 mhe_node 该分支注释:单通道裸奔正是上一版的问题)。
+    所以这里断言的是证据被投出、而几何**保持不动**——后者原本是本用例的
+    失败条件,现在是它要守的规则。真正的释放由 release_decision 三源合议。
+    """
     s = _S(); _warm(s)
     for _ in range(4):
         s.thrust_phys = 20.1; s.frames += 1; _det(s)
     assert s.scheduler.notified, '应当自检测到事件'
-    assert s._payload_attached is False, '未释放 _payload_attached'
-    assert s.attach_offset is None, '未丢弃 attach 几何'
+    assert s._residual_drop_evidence_until > 0.0, '未投出释放证据'
+    assert s._payload_attached is True, '残差不得单通道释放几何(2026-09-05)'
+    assert s.attach_offset is not None, '几何须保持到合议放行'
     assert any('DROP' in m for m in s.logs), '日志未标出方向'
-    assert any('自主释放载荷几何' in m for m in s.logs)
-    print('[1] 推力下降 → 自主释放几何 OK')
+    assert any('作为释放证据保持' in m for m in s.logs)
+    print('[1] 推力下降 → 投出释放证据、几何不动 OK')
 
 
 def test_attach_does_not_release():
@@ -141,7 +164,10 @@ def test_switch_off_keeps_legacy():
         s.thrust_phys = 20.1; s.frames += 1; _det(s)
     assert s.scheduler.notified, '降权链路仍应触发'
     assert s._payload_attached is True, '开关关闭时不该动几何'
-    print('[3] 开关关闭 = legacy(只降权) OK')
+    # _payload_attached 自 2026-09-05 起两档都保持 True,单靠它区分不了开关;
+    # 能区分的是"有没有投证据"。
+    assert s._residual_drop_evidence_until < 0.0, '开关关闭时不该投释放证据'
+    print('[3] 开关关闭 = legacy(只降权、不投票) OK')
 
 
 def test_no_release_when_already_empty():
@@ -151,7 +177,10 @@ def test_no_release_when_already_empty():
     _warm(s, T=20.3)
     for _ in range(4):
         s.thrust_phys = 17.0; s.frames += 1; _det(s)
-    assert not any('自主释放载荷几何' in m for m in s.logs), '空载不该再释放一次'
+    # 原断言找的是 '自主释放载荷几何' 日志,该文本已随 2026-09-05 改造去掉,
+    # 恒真 = 守不住任何东西。空载时 _load_armed=False,分支进不去,
+    # 判据换成"没有投出证据"。
+    assert s._residual_drop_evidence_until < 0.0, '空载不该再投一次释放证据'
     print('[4] 空载幂等 OK')
 
 

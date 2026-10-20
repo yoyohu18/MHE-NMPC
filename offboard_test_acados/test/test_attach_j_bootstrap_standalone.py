@@ -57,6 +57,13 @@ class _Stub:
         self.tau_lumped_enable = False
         self.gripper_mode = False
         self.drop_pending_confirmation = False
+        # omega_scale 的 dJ 下界(2026-09-22 为 L1 臂补的内环补偿):主线默认
+        # 0.0 = 逐位 no-op,本文件测的就是主线路径。
+        self._omega_scale_dj_floor = 0.0
+        # c_xy 冻结默认关(2026-09-17 翻回),_apply_cxy_freeze 首行即直通。
+        self.cxy_freeze_in_maneuver = False
+        # _accept_empty 里唯一没有 getattr 兜底的位,产品默认 False(见 624 行)。
+        self.payload_unresolved = False
 
     def get_logger(self):
         class _Logger:
@@ -82,6 +89,16 @@ _update = an.AcadosNMPCNode._update_continuous_payload_model
 _Stub._payload_estimate_is_fresh = an.AcadosNMPCNode._payload_estimate_is_fresh
 _confirm_empty = an.AcadosNMPCNode._confirm_no_payload_if_persistent
 _update_omega = an.AcadosNMPCNode._update_omega_scale
+# 非被测对象,但都在被测路径上被调用,绑真方法即可:
+# _apply_cxy_freeze 在 cxy_freeze_in_maneuver=False 时首行直通;
+# _check_drop_unresolved 首行 getattr('grip_drop_pending', False) 后即 return。
+_Stub._apply_cxy_freeze = an.AcadosNMPCNode._apply_cxy_freeze
+_Stub._check_drop_unresolved = an.AcadosNMPCNode._check_drop_unresolved
+# 清除逻辑门控:内部 getattr(release_baseline,'P') 兜底 → 主线恒 True。
+_Stub._confidence_accept_allowed = an.AcadosNMPCNode._confidence_accept_allowed
+# accept 路径终点:本文件 test_unhealthy_frame_breaks_empty_confidence_hold
+# 的第二段就是要走到这里 latch 空载,必须是真方法。
+_Stub._accept_empty = an.AcadosNMPCNode._accept_empty
 
 
 def test_bootstrap_uses_03kg_reduced_mass_inertia_only():
